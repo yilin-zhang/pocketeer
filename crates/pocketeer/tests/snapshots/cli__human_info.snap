@@ -1,0 +1,13 @@
+---
+source: crates/pocketeer/tests/cli.rs
+expression: "text.replace(&age, \"[age]\")"
+---
+spiritualized.GBA
+  Installed   1.2.0  ([fixtures]/sd-basic/Cores/spiritualized.GBA)
+  Platforms   gba
+  Repository  https://github.com/spiritualized1997/openFPGA-GBA
+  Latest      1.3.0  (2024-02-01)  ← update available
+  Needs files gba_bios.bin
+  Releases    1.3.0, 1.2.0
+
+Inventory: from cache, [age] old

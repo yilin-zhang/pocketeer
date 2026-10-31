@@ -1,0 +1,7 @@
+{
+  "data": [
+    { "id": "arduboy", "category": "Handheld", "name": "Arduboy", "manufacturer": "Arduboy Inc.", "year": 2016 },
+    { "id": "gba", "category": "Handheld", "name": "Game Boy Advance", "manufacturer": "Nintendo", "year": 2001 },
+    { "id": "jtbeta", "category": "Arcade", "name": "Jotego Beta", "manufacturer": "Jotego", "year": 2024 }
+  ]
+}

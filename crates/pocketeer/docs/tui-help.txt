@@ -1,0 +1,47 @@
+Global
+  Tab / Shift-Tab, 1-4   switch tabs
+  j/k, arrows, PgUp/PgDn  move
+  /                        type to filter the list (Enter/Esc to stop typing; Esc again clears it)
+  l                        cycle what the list shows (or click a segment in the filter bar)
+  r                        reload everything (card, inventory, library)
+  ?                        this help
+  q, Ctrl-C                quit
+  mouse                    click tabs, rows, filter segments and buttons; wheel scrolls;
+                           drag the border between two panes to resize them
+
+Cores   (installed cores and the whole inventory in one list)
+  Enter / i / u   install the selected core, or update it to the latest release
+  U               update every installed core that has an update
+  x               remove the selected core (Cores/, Presets/, Settings/ are deleted)
+
+BIOS   (every file the installed cores declare, with its status)
+  p   move files you dropped at the SD card root into the folders cores expect
+
+Games   (the library and the card in one list; WHERE says which)
+  n     create the library (when there is none yet)
+  a     import ROMs from this computer: a folder, or one ROM / zip (→ platform → optional DAT)
+  i/I   import the selected card-only ROM / every card-only ROM into the library
+  e     rename: file, game, card copy and its saves move together
+  t     rename games to the standard (No-Intro) names they match; imports offer this too
+  x     library game → .trash/ inside the library;  card-only ROM → deleted from the card
+  f/F   fetch the cover for this game / for its whole platform
+  C     fetch every missing cover (missing covers are also fetched on start)
+  D     register this card as a device / choose what it subscribes to
+  S     sync this card from the library (ROMs + cores it subscribes to)
+  V     sync save files and save states (newest wins, nothing is lost)
+
+Device
+  D   register this card / choose its subscriptions     S, V  sync ROMs+cores / saves
+  c   delete macOS junk (._* files, .DS_Store, __MACOSX)
+
+Every change shows its plan first with Apply / Cancel buttons: click one, or
+y / Enter applies, n / Esc cancels, ←/→ moves the focus. In checklists Space
+toggles one item and a toggles all; in path prompts matching entries are listed
+as you type: ↓ picks one, Tab completes, Enter takes the pick (or submits when
+nothing is picked).
+
+No SD card? The Games tab still manages the library; Cores, BIOS and Device
+wait for one. A card that is plugged in (or pulled) is noticed without pressing
+r, and the screen reloads by itself when the card or the library changes
+outside pocketeer. The library is the backup: what pocketeer removes from the
+card is deleted.

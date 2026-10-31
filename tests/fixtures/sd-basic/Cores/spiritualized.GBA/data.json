@@ -1,0 +1,10 @@
+{
+  "data": {
+    "magic": "APF_VER_1",
+    "data_slots": [
+      { "name": "BIOS", "id": 1, "required": true, "parameters": "0x1", "filename": "gba_bios.bin", "md5": "600fe3d2f68c966cbcd93cdd96390822", "extensions": ["bin"] },
+      { "name": "ROM", "id": 2, "required": true, "parameters": "0x100", "extensions": ["gba"] },
+      { "name": "Save", "id": 3, "required": false, "parameters": "0x102", "filename": "save.sav", "nonvolatile": true }
+    ]
+  }
+}

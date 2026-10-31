@@ -1,0 +1,25 @@
+---
+source: crates/pocketeer/tests/cli.rs
+expression: json_of(&out)
+---
+{
+  "data": {
+    "broken_cores": 2,
+    "disk": {
+      "available_bytes": "[bytes]",
+      "total_bytes": "[bytes]"
+    },
+    "firmware": {
+      "build_date": "20240501_120000",
+      "byte": 34,
+      "name": "2.2",
+      "version": "2.2"
+    },
+    "installed_cores": 2,
+    "product": "Analogue Pocket",
+    "root": "[root]",
+    "warnings": []
+  },
+  "ok": true,
+  "schema_version": 1
+}

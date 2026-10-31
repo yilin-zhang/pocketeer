@@ -1,0 +1,11 @@
+---
+source: crates/pocketeer/tests/install_cli.rs
+expression: stdout
+---
+spiritualized.GBA: 1.2.0 → 1.3.0
+  3 file(s), 212 B (2 new, 1 replaced), 1 skipped
+  ~ Cores/spiritualized.GBA/core.json
+  + Cores/spiritualized.GBA/gba.rev
+  + Platforms/gba.json
+
+Dry run: nothing was changed.

@@ -1,0 +1,31 @@
+[package]
+name = "pocketeer"
+description = "Manage cores and ROMs on an Analogue Pocket SD card, from a CLI or a TUI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "pocketeer"
+path = "src/main.rs"
+
+[dependencies]
+walkdir.workspace = true
+pocketeer-core.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+ratatui-image.workspace = true
+image.workspace = true
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+mockito.workspace = true
+insta.workspace = true
+tempfile.workspace = true
+zip.workspace = true
+serde_json.workspace = true

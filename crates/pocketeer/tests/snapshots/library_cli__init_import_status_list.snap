@@ -1,0 +1,9 @@
+---
+source: crates/pocketeer/tests/library_cli.rs
+expression: text
+---
+Library    [lib]
+Contents   4 game(s), 4 ROM(s), 67 B
+
+PLATFORM  NAME  GAMES  VERIFIED  SIZE
+fkh             4      3/4       67 B

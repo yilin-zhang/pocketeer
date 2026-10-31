@@ -1,0 +1,20 @@
+{
+  "core": {
+    "magic": "APF_VER_1",
+    "metadata": {
+      "platform_ids": ["arduboy"],
+      "shortname": "Arduboy",
+      "description": "A small, portable Arduino console.",
+      "author": "agg23",
+      "url": "https://github.com/agg23/analogue-arduboy/",
+      "version": "0.9.0",
+      "date_release": "2022-09-03"
+    },
+    "framework": {
+      "target_product": "Analogue Pocket",
+      "version_required": "1.1",
+      "sleep_supported": false
+    },
+    "cores": [{ "name": "default", "id": 0, "filename": "arduboy.rev" }]
+  }
+}

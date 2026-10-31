@@ -1,0 +1,1 @@
+{ "instance": { "magic": "APF_VER_1", "data_path": "games", "data_slots": [ { "id": 1, "filename": "game1.hex" } ] } }

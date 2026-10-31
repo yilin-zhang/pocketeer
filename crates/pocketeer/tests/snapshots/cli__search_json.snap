@@ -1,0 +1,30 @@
+---
+source: crates/pocketeer/tests/cli.rs
+expression: json_of(&out)
+---
+{
+  "data": {
+    "hits": [
+      {
+        "author": "jotego",
+        "date_release": "2024-01-01",
+        "id": "jotego.jtbeta",
+        "installed": false,
+        "platform_ids": [
+          "jtbeta"
+        ],
+        "repo_url": "https://github.com/jotego/jtbin",
+        "requires_license": true,
+        "shortname": "jtbeta",
+        "version": "20240101"
+      }
+    ],
+    "inventory": {
+      "age_secs": "[age]",
+      "available": true,
+      "source": "cache"
+    }
+  },
+  "ok": true,
+  "schema_version": 1
+}

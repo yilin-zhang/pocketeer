@@ -1,0 +1,10 @@
+{
+  "product": "Analogue Pocket",
+  "firmware": {
+    "runtime": {
+      "name": "2.2",
+      "byte": 34,
+      "build_date": "20240501_120000"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+﻿{
+  "core": {
+    "magic": "APF_VER_1",
+    "metadata": {
+      "platform_ids": ["gba"],
+      "shortname": "GBA",
+      "author": "spiritualized",
+      "version": "1.2.0"
+    },
+    "cores": [{ "name": "default", "id": 0, "filename": "gba.rev" }]
+  }
+}

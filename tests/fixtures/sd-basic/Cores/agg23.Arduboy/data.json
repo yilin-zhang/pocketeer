@@ -1,0 +1,9 @@
+{
+  "data": {
+    "magic": "APF_VER_1",
+    "data_slots": [
+      { "name": "Game", "id": 0, "required": true, "parameters": "0x113", "extensions": ["json"] },
+      { "name": "HEX", "id": 1, "required": true, "parameters": "0x101", "extensions": ["hex"] }
+    ]
+  }
+}

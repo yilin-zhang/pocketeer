@@ -1,0 +1,99 @@
+---
+source: crates/pocketeer/tests/cli.rs
+expression: json_of(&out)
+---
+{
+  "data": {
+    "id": "spiritualized.GBA",
+    "installed": {
+      "author": "spiritualized",
+      "id": "spiritualized.GBA",
+      "path": "[path]",
+      "platform_ids": [
+        "gba"
+      ],
+      "shortname": "GBA",
+      "version": "1.2.0"
+    },
+    "inventory": {
+      "id": "spiritualized.GBA",
+      "releases": [
+        {
+          "core": {
+            "framework": {
+              "sleep_supported": true,
+              "target_product": null,
+              "version_required": "1.1"
+            },
+            "metadata": {
+              "date_release": "2024-02-01",
+              "platform_ids": [
+                "gba"
+              ],
+              "version": "1.3.0"
+            }
+          },
+          "data": {
+            "data_slots": [
+              {
+                "extensions": [
+                  "bin"
+                ],
+                "filename": "gba_bios.bin",
+                "name": "BIOS",
+                "parameters": {
+                  "core_specific_file": false,
+                  "instance_json": false,
+                  "platform_index": 0
+                }
+              },
+              {
+                "extensions": [
+                  "gba"
+                ],
+                "filename": null,
+                "name": "ROM",
+                "parameters": {
+                  "core_specific_file": false,
+                  "instance_json": false,
+                  "platform_index": 0
+                }
+              }
+            ]
+          },
+          "download_url": "https://github.com/spiritualized1997/openFPGA-GBA/releases/download/v1.3.0/spiritualized.GBA_1.3.0.zip",
+          "requires_license": false
+        },
+        {
+          "core": {
+            "framework": null,
+            "metadata": {
+              "date_release": "2023-06-01",
+              "platform_ids": [
+                "gba"
+              ],
+              "version": "1.2.0"
+            }
+          },
+          "data": null,
+          "download_url": "https://github.com/spiritualized1997/openFPGA-GBA/releases/download/v1.2.0/spiritualized.GBA_1.2.0.zip",
+          "requires_license": false
+        }
+      ],
+      "repository": {
+        "name": "openFPGA-GBA",
+        "owner": "spiritualized1997",
+        "platform": "github"
+      }
+    },
+    "inventory_status": {
+      "age_secs": "[age]",
+      "available": true,
+      "source": "cache"
+    },
+    "repo_url": "https://github.com/spiritualized1997/openFPGA-GBA",
+    "update_available": true
+  },
+  "ok": true,
+  "schema_version": 1
+}

@@ -1,0 +1,13 @@
+---
+source: crates/pocketeer/tests/cli.rs
+expression: "text_of(&out).replace(&regex_lite_age(&text_of(&out)), \"[age]\")"
+---
+ID                 INSTALLED  LATEST  STATUS
+agg23.Arduboy      0.9.0      0.9.0   up to date
+spiritualized.GBA  1.2.0      1.3.0   update available
+
+Broken cores:
+  broken.Core  [PARSE_ERROR] failed to parse [fixtures]/sd-basic/Cores/broken.Core/core.json: EOF while parsing a value at line 1 column 24
+  empty.Core  [CORE_JSON_MISSING] core folder has no core.json: [fixtures]/sd-basic/Cores/empty.Core
+
+Inventory: from cache, [age] old
