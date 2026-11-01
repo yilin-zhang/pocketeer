@@ -133,10 +133,20 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(0)
         .max(title.chars().count() + 2)
         .max(hint.chars().count()) as u16;
-    let width = (longest + 4).clamp(44, area.width.saturating_sub(4).max(44));
+    let width = longest
+        .saturating_add(4)
+        .max(44)
+        .min(area.width.saturating_sub(4).max(1));
+    let text: Vec<Line> = lines.iter().cloned().map(Line::from).collect();
+    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+    let body_width = width.saturating_sub(4);
+    let total_lines = paragraph.line_count(body_width).min(u16::MAX as usize) as u16;
     // body + gap (+ hint) + buttons + borders
     let extra = if hint.is_empty() { 4 } else { 5 };
-    let height = (lines.len() as u16 + extra).clamp(6, area.height.saturating_sub(2).max(6));
+    let height = total_lines
+        .saturating_add(extra)
+        .max(6)
+        .min(area.height.saturating_sub(2).max(1));
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -161,21 +171,30 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
     ])
     .areas(inner);
 
-    let total_lines = lines.len() as u16;
     // Prompts keep their input line and suggestions in view; the rest
     // scroll from the top.
-    let scroll = if matches!(modal, Modal::Input { .. }) {
+    let selected_item = match modal {
+        Modal::Pick { selected, .. } => Some(*selected),
+        Modal::Toggle { cursor, .. } => Some(*cursor),
+        _ => None,
+    };
+    let scroll = if let Some(selected) = selected_item {
+        let rows = |line: &String| {
+            Paragraph::new(line.as_str())
+                .wrap(Wrap { trim: false })
+                .line_count(body.width)
+        };
+        let start: usize = lines.iter().take(selected).map(rows).sum();
+        let end = start + lines.get(selected).map_or(0, rows);
+        end.saturating_sub(body.height as usize)
+            .min(start)
+            .min(u16::MAX as usize) as u16
+    } else if matches!(modal, Modal::Input { .. }) {
         total_lines.saturating_sub(body.height)
     } else {
         scroll.min(total_lines.saturating_sub(body.height))
     };
-    let text: Vec<Line> = lines.into_iter().map(Line::from).collect();
-    frame.render_widget(
-        Paragraph::new(text)
-            .scroll((scroll, 0))
-            .wrap(Wrap { trim: false }),
-        body,
-    );
+    frame.render_widget(paragraph.scroll((scroll, 0)), body);
     if total_lines > body.height {
         let mut state = ScrollbarState::new(total_lines.saturating_sub(body.height) as usize)
             .position(scroll as usize);

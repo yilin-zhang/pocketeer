@@ -1,4 +1,4 @@
-//! Games tab actions: library, device, covers, rename, remove, import.
+//! Games tab actions: library, card transfers, covers, rename and removal.
 
 use pocketeer_core::{
     install,
@@ -6,7 +6,7 @@ use pocketeer_core::{
 };
 
 use super::*;
-use crate::{cli::DeviceImportArgs, commands::library as library_cmd};
+use crate::{cli::CardImportArgs, commands::library as library_cmd};
 
 impl App {
     /// `n`: create the library at the configured path, then reload.
@@ -48,75 +48,17 @@ impl App {
         );
     }
 
-    /// `D`: register the card, or edit its subscriptions.
-    pub(super) fn device_dialog(&mut self) {
+    pub(super) fn copy_selected(&mut self) {
         if self.card().is_none() {
             return;
         }
-        let Some(view) = self.library_view() else {
-            self.no_library();
+        let Some(game) = self.selected_game() else {
+            self.notice("Select a local game to copy.");
             return;
         };
-        match view.device.clone() {
-            None => {
-                self.input(
-                    "Register this card",
-                    vec![
-                        "Name for this card, e.g. \"Pocket A\". A marker file on the card".into(),
-                        "makes it recognisable wherever it's mounted.".into(),
-                    ],
-                    String::new(),
-                    InputKind::DeviceName,
-                );
-            }
-            Some(d) => {
-                let platforms = view.platforms.clone();
-                let cores: Vec<String> = self
-                    .card_view()
-                    .map(|s| s.cores.cores.iter().map(|c| c.core.id.clone()).collect())
-                    .unwrap_or_default();
-                let mut items: Vec<(String, bool)> = platforms
-                    .iter()
-                    .map(|p| (format!("platform  {p}"), d.platforms.contains(p)))
-                    .collect();
-                items.extend(
-                    cores
-                        .iter()
-                        .map(|c| (format!("core      {c}"), d.cores.contains(c))),
-                );
-                if items.is_empty() {
-                    self.notice(
-                        "Nothing to subscribe to yet: import ROMs (a) or install cores first.",
-                    );
-                    return;
-                }
-                self.modal = Some(Modal::Toggle {
-                    title: format!("{}: what this card gets on sync", d.name),
-                    items,
-                    cursor: 0,
-                    kind: ToggleKind::Subscribe {
-                        device_id: d.id,
-                        platforms,
-                        cores,
-                    },
-                });
-            }
-        }
-    }
-
-    pub(super) fn plan_device_sync(&mut self) {
-        if self.card().is_none() {
-            return;
-        }
-        let Some(device) = self.library_view().and_then(|l| l.device.clone()) else {
-            self.device_dialog();
-            return;
-        };
-        if device.platforms.is_empty() && device.cores.is_empty() {
-            self.device_dialog();
-            return;
-        }
-        self.submit("Planning device sync", Job::Plan(Request::DeviceSync));
+        let platform = Some(game.game.platform.clone());
+        let roms = game.game.roms.iter().map(|r| r.id.to_string()).collect();
+        self.submit("Planning copy", Job::Plan(Request::Copy { platform, roms }));
     }
 
     pub(super) fn plan_saves(&mut self) {
@@ -218,10 +160,14 @@ impl App {
     }
 
     pub(super) fn rename_selected(&mut self) {
+        if let Some(rom) = self.selected_orphan().cloned() {
+            self.choose_rename(RenameChoice::CardCustom {
+                path: rom.rel_path,
+                name: rom.name,
+            });
+            return;
+        }
         let Some(game) = self.selected_game() else {
-            if self.selected_orphan().is_some() {
-                self.notice("Not in the library yet: import it first (i), then rename it.");
-            }
             return;
         };
         let Some(rom) = game.game.roms.first() else {
@@ -238,23 +184,26 @@ impl App {
             });
             return;
         }
-        self.rename_prompt(platform, rom.name.clone(), true);
+        self.rename_options(platform, rom.name.clone());
     }
 
     pub(super) fn rename_prompt(&mut self, platform: String, name: String, single: bool) {
-        self.input(format!("Rename {name}"), vec![
+        self.input(
+            format!("Rename {name}"),
+            vec![
                 "New file name; leave the extension out to keep it.".into(),
                 if single {
-                    "The game name, the library file, and the card's copy with its saves all follow."
-                        .into()
+                    "The local game title and library file follow.".into()
                 } else {
-                    "The library file and the card's copy with its saves follow; the game keeps its name."
-                        .into()
+                    "The local library file changes; the multi-ROM game keeps its title.".into()
                 },
-            ], pocketeer_core::roms::rename::stem(&name).to_string(), InputKind::Rename {
+            ],
+            pocketeer_core::roms::rename::stem(&name).to_string(),
+            InputKind::Rename {
                 platform,
                 spec: name,
-            });
+            },
+        );
     }
 
     /// `x` on the Games tab: library game → .trash; card-only ROM → deleted from the card.
@@ -265,8 +214,8 @@ impl App {
                 vec![
                     format!("  - {}  ({})", o.rel_path.display(), human::bytes(o.size)),
                     String::new(),
-                    "This ROM isn't in the library, so nothing keeps a copy: the file is".into(),
-                    "deleted from the card. Import it first (i) if you want to keep it.".into(),
+                    "This deletes the card file without creating a backup.".into(),
+                    "Import it first (i) if you want to keep a local copy.".into(),
                 ],
                 Pending::Files {
                     label: format!("delete {}", o.name),
@@ -302,7 +251,7 @@ impl App {
         if self.card().is_none() || self.lib_ctx().is_none() {
             return;
         }
-        let card_roms: Vec<CardOnlyRom> = self
+        let card_roms: Vec<CardRom> = self
             .card_view()
             .map(|s| s.card_roms.clone())
             .unwrap_or_default();
@@ -311,12 +260,12 @@ impl App {
             return;
         }
         let args = if all {
-            DeviceImportArgs::default()
+            CardImportArgs::default()
         } else {
             match self.selected_orphan() {
-                Some(o) => DeviceImportArgs {
+                Some(o) => CardImportArgs {
                     platform: Some(o.platform.clone()),
-                    names: vec![o.name.clone()],
+                    paths: vec![o.rel_path.clone()],
                     ..Default::default()
                 },
                 None => {
@@ -328,5 +277,121 @@ impl App {
             }
         };
         self.submit("Planning import", Job::Plan(Request::CardImport(args)));
+    }
+}
+
+impl App {
+    pub(super) fn rename_options(&mut self, platform: String, name: String) {
+        let copies = self
+            .library_view()
+            .into_iter()
+            .flat_map(|l| &l.games)
+            .filter(|g| g.game.platform == platform)
+            .flat_map(|g| &g.matches)
+            .find(|m| m.name == name)
+            .map(|m| m.copies.clone())
+            .unwrap_or_default();
+        let mut items = vec![format!("Rename local ROM: {name}")];
+        let mut actions = vec![RenameChoice::LocalCustom {
+            platform: platform.clone(),
+            name: name.clone(),
+        }];
+        for copy in copies {
+            if copy.name_mismatch {
+                items.push(format!(
+                    "AP ← local name: {} → {}",
+                    copy.path.display(),
+                    name
+                ));
+                actions.push(RenameChoice::CardAdopt {
+                    path: copy.path.clone(),
+                    new_name: name.clone(),
+                });
+                items.push(format!("Local ← AP name: {}", copy.path.display()));
+                actions.push(RenameChoice::LocalAdopt {
+                    platform: platform.clone(),
+                    spec: name.clone(),
+                    new_name: copy.name.clone(),
+                });
+            }
+            items.push(format!("Rename AP ROM: {}", copy.path.display()));
+            actions.push(RenameChoice::CardCustom {
+                path: copy.path,
+                name: copy.name,
+            });
+        }
+        self.modal = Some(Modal::Pick {
+            title: "Choose which name to change".into(),
+            items,
+            selected: 0,
+            kind: PickKind::RenameActions(actions),
+        });
+    }
+
+    pub(super) fn choose_rename(&mut self, choice: RenameChoice) {
+        match choice {
+            RenameChoice::LocalCustom { platform, name } => {
+                let single = self.library_view().into_iter().flat_map(|l| &l.games)
+                    .find(|g| g.game.platform == platform && g.game.roms.iter().any(|r| r.name == name))
+                    .is_some_and(|g| g.game.roms.len() == 1);
+                self.rename_prompt(platform, name, single);
+            },
+            RenameChoice::CardCustom { path, name } => self.input("Rename AP ROM", vec![format!("AP path: {}", path.display()), "New filename; omit the extension to keep it. Changes are previewed before applying.".into()], pocketeer_core::roms::rename::stem(&name).to_string(), InputKind::CardRename { path }),
+            RenameChoice::LocalAdopt { platform, spec, new_name } => self.submit("Planning local rename", Job::Plan(Request::Rename { platform, spec, new_name })),
+            RenameChoice::CardAdopt { path, new_name } => self.submit("Planning AP rename", Job::Plan(Request::CardRename { path, new_name })),
+        }
+    }
+}
+
+impl App {
+    pub(super) fn review_saves(&mut self, plan: Box<pocketeer_core::library::saves::SavesPlan>) {
+        use pocketeer_core::library::saves::SaveAction;
+        if let Some((
+            index,
+            SaveAction::Conflict {
+                rel,
+                card,
+                computer,
+                ..
+            },
+        )) = plan
+            .actions
+            .iter()
+            .enumerate()
+            .find(|(_, a)| matches!(a, SaveAction::Conflict { .. }))
+        {
+            self.modal = Some(Modal::Pick {
+                title: format!("Save conflict: {}", rel.display()),
+                items: vec![
+                    format!(
+                        "Use AP → backup ({}; {})",
+                        human::bytes(card.size),
+                        human::time_ago(card.mtime)
+                    ),
+                    format!(
+                        "Use computer → restore AP ({}; {})",
+                        human::bytes(computer.size),
+                        human::time_ago(computer.mtime)
+                    ),
+                    "Leave both unchanged".into(),
+                ],
+                selected: 2,
+                kind: PickKind::SaveConflict { plan, index },
+            });
+            return;
+        }
+        let lines = text_lines(&saves_cmd::saves_sync(&Staged::preview((*plan).clone())));
+        if plan.changes() == 0 {
+            self.info("Save backup review", lines);
+        } else {
+            self.confirm(
+                format!(
+                    "Back up {}, restore {} save(s)?",
+                    plan.summary.pull, plan.summary.push
+                ),
+                lines,
+                Pending::Saves(plan),
+            );
+        }
     }
 }

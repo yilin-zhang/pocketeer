@@ -8,6 +8,7 @@ use crate::{Error, Pocket, Result, fsutil};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RomEntry {
+    /// Path relative to the owner folder, including any nested directories.
     pub name: String,
     pub size: u64,
 }
@@ -19,10 +20,10 @@ pub struct RomDir {
     pub owner: String,
     /// Relative to the SD root.
     pub path: PathBuf,
-    /// Top-level files only, sorted by name (case-insensitive). Hidden files skipped.
+    /// Files recursively, sorted by relative path (case-insensitive). Hidden files skipped.
     pub files: Vec<RomEntry>,
     pub bytes: u64,
-    /// Subfolders (e.g. instance JSON trees) are counted, not listed.
+    /// Number of visible descendant directories.
     pub subdirs: usize,
 }
 
@@ -35,29 +36,43 @@ pub struct PlatformRoms {
 }
 
 /// Lists one directory as a [`RomDir`]; `None` if it doesn't exist.
-pub fn read_dir(pocket: &Pocket, rel: &Path, owner: &str) -> Result<Option<RomDir>> {
+fn scan_dir(pocket: &Pocket, rel: &Path, owner: &str, recursive: bool) -> Result<Option<RomDir>> {
     let full = pocket.root().join(rel);
-    if !full.is_dir() {
-        return Ok(None);
+    match std::fs::symlink_metadata(&full) {
+        Ok(meta) if meta.is_symlink() => return Ok(None),
+        Ok(meta) if !meta.is_dir() => return Err(Error::NotADirectory { path: full }),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Error::io(&full, e)),
     }
     let mut files = Vec::new();
     let mut subdirs = 0;
-    for entry in std::fs::read_dir(&full)
-        .map_err(|e| Error::io(&full, e))?
-        .filter_map(|e| e.ok())
+    for entry in walkdir::WalkDir::new(&full)
+        .min_depth(1)
+        .max_depth(if recursive { usize::MAX } else { 1 })
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| !fsutil::is_hidden(e.file_name()))
     {
-        if fsutil::is_hidden(&entry.file_name()) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        if meta.is_dir() {
+        let entry = entry.map_err(|e| {
+            Error::io(
+                e.path().unwrap_or(&full),
+                std::io::Error::other(e.to_string()),
+            )
+        })?;
+        if entry.file_type().is_dir() {
             subdirs += 1;
-        } else if meta.is_file() {
+        } else if entry.file_type().is_file() {
+            let meta = entry
+                .metadata()
+                .map_err(|e| Error::io(entry.path(), std::io::Error::other(e.to_string())))?;
             files.push(RomEntry {
-                name,
+                name: entry
+                    .path()
+                    .strip_prefix(&full)
+                    .expect("descendant")
+                    .to_string_lossy()
+                    .into_owned(),
                 size: meta.len(),
             });
         }
@@ -75,20 +90,28 @@ pub fn read_dir(pocket: &Pocket, rel: &Path, owner: &str) -> Result<Option<RomDi
 /// The `common` and per-core folders of one platform (empty if none exist).
 pub fn platform_dirs(pocket: &Pocket, platform: &str) -> Result<Vec<RomDir>> {
     let base = pocket.assets_dir().join(platform);
-    if !base.is_dir() {
-        return Ok(Vec::new());
+    let entries = match std::fs::read_dir(&base) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(Error::io(&base, e)),
+    };
+    let mut owners = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| Error::io(&base, e))?;
+        if entry
+            .file_type()
+            .map_err(|e| Error::io(entry.path(), e))?
+            .is_dir()
+            && !fsutil::is_hidden(&entry.file_name())
+        {
+            owners.push(entry.file_name().to_string_lossy().into_owned());
+        }
     }
-    let mut owners: Vec<String> = std::fs::read_dir(&base)
-        .map_err(|e| Error::io(&base, e))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir() && !fsutil::is_hidden(&e.file_name()))
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
     // `common` first, then cores alphabetically.
     owners.sort_by_key(|o| (o != "common", o.to_lowercase()));
     let mut dirs = Vec::new();
     for owner in owners {
-        if let Some(dir) = read_dir(pocket, &Pocket::assets_rel(platform, &owner), &owner)? {
+        if let Some(dir) = scan_dir(pocket, &Pocket::assets_rel(platform, &owner), &owner, true)? {
             dirs.push(dir);
         }
     }
@@ -101,14 +124,14 @@ pub fn platform_dirs(pocket: &Pocket, platform: &str) -> Result<Vec<RomDir>> {
 pub fn scan(pocket: &Pocket) -> Result<Vec<PlatformRoms>> {
     let assets = pocket.assets_dir();
     let mut out = Vec::new();
-    if !assets.is_dir() {
-        return Ok(out);
-    }
-    for entry in std::fs::read_dir(&assets)
-        .map_err(|e| Error::io(&assets, e))?
-        .filter_map(|e| e.ok())
-    {
-        if fsutil::is_hidden(&entry.file_name()) || !entry.path().is_dir() {
+    for entry in std::fs::read_dir(&assets).map_err(|e| Error::io(&assets, e))? {
+        let entry = entry.map_err(|e| Error::io(&assets, e))?;
+        if fsutil::is_hidden(&entry.file_name())
+            || !entry
+                .file_type()
+                .map_err(|e| Error::io(entry.path(), e))?
+                .is_dir()
+        {
             continue;
         }
         let platform = entry.file_name().to_string_lossy().into_owned();
@@ -118,6 +141,20 @@ pub fn scan(pocket: &Pocket) -> Result<Vec<PlatformRoms>> {
             bytes: dirs.iter().map(|d| d.bytes).sum(),
             platform,
             dirs,
+        });
+    }
+    if let Some(mut dir) = scan_dir(pocket, Path::new("GB Studio"), "", false)? {
+        dir.files.retain(|f| {
+            Path::new(&f.name)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("pocket"))
+        });
+        dir.bytes = dir.files.iter().map(|f| f.size).sum();
+        out.push(PlatformRoms {
+            platform: "gbstudio".into(),
+            files: dir.files.len(),
+            bytes: dir.bytes,
+            dirs: vec![dir],
         });
     }
     out.sort_by_key(|p| p.platform.to_lowercase());
@@ -148,13 +185,14 @@ mod tests {
         assert_eq!(plats[0].files, 0);
         let gba = &plats[1];
         assert_eq!(gba.platform, "gba");
-        assert_eq!(gba.files, 3);
-        assert_eq!(gba.bytes, 5);
+        assert_eq!(gba.files, 4);
+        assert_eq!(gba.bytes, 8);
         assert_eq!(gba.dirs[0].owner, "common");
         let names: Vec<&str> = gba.dirs[0].files.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["A.gba", "b.gba"]);
         assert_eq!(gba.dirs[1].owner, "z.Core");
         assert_eq!(gba.dirs[1].subdirs, 1);
+        assert_eq!(gba.dirs[1].files[1].name, "sub/inner.bin");
         assert_eq!(gba.dirs[1].path, Path::new("Assets/gba/z.Core"));
     }
 }

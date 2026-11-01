@@ -1,4 +1,4 @@
-//! The local library: the source of truth that cards are synced *from*.
+//! Managed local ROM copies, explicit card transfers, and save backups.
 //!
 //! ```text
 //! ~/Pocketeer Library/
@@ -6,19 +6,19 @@
 //! └── roms/<platform>/    managed ROM files, named as the DAT names them
 //! ```
 //!
-//! Everything else pocketeer does today works directly on a card; the library
-//! is an optional layer above that.
+//! Card presence is discovered from files and joined by content hash; no
+//! device registration or desired card contents are stored.
 
+pub mod card_import;
 pub mod covers;
 pub mod db;
-pub mod device;
-pub mod device_sync;
 pub mod import;
+pub mod matching;
 pub mod names;
-pub mod orphans;
 pub mod remove;
 pub mod rename;
 pub mod saves;
+pub mod transfer;
 
 use std::path::{Path, PathBuf};
 

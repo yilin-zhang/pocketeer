@@ -261,12 +261,7 @@ fn draw_header(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     match (&app.pocket, app.card_view()) {
         (Some(p), card) => {
-            let dot = if let Some(d) = app.library_view().and_then(|l| l.device.as_ref()) {
-                Span::styled(format!("● {}", d.name), Style::new().fg(GOOD))
-            } else {
-                Span::styled("● card", Style::new().fg(INK))
-            };
-            chip(&mut chips, dot);
+            chip(&mut chips, Span::styled("● card", Style::new().fg(INK)));
             let name = p
                 .root()
                 .file_name()
@@ -412,6 +407,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 (None, Some(l)) => Line::from(vec![faint(" › "), dim(l.to_string())]),
                 (None, None) => Line::from(""),
             };
+            if let Some(roms) = &app.rom_status {
+                status.push_span(dim(format!("   {} {roms}", spinner())));
+            }
             if let Some(side) = &app.side_status {
                 status.push_span(dim(format!("   {} {side}", spinner())));
             }
@@ -441,13 +439,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("t", "standard names"),
             ("x", "remove"),
             ("f", "cover"),
-            ("S", "sync"),
+            ("S", "copy to card"),
             ("?", "help"),
             ("q", "quit"),
         ],
         Tab::Device => &[
-            ("D", "subscriptions"),
-            ("S", "sync"),
             ("V", "saves"),
             ("c", "clean junk"),
             ("?", "help"),

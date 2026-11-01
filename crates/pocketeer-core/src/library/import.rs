@@ -1,5 +1,5 @@
 //! Bringing ROM files into the library: plan (name, match, dedupe) → apply
-//! (copy/link/reference + index rows, one transaction).
+//! (copy + index rows, one transaction per file).
 //!
 //! Files are read as few times as possible, because the source may be a
 //! Pocket card over USB: with a DAT every file is hashed while planning (the
@@ -17,7 +17,7 @@ use crate::{
     progress::{Event, Progress},
     roms::{
         dat::Dat,
-        hash::{HashCache, Hashes, copy_and_hash, hash_file},
+        hash::{HashCache, Hashes, copy_and_hash},
         verify::{Candidate, hash_candidate, match_key, scan_source},
     },
 };
@@ -63,7 +63,6 @@ pub struct ImportOptions {
     pub platform: String,
     /// Display name for the platform, if known (from the inventory).
     pub platform_name: Option<String>,
-    pub mode: ImportMode,
     /// With a DAT: skip files it doesn't know instead of importing them unverified.
     pub dat_only: bool,
 }
@@ -77,9 +76,8 @@ pub enum ImportAction {
         inner: Option<String>,
         game: String,
         rom: String,
-        /// Managed path relative to the library root; `None` for references.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        dest: Option<PathBuf>,
+        /// Managed path relative to the library root.
+        dest: PathBuf,
         size: u64,
         /// Known when the file was hashed while planning; otherwise computed
         /// during the copy.
@@ -88,7 +86,6 @@ pub enum ImportAction {
         #[serde(skip_serializing_if = "Option::is_none")]
         sha1: Option<String>,
         verified: bool,
-        mode: ImportMode,
         /// A standard (No-Intro style) name this file probably is, when the
         /// DAT didn't name it; see [`suggest_names`].
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -135,7 +132,6 @@ pub struct ImportSummary {
 pub struct ImportPlan {
     pub dir: PathBuf,
     pub platform: String,
-    pub mode: ImportMode,
     pub actions: Vec<ImportAction>,
     pub summary: ImportSummary,
 }
@@ -185,7 +181,6 @@ pub fn plan_import_candidates(
     let mut plan = ImportPlan {
         dir: dir.to_path_buf(),
         platform: opts.platform.clone(),
-        mode: opts.mode,
         actions: Vec::new(),
         summary: ImportSummary::default(),
     };
@@ -257,14 +252,7 @@ pub fn plan_import_candidates(
         }
         claimed.push((rom.clone(), c.file.path.clone()));
 
-        // References can't point inside a zip; those are always extracted.
-        let mode = if opts.mode == ImportMode::Reference && c.file.inner.is_some() {
-            ImportMode::Copy
-        } else {
-            opts.mode
-        };
-        let dest =
-            (mode != ImportMode::Reference).then(|| Library::rom_rel_path(&opts.platform, &rom));
+        let dest = Library::rom_rel_path(&opts.platform, &rom);
 
         let size = hashes.as_ref().map(|h| h.size).unwrap_or(c.size);
         plan.summary.add += 1;
@@ -284,7 +272,6 @@ pub fn plan_import_candidates(
             crc32: hashes.as_ref().map(Hashes::crc32_hex),
             sha1: hashes.map(|h| h.sha1),
             verified,
-            mode,
             suggested: None,
         });
     }
@@ -349,9 +336,7 @@ pub fn apply_suggestions(
             continue;
         }
         *game = fallback_game_name(new);
-        if dest.is_some() {
-            *dest = Some(Library::rom_rel_path(&platform, new));
-        }
+        *dest = Library::rom_rel_path(&platform, new);
         *rom = new.clone();
         n += 1;
     }
@@ -371,6 +356,16 @@ pub struct ImportResult {
     /// already had under another name; nothing was kept.
     pub duplicates: Vec<ImportDuplicate>,
     pub failed: Vec<ImportFailure>,
+    #[serde(skip)]
+    pub(crate) verified_sources: Vec<VerifiedSource>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct VerifiedSource {
+    pub path: PathBuf,
+    pub sha1: String,
+    pub size: u64,
+    pub modified: std::time::SystemTime,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -402,11 +397,6 @@ pub fn apply_import(
     let mut result = ImportResult::default();
 
     db::ensure_platform(lib.conn(), &opts.platform, opts.platform_name.as_deref())?;
-    let tx = lib
-        .conn_mut()
-        .transaction()
-        .map_err(|e| Error::db(e, "begin import"))?;
-
     let mut done = 0;
     for action in &plan.actions {
         let ImportAction::Add {
@@ -415,36 +405,40 @@ pub fn apply_import(
             game,
             rom,
             dest,
-            size,
-            crc32,
             sha1,
             verified,
-            mode,
             ..
         } = action
         else {
             continue;
         };
-        let placed: Result<Option<Hashes>> = match (mode, dest) {
-            (ImportMode::Reference, _) | (_, None) => Ok(None),
-            (_, Some(dest)) => place_file(&root, source, inner.as_deref(), dest, *mode),
+        let source_before = if inner.is_none() {
+            std::fs::metadata(source)
+                .ok()
+                .and_then(|m| Some((m.len(), m.modified().ok()?)))
+        } else {
+            None
         };
-        let indexed = placed.and_then(|placed_hashes| {
-            // Hashes from planning, from the copy, or (links/references) from the file.
-            let (crc32, sha1, size, late) = match (crc32, sha1) {
-                (Some(c), Some(h)) => (c.clone(), h.clone(), *size, false),
-                _ => {
-                    let h = match placed_hashes {
-                        Some(h) => h,
-                        None => match dest {
-                            Some(d) => hash_file(&root.join(d))?,
-                            None => hash_file(source)?,
-                        },
-                    };
-                    (h.crc32_hex(), h.sha1, h.size, true)
-                }
-            };
-            if late && let Some(existing) = db::find_rom_by_sha1(&tx, &opts.platform, &sha1)? {
+        let mut verified_sha1 = None;
+        let mut placed = false;
+        let indexed = (|| -> Result<Indexed> {
+            let hashes = place_file(&root, source, inner.as_deref(), dest)?;
+            placed = true;
+            if sha1
+                .as_ref()
+                .is_some_and(|expected| *expected != hashes.sha1)
+            {
+                return Err(Error::io(
+                    source,
+                    std::io::Error::other("source changed since import preview"),
+                ));
+            }
+            verified_sha1 = Some(hashes.sha1.clone());
+            let tx = lib
+                .conn_mut()
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| Error::db(e, "begin import"))?;
+            if let Some(existing) = db::find_rom_by_sha1(&tx, &opts.platform, &hashes.sha1)? {
                 return Ok(Indexed::Duplicate(existing.name));
             }
             let game_id = db::upsert_game(&tx, &opts.platform, game)?;
@@ -453,28 +447,44 @@ pub fn apply_import(
                 &NewRom {
                     game_id,
                     name: rom,
-                    size,
-                    crc32: &crc32,
-                    sha1: &sha1,
+                    size: hashes.size,
+                    crc32: &hashes.crc32_hex(),
+                    sha1: &hashes.sha1,
                     verified: *verified,
-                    rel_path: dest.as_ref().and_then(|d| d.to_str()),
-                    source_path: (*mode == ImportMode::Reference)
-                        .then_some(source.to_str())
-                        .flatten(),
-                    mode: *mode,
+                    rel_path: dest.to_str(),
+                    source_path: None,
+                    mode: ImportMode::Copy,
                 },
             )?;
-            Ok(Indexed::Added(size))
-        });
+            tx.commit().map_err(|e| Error::db(e, "commit import"))?;
+            Ok(Indexed::Added(hashes.size))
+        })();
+        if placed && !matches!(indexed, Ok(Indexed::Added(_))) {
+            if let Err(e) = std::fs::remove_file(root.join(dest)) {
+                result.failed.push(ImportFailure {
+                    source: root.join(dest),
+                    error: Error::io(root.join(dest), e).to_info(),
+                });
+            }
+        }
+        if indexed.is_ok()
+            && let (Some((size, modified)), Some(sha1)) = (source_before, verified_sha1)
+            && std::fs::metadata(source)
+                .is_ok_and(|m| m.len() == size && m.modified().ok() == Some(modified))
+        {
+            result.verified_sources.push(VerifiedSource {
+                path: source.clone(),
+                sha1,
+                size,
+                modified,
+            });
+        }
         match indexed {
             Ok(Indexed::Added(size)) => {
                 result.added += 1;
                 result.bytes += size;
             }
             Ok(Indexed::Duplicate(existing)) => {
-                if let Some(d) = dest {
-                    let _ = std::fs::remove_file(root.join(d));
-                }
                 result.duplicates.push(ImportDuplicate {
                     source: source.clone(),
                     existing,
@@ -482,9 +492,6 @@ pub fn apply_import(
             }
             Err(e) => {
                 // Don't leave a managed file without an index row.
-                if let Some(d) = dest {
-                    let _ = std::fs::remove_file(root.join(d));
-                }
                 result.failed.push(ImportFailure {
                     source: source.clone(),
                     error: e.to_info(),
@@ -494,20 +501,11 @@ pub fn apply_import(
         done += 1;
         progress(Event::Step { done, total });
     }
-    tx.commit().map_err(|e| Error::db(e, "commit import"))?;
     Ok(result)
 }
 
-/// Copies, extracts or hard-links `source` to `<root>/<dest>` via a temp
-/// file. Copies and extractions hash the bytes on the way through and return
-/// them; a hard link returns `None` (the caller hashes the linked file).
-fn place_file(
-    root: &Path,
-    source: &Path,
-    inner: Option<&str>,
-    dest: &Path,
-    mode: ImportMode,
-) -> Result<Option<Hashes>> {
+/// Copies or extracts a ROM and computes its identity in the same pass.
+fn place_file(root: &Path, source: &Path, inner: Option<&str>, dest: &Path) -> Result<Hashes> {
     let full = root.join(dest);
     let parent = full
         .parent()
@@ -516,11 +514,8 @@ fn place_file(
     if full.exists() {
         return Err(Error::AlreadyExists { path: full });
     }
-    if mode == ImportMode::Link && inner.is_none() && std::fs::hard_link(source, &full).is_ok() {
-        return Ok(None);
-    }
     let mut hashes = None;
-    fsutil::write_via_temp(&full, |out| {
+    fsutil::write_new_via_temp(&full, |out| {
         let h = match inner {
             None => {
                 let mut f = std::fs::File::open(source).map_err(|e| Error::io(source, e))?;
@@ -533,7 +528,7 @@ fn place_file(
         hashes = Some(h);
         Ok(())
     })?;
-    Ok(hashes)
+    Ok(hashes.expect("successful copy produced hashes"))
 }
 
 #[cfg(test)]
@@ -559,11 +554,10 @@ mod tests {
         tmp
     }
 
-    fn opts(mode: ImportMode, dat_only: bool) -> ImportOptions {
+    fn opts(dat_only: bool) -> ImportOptions {
         ImportOptions {
             platform: "fkh".into(),
             platform_name: Some("Fake Handheld".into()),
-            mode,
             dat_only,
         }
     }
@@ -576,10 +570,9 @@ mod tests {
                     rom,
                     game,
                     verified,
-                    mode,
                     ..
                 } => {
-                    format!("add {rom} [{game}] v={verified} {}", mode.as_str())
+                    format!("add {rom} [{game}] v={verified} copy")
                 }
                 ImportAction::Skip { source, reason } => format!("skip {source} {reason:?}"),
             })
@@ -592,7 +585,7 @@ mod tests {
         let mut lib = Library::init(&tmp.path().join("lib")).unwrap();
         let src = library_dir();
         let dat = dat();
-        let o = opts(ImportMode::Copy, false);
+        let o = opts(false);
         let mut cache = HashCache::in_memory();
         let plan = plan_import(&lib, src.path(), &o, Some(&dat), &mut cache, &mut |_| {}).unwrap();
         assert_eq!(
@@ -648,12 +641,12 @@ mod tests {
     }
 
     #[test]
-    fn dat_only_and_reference_modes() {
+    fn dat_only_copies_verified_roms() {
         let tmp = tempfile::tempdir().unwrap();
         let mut lib = Library::init(&tmp.path().join("lib")).unwrap();
         let src = library_dir();
         let dat = dat();
-        let o = opts(ImportMode::Reference, true);
+        let o = opts(true);
         let plan = plan_import(
             &lib,
             src.path(),
@@ -673,22 +666,22 @@ mod tests {
         );
         assert!(
             k.iter()
-                .any(|x| x == "add Hello World (USA).fkh [Hello World (USA)] v=true reference"),
+                .any(|x| x == "add Hello World (USA).fkh [Hello World (USA)] v=true copy"),
             "{k:?}"
         );
 
         let r = apply_import(&mut lib, &o, &plan, &mut |_| {}).unwrap();
         assert_eq!(r.added, 3);
         assert!(
-            !lib.root().join("roms/fkh/Hello World (USA).fkh").exists(),
-            "referenced, not copied"
+            lib.root().join("roms/fkh/Hello World (USA).fkh").exists(),
+            "managed copy"
         );
         let games = db::list_games(lib.conn(), Some("fkh"), Some("hello")).unwrap();
         let rom = &games[0].roms[0];
-        assert_eq!(rom.mode, ImportMode::Reference);
+        assert_eq!(rom.mode, ImportMode::Copy);
         assert_eq!(
             lib.rom_abs_path(rom),
-            src.path().join("Hello World (USA).fkh")
+            lib.root().join("roms/fkh/Hello World (USA).fkh")
         );
     }
 
@@ -699,7 +692,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         fs::write(src.path().join("a.fkh"), "same bytes").unwrap();
         fs::write(src.path().join("b.fkh"), "same bytes").unwrap();
-        let o = opts(ImportMode::Copy, false);
+        let o = opts(false);
         let plan = plan_import(
             &lib,
             src.path(),
@@ -730,11 +723,11 @@ mod tests {
     }
 
     #[test]
-    fn link_mode_links_or_copies() {
+    fn imported_copy_is_independent_of_source() {
         let tmp = tempfile::tempdir().unwrap();
         let mut lib = Library::init(&tmp.path().join("lib")).unwrap();
         let src = library_dir();
-        let o = opts(ImportMode::Link, false);
+        let o = opts(false);
         let plan = plan_import(
             &lib,
             src.path(),
@@ -746,6 +739,7 @@ mod tests {
         .unwrap();
         apply_import(&mut lib, &o, &plan, &mut |_| {}).unwrap();
         let managed = lib.root().join("roms/fkh/random.fkh");
+        fs::write(src.path().join("random.fkh"), "changed source").unwrap();
         assert_eq!(fs::read_to_string(&managed).unwrap(), "not in dat");
         // Without a DAT the game name is the stem.
         let games = db::list_games(lib.conn(), None, Some("random")).unwrap();
@@ -776,7 +770,6 @@ mod tests {
         let opts = ImportOptions {
             platform: "gba".into(),
             platform_name: None,
-            mode: ImportMode::Copy,
             dat_only: false,
         };
         let mut cache = HashCache::open(None);
@@ -794,5 +787,62 @@ mod tests {
             assert_eq!(plan.changes(), 1);
             assert!(matches!(&plan.actions[0], ImportAction::Add { rom, .. } if rom == expected));
         }
+    }
+    #[test]
+    fn failed_import_preserves_existing_files_and_rolls_back_its_own_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut lib = Library::init(&tmp.path().join("lib")).unwrap();
+        let source = tmp.path().join("source");
+        write(&source, "a.fkh", "new bytes");
+        let options = opts(false);
+        let plan = plan_import(
+            &lib,
+            &source,
+            &options,
+            None,
+            &mut HashCache::in_memory(),
+            &mut |_| {},
+        )
+        .unwrap();
+        write(lib.root(), "roms/fkh/a.fkh", "existing bytes");
+        let result = apply_import(&mut lib, &options, &plan, &mut |_| {}).unwrap();
+        assert_eq!(result.failed.len(), 1);
+        assert_eq!(
+            fs::read(lib.root().join("roms/fkh/a.fkh")).unwrap(),
+            b"existing bytes"
+        );
+        assert!(lib.list_games(None, None).unwrap().is_empty());
+        fs::remove_file(lib.root().join("roms/fkh/a.fkh")).unwrap();
+        lib.conn().execute_batch("CREATE TRIGGER reject_import BEFORE INSERT ON roms BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
+        let result = apply_import(&mut lib, &options, &plan, &mut |_| {}).unwrap();
+        assert_eq!(result.failed.len(), 1);
+        assert!(!lib.root().join("roms/fkh/a.fkh").exists());
+        assert!(lib.list_games(None, None).unwrap().is_empty());
+        assert_eq!(fs::read(source.join("a.fkh")).unwrap(), b"new bytes");
+    }
+
+    #[test]
+    fn dat_import_requires_the_bytes_that_were_verified_in_the_preview() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut lib = Library::init(&tmp.path().join("lib")).unwrap();
+        let source = tmp.path().join("source");
+        write(&source, "Hello World (USA).fkh", "hello world");
+        let options = opts(true);
+        let plan = plan_import(
+            &lib,
+            &source,
+            &options,
+            Some(&dat()),
+            &mut HashCache::in_memory(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(plan.changes(), 1);
+        write(&source, "Hello World (USA).fkh", "changed ROM");
+        let result = apply_import(&mut lib, &options, &plan, &mut |_| {}).unwrap();
+        assert_eq!(result.failed.len(), 1);
+        assert_eq!(result.added, 0);
+        assert!(lib.list_games(None, None).unwrap().is_empty());
+        assert!(!lib.root().join("roms/fkh/Hello World (USA).fkh").exists());
     }
 }

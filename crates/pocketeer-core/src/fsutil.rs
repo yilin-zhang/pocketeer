@@ -147,24 +147,93 @@ pub fn write_via_temp(
     dest: &Path,
     fill: impl FnOnce(&mut std::fs::File) -> Result<()>,
 ) -> Result<()> {
+    let temp = filled_temp(dest, fill)?;
+    temp.persist(dest).map_err(|e| Error::io(dest, e.error))?;
+    Ok(())
+}
+
+/// Publishes a new file atomically without replacing an existing destination.
+pub fn write_new_via_temp(
+    dest: &Path,
+    fill: impl FnOnce(&mut std::fs::File) -> Result<()>,
+) -> Result<()> {
+    let temp = filled_temp(dest, fill)?;
+    temp.persist_noclobber(dest).map_err(|e| {
+        if e.error.kind() == std::io::ErrorKind::AlreadyExists {
+            Error::AlreadyExists {
+                path: dest.to_path_buf(),
+            }
+        } else {
+            Error::io(dest, e.error)
+        }
+    })?;
+    Ok(())
+}
+
+fn filled_temp(
+    dest: &Path,
+    fill: impl FnOnce(&mut std::fs::File) -> Result<()>,
+) -> Result<tempfile::NamedTempFile> {
     let parent = dest.parent().ok_or_else(|| Error::NotADirectory {
         path: dest.to_path_buf(),
     })?;
     std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
-    let tmp = parent.join(format!(
-        ".{}.pocketeer-tmp",
-        dest.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+    let mut temp = tempfile::Builder::new()
+        .prefix(".pocketeer-")
+        .tempfile_in(parent)
+        .map_err(|e| Error::io(parent, e))?;
+    fill(temp.as_file_mut())?;
+    temp.as_file_mut().flush().map_err(|e| Error::io(dest, e))?;
+    Ok(temp)
+}
+
+/// A rename with an atomic no-overwrite guarantee (including rollback moves).
+pub fn rename_no_replace(from: &Path, to: &Path) -> Result<()> {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        target_os = "redox"
+    ))]
+    let result: std::io::Result<()> = {
+        use rustix::fs::{CWD, RenameFlags, renameat_with};
+        renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(Into::into)
+    };
+    #[cfg(windows)]
+    let result: std::io::Result<()> = {
+        use std::os::windows::ffi::OsStrExt;
+        let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+        // Both buffers are NUL-terminated and live for the duration of the call.
+        let success = unsafe {
+            windows_sys::Win32::Storage::FileSystem::MoveFileExW(from.as_ptr(), to.as_ptr(), 0)
+        };
+        if success == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    };
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        target_os = "redox",
+        windows
+    )))]
+    let result: std::io::Result<()> = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic no-replace rename is unavailable on this OS",
     ));
-    let result = (|| {
-        let mut out = std::fs::File::create(&tmp).map_err(|e| Error::io(&tmp, e))?;
-        fill(&mut out)?;
-        out.flush().map_err(|e| Error::io(&tmp, e))?;
-        std::fs::rename(&tmp, dest).map_err(|e| Error::io(&tmp, e))
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    result.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            Error::AlreadyExists {
+                path: to.to_path_buf(),
+            }
+        } else {
+            Error::io(from, e)
+        }
+    })
 }
 
 /// Atomically replaces `path` with `bytes`.
@@ -242,6 +311,36 @@ mod tests {
         assert_eq!(mtime_secs(&copy).unwrap(), 1_000_000);
         assert!(is_hidden(OsStr::new(".DS_Store")));
         assert!(!is_hidden(OsStr::new("game.gba")));
+    }
+
+    #[test]
+    fn overlapping_writes_publish_complete_files_and_failed_writes_preserve_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("save.bin");
+        write_via_temp(&dest, |out| {
+            out.write_all(b"outer").map_err(|e| Error::io(&dest, e))?;
+            write_atomic(&dest, b"inner")?;
+            assert_eq!(std::fs::read(&dest).unwrap(), b"inner");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"outer");
+        assert!(
+            write_via_temp(&dest, |out| {
+                out.write_all(b"partial").map_err(|e| Error::io(&dest, e))?;
+                Err(Error::io(&dest, std::io::Error::other("interrupted")))
+            })
+            .is_err()
+        );
+        assert!(
+            write_new_via_temp(&dest, |out| {
+                out.write_all(b"replacement")
+                    .map_err(|e| Error::io(&dest, e))
+            })
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b"outer");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
     }
 
     #[test]

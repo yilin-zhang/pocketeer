@@ -10,8 +10,7 @@ use crate::{Error, Result};
 /// Entries that must exist at the root of a Pocket SD card.
 pub const ROOT_MARKERS: [&str; 3] = ["Analogue_Pocket.json", "Assets", "Cores"];
 
-/// pocketeer's own folder at the card root: install staging and the device
-/// marker. Nothing else lives there, and nothing stays after an operation.
+/// pocketeer's folder for disposable ROM cache and install staging.
 pub const POCKETEER_DIR: &str = ".pocketeer";
 
 /// Where removable volumes show up, per OS. Each entry is a folder whose
@@ -239,4 +238,61 @@ mod tests {
             assert!(dirs.is_empty());
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CardIdentity {
+    root: PathBuf,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume_serial: u32,
+}
+
+impl CardIdentity {
+    pub(crate) fn read(pocket: &Pocket) -> Result<Self> {
+        let root = Pocket::open(pocket.root())?.root().to_path_buf();
+        #[cfg(unix)]
+        let meta = std::fs::metadata(&root).map_err(|e| Error::io(&root, e))?;
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Ok(Self {
+            root,
+            #[cfg(unix)]
+            device: meta.dev(),
+            #[cfg(unix)]
+            inode: meta.ino(),
+            #[cfg(windows)]
+            volume_serial: volume_serial(pocket.root())?,
+        })
+    }
+}
+
+#[cfg(windows)]
+fn volume_serial(path: &Path) -> Result<u32> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut mount = vec![0u16; 32768];
+    let mut serial = 0;
+    // Both buffers are NUL-terminated and remain alive throughout these calls.
+    let success = unsafe {
+        GetVolumePathNameW(path_wide.as_ptr(), mount.as_mut_ptr(), mount.len() as u32) != 0
+            && GetVolumeInformationW(
+                mount.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                &mut serial,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            ) != 0
+    };
+    if !success {
+        return Err(Error::io(path, std::io::Error::last_os_error()));
+    }
+    Ok(serial)
 }

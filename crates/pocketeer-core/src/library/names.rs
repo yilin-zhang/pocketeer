@@ -213,7 +213,6 @@ pub fn suggest(name: &str, standard: &[String]) -> Option<String> {
 /// each would get. `standard` is looked up per platform via `names`.
 pub fn standardize_plan(
     lib: &super::Library,
-    pocket: Option<&crate::Pocket>,
     platform: Option<&str>,
     mut names: impl FnMut(&str) -> Option<Vec<String>>,
 ) -> Result<Vec<super::rename::RenamePlan>> {
@@ -235,13 +234,9 @@ pub fn standardize_plan(
                 continue;
             };
             let new_name = format!("{s}{}", crate::roms::rename::extension(&rom.name));
-            if let Ok(plan) = super::rename::plan(
-                lib,
-                pocket,
-                Some(&g.platform),
-                &rom.id.to_string(),
-                &new_name,
-            ) {
+            if let Ok(plan) =
+                super::rename::plan(lib, Some(&g.platform), &rom.id.to_string(), &new_name)
+            {
                 out.push(plan);
             }
         }

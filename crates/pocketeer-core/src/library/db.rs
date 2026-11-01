@@ -49,13 +49,13 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX roms_crc_size ON roms(crc32, size);
     ",
     // v2
-    super::device::MIGRATION_DEVICES,
+    MIGRATION_DEVICES,
     // v3
     super::saves::MIGRATION_SAVES,
     // v4
     super::covers::MIGRATION_COVERS,
     // v5
-    super::rename::MIGRATION_RENAMES,
+    MIGRATION_RENAMES,
     // v6
     "CREATE INDEX IF NOT EXISTS roms_name ON roms(name);",
 ];
@@ -455,6 +455,36 @@ pub fn platform_stats(conn: &Connection) -> Result<Vec<PlatformStats>> {
         },
     )
 }
+
+// Historical schema definitions remain frozen for existing databases.
+const MIGRATION_DEVICES: &str = "
+    CREATE TABLE devices (
+        id        TEXT PRIMARY KEY,
+        name      TEXT NOT NULL UNIQUE,
+        added_at  INTEGER NOT NULL,
+        last_sync INTEGER
+    );
+    CREATE TABLE device_platforms (
+        device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+        platform  TEXT NOT NULL,
+        PRIMARY KEY (device_id, platform)
+    );
+    CREATE TABLE device_cores (
+        device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+        core_id   TEXT NOT NULL,
+        PRIMARY KEY (device_id, core_id)
+    );
+";
+const MIGRATION_RENAMES: &str = "
+    CREATE TABLE renames (
+        id         INTEGER PRIMARY KEY,
+        platform   TEXT NOT NULL,
+        old_name   TEXT NOT NULL,
+        new_name   TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX renames_platform ON renames(platform, id);
+";
 
 #[cfg(test)]
 mod tests {

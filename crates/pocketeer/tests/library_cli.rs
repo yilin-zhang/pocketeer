@@ -107,7 +107,7 @@ fn init_import_status_list() {
 }
 
 #[test]
-fn import_dat_only_reference_mode() {
+fn dat_only_import_makes_managed_copies() {
     let env = env();
     let roms = env.src.to_str().unwrap();
     env.json(&["library", "init"]);
@@ -120,12 +120,10 @@ fn import_dat_only_reference_mode() {
         "--dat",
         &dat(),
         "--dat-only",
-        "--mode",
-        "reference",
     ]);
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["data"]["result"]["added"], 3);
-    assert!(!env.lib.join("roms/fkh/Hello World (USA).fkh").exists());
+    assert!(env.lib.join("roms/fkh/Hello World (USA).fkh").exists());
     assert!(
         env.lib
             .join("roms/fkh/Two Discs (Japan) (Disc 1).bin")
@@ -133,7 +131,7 @@ fn import_dat_only_reference_mode() {
         "zip entries are extracted"
     );
     let (v, _) = env.json(&["library", "list", "hello"]);
-    assert_eq!(v["data"]["games"][0]["roms"][0]["mode"], "reference");
+    assert_eq!(v["data"]["games"][0]["roms"][0]["mode"], "copy");
 }
 
 #[test]
@@ -206,7 +204,6 @@ fn rename_and_remove_without_a_card() {
     );
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("random.fkh  →  Random Game.fkh"), "{text}");
-    assert!(text.contains("next device sync renames it"), "{text}");
 
     // Remove: dry run, apply, trash.
     let (v, code) = env.json(&["library", "remove", "random.fkh", "quickfox", "--dry-run"]);

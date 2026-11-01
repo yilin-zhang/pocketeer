@@ -50,80 +50,23 @@ pub(super) fn draw_device(frame: &mut Frame, app: &mut App, area: Rect) {
     ));
     frame.render_widget(Paragraph::new(card).block(panel("CARD")), card_area);
 
-    let mut dev: Vec<Line> = Vec::new();
-    match app.library_view().and_then(|l| l.device.as_ref()) {
-        Some(d) => {
-            dev.push(kv_text("Name", format!("{}  ({})", d.name, d.id)));
-            dev.push(kv_text(
-                "Platforms",
-                if d.platforms.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    d.platforms.join(", ")
-                },
-            ));
-            dev.push(kv_text(
-                "Cores",
-                if d.cores.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    d.cores.join(", ")
-                },
-            ));
-            dev.push(kv_text(
-                "Last sync",
-                match d.last_sync {
-                    Some(t) => human::time_ago(t),
-                    None => "never".into(),
-                },
-            ));
-            dev.push(Line::from(""));
-            dev.push(key_line(&[("D", "change subscriptions")]));
-            dev.push(key_line(&[("S", "sync ROMs and cores from the library")]));
-            dev.push(key_line(&[("V", "sync saves both ways, newest wins")]));
-        }
-        None if app.library_view().is_some() => {
-            dev.push(Line::from("This card isn't registered as a device yet."));
-            dev.push(Line::from(""));
-            dev.push(key_line(&[(
-                "D",
-                "give it a name and choose what it syncs",
-            )]));
-        }
-        None => {
-            dev.push(Line::from("No library yet."));
-            dev.push(Line::from(""));
-            dev.push(key_line(&[("n", "on the Games tab creates one")]));
-            dev.push(key_line(&[("D", "then registers this card")]));
-        }
-    }
+    let actions = vec![
+        Line::from(format!("{} ROM file(s) on this card", snap.card_roms.len())),
+        Line::from(""),
+        key_line(&[("3", "manage ROMs on the Games tab")]),
+        key_line(&[("V", "review save backups")]),
+    ];
     frame.render_widget(
-        Paragraph::new(dev)
+        Paragraph::new(actions)
             .wrap(Wrap { trim: false })
-            .block(panel("LIBRARY DEVICE")),
+            .block(panel("MANAGE")),
         device_area,
     );
 
-    let mut junk: Vec<Line> = Vec::new();
-    if snap.clean.entries.is_empty() {
-        junk.push(Line::from(Span::styled("none", Style::new().fg(GOOD))));
-    } else {
-        junk.push(Line::from(format!(
-            "{} item(s), {}",
-            snap.clean.entries.len(),
-            human::bytes(snap.clean.bytes)
-        )));
-        let room = junk_area.height.saturating_sub(4) as usize;
-        for e in snap.clean.entries.iter().take(room) {
-            junk.push(Line::from(format!("  {}", e.path.display())).dim());
-        }
-        if snap.clean.entries.len() > room {
-            junk.push(
-                Line::from(format!("  … and {} more", snap.clean.entries.len() - room)).dim(),
-            );
-        }
-        junk.push(key_line(&[("c", "delete them")]));
-    }
+    let junk = vec![
+        Line::from("Scanned only when requested.").dim(),
+        key_line(&[("c", "scan and review cleanup")]),
+    ];
     frame.render_widget(Paragraph::new(junk).block(panel("MACOS JUNK")), junk_area);
 
     let room = log_area.height.saturating_sub(2) as usize;

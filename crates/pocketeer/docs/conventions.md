@@ -19,7 +19,7 @@
   plus a `failed` list where items can fail one by one). Batches (`cores install|update|remove`)
   carry `outcomes[]`, each with `plan?`, `result?`, `error?`.
 - `removed` counts files or ROMs taken off the card or out of the library; `deleted` counts
-  files a sync deleted because the source no longer has them. Names asked for that don't exist
+  files explicitly deleted. Names asked for that don't exist
   are listed under `not_found` and count as failures (`SOME_FAILED`).
 - `SOME_FAILED.details` has `failed` and `total` (failed plus planned changes).
 - Operations are idempotent: installing an installed version reports `changed: false`.
@@ -30,18 +30,25 @@
   the card are deleted (a failed operation is rolled back first). Files removed from the
   library go to `.trash/<timestamp>/` inside it; a save about to be overwritten on the card
   is copied into the library's save history first.
-- A library ROM's display name is its file name. `library rename` moves the file, the game,
-  the mounted card's copy and that copy's saves and save states together. Without a card the
-  rename is remembered and the next `device sync` applies it to a card still carrying the
-  old name, saves included.
-- Nothing on a card is hashed unless `--verify` is given: card reads over USB are slow, so
-  orphan detection and sync compare names and sizes only.
-- Files an installed core declares in its data.json (BIOS and the like) are never treated as
-  ROMs: `device orphans` and `device import` skip them, sync never renames or deletes them.
+- The default game title is the local ROM filename. Local and AP names are independent;
+  matching uses platform + complete SHA-1. A differing name is marked `≠` in the TUI.
+  Local rename only changes the library; card rename takes an exact relative path and
+  previews ordinary save companions. Memories are preserved with a warning.
+- `card list` reads metadata and the compact card cache. `card check` samples cached files
+  and hashes new/changed files; `--full` checks every byte. The TUI does this in a serial
+  background worker. Sampled confidence is not a full-content guarantee.
+- Files an installed core declares (BIOS and the like) are excluded from ROM matching and
+  transfer selection. Nested Assets folders are supported; GB Studio uses root `.pocket` files.
+- Imports always create managed copies. Card contents are observed, without registration,
+  subscriptions, desired-state sync or offline rename replay.
+- Save backup defaults AP → computer. Newer computer content or equal/ambiguous timestamps
+  with differing bytes requires a choice; CLI leaves unresolved pairs alone and exits 1.
+  `--conflicts ap|computer|skip` chooses explicitly. Restore archives AP before writing.
+- Junk is scanned only on explicit `clean` / TUI Card `c`, then removal is previewed.
 - Imports without a DAT look unverified names up in the libretro name list (No-Intro names,
   cached a week) and report a `suggested` standard name per file; `--standard-names` imports
   under it, `library standardize` renames existing games. A name match, not a DAT check.
-- `library import` and `device import` fetch covers for new games afterwards when online
+- `library import` and `card import` fetch covers for new games afterwards when online
   (`--no-covers` to skip); `covers fetch` does it on demand.
 
 ### Settings
@@ -53,5 +60,5 @@
 - `--offline` never touches the network (cached inventory and downloads only);
   `--refresh` revalidates the inventory even if fresh.
 - The TUI (`pocketeer` with no subcommand) calls the same library functions as these commands;
-  everything it can do has a CLI equivalent, and vice versa. It runs without a card too: the
+  TUI actions have CLI equivalents. It runs without a card too: the
   Games tab works from the library alone.

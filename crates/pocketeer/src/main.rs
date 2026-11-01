@@ -49,7 +49,7 @@ fn main() -> ExitCode {
         return out.emit::<()>(Err(e), |_| String::new());
     }
 
-    use commands::{card, cores, device, library, meta, saves};
+    use commands::{card, cores, library, meta, saves};
     match command {
         Command::Status => out.emit(card::status(&ctx), card::status_text),
         Command::Inventory(InventoryCommand::Refresh) => {
@@ -62,7 +62,7 @@ fn main() -> ExitCode {
         Command::Cores(cmd) => cores::run(&ctx, &out, cmd, &mut progress),
         Command::Library(cmd) => library::run(&ctx, &out, cmd, &mut progress),
         Command::Covers(cmd) => library::covers(&ctx, &out, cmd, &mut progress),
-        Command::Device(cmd) => device::run(&ctx, &out, cmd, &mut progress),
+        Command::Card(cmd) => card::roms(&ctx, &out, cmd, &mut progress),
         Command::Saves(cmd) => saves::run(&ctx, &out, cmd, &mut progress),
         Command::Config(cmd) => meta::config(&ctx, &out, cmd),
         Command::Docs { path } => out.emit(meta::docs(&path), meta::docs_text),

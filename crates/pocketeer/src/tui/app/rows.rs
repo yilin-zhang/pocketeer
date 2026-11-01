@@ -3,6 +3,11 @@
 
 use super::*;
 
+pub(super) enum GameSelection {
+    Library(i64),
+    Card(PathBuf),
+}
+
 impl App {
     // -----------------------------------------------------------------------
     // rows
@@ -41,12 +46,45 @@ impl App {
         }
     }
 
+    pub(super) fn game_selection(&self) -> Option<GameSelection> {
+        match *self.games.selected()? {
+            GameRef::Library(i) => Some(GameSelection::Library(
+                self.library_view()?.games.get(i)?.game.id,
+            )),
+            GameRef::CardOnly(i) => Some(GameSelection::Card(
+                self.card_view()?.card_roms.get(i)?.rel_path.clone(),
+            )),
+        }
+    }
+
     /// Recomputes every table from the snapshot and the current filters.
     pub fn rebuild_rows(&mut self) {
+        self.rebuild_rows_preserving(self.game_selection());
+    }
+
+    pub(super) fn rebuild_rows_preserving(&mut self, selected: Option<GameSelection>) {
         let rows = self.compute_core_rows();
         self.cores.set_rows(rows);
         let rows = self.compute_game_rows();
+        let selected_index = rows.iter().position(|row| match &selected {
+            Some(GameSelection::Library(id)) => {
+                self.game_row(*row).is_some_and(|g| g.game.id == *id)
+            }
+            Some(GameSelection::Card(path)) => {
+                self.card_rom(*row).is_some_and(|r| r.rel_path == *path)
+                    || self.game_row(*row).is_some_and(|g| {
+                        g.matches
+                            .iter()
+                            .flat_map(|m| &m.copies)
+                            .any(|c| c.path == *path)
+                    })
+            }
+            None => false,
+        });
         self.games.set_rows(rows);
+        if let Some(i) = selected_index {
+            self.games.sel = i;
+        }
         let rows = self.compute_bios_rows();
         self.bios.set_rows(rows);
     }
@@ -163,8 +201,11 @@ impl App {
             for (i, g) in l.games.iter().enumerate() {
                 let keep = match f {
                     GameFilter::All | GameFilter::InLibrary => true,
-                    GameFilter::OnCard => g.on_card,
-                    GameFilter::NotOnCard => !g.on_card,
+                    GameFilter::OnCard => g.on_card(),
+                    GameFilter::NotOnCard => g
+                        .matches
+                        .iter()
+                        .all(|m| m.presence == pocketeer_core::library::matching::Presence::Local),
                     GameFilter::CardOnly => false,
                 };
                 if keep && pane::matches(q.as_deref(), &[&g.game.name, &g.game.platform]) {
@@ -180,6 +221,15 @@ impl App {
             && let Some(card) = &snap.card
         {
             for (i, o) in card.card_roms.iter().enumerate() {
+                let presence = card.card_presence[i];
+                if presence == pocketeer_core::library::matching::Presence::Both {
+                    continue;
+                }
+                if f == GameFilter::CardOnly
+                    && presence != pocketeer_core::library::matching::Presence::Card
+                {
+                    continue;
+                }
                 if pane::matches(q.as_deref(), &[&o.name, &o.platform]) {
                     rows.push((
                         o.platform.to_lowercase(),
@@ -204,7 +254,7 @@ impl App {
         }
     }
 
-    pub fn card_rom(&self, r: GameRef) -> Option<&CardOnlyRom> {
+    pub fn card_rom(&self, r: GameRef) -> Option<&CardRom> {
         match r {
             GameRef::CardOnly(i) => self.card_view()?.card_roms.get(i),
             GameRef::Library(_) => None,
@@ -215,7 +265,7 @@ impl App {
         self.games.selected().and_then(|r| self.game_row(*r))
     }
 
-    pub fn selected_orphan(&self) -> Option<&CardOnlyRom> {
+    pub fn selected_orphan(&self) -> Option<&CardRom> {
         self.games.selected().and_then(|r| self.card_rom(*r))
     }
 
@@ -261,5 +311,95 @@ impl App {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(no path configured)".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pocketeer_core::{
+        library::{
+            db::Game,
+            matching::{CardMatch, LocalMatch, Presence},
+        },
+        roms::index::Confidence,
+    };
+
+    fn game(id: i64, name: &str) -> GameRow {
+        GameRow {
+            game: Game {
+                id,
+                platform: "gba".into(),
+                name: name.into(),
+                roms: Vec::new(),
+            },
+            cover: None,
+            matches: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn refresh_keeps_the_selected_game_across_insertion_and_card_matching() {
+        let tmp = tempfile::tempdir().unwrap();
+        let global = Global {
+            json: false,
+            root: Some(tmp.path().join("missing-card")),
+            offline: true,
+            refresh: false,
+            cache_dir: Some(tmp.path().join("cache")),
+            library: Some(tmp.path().join("library")),
+            config: Some(tmp.path().join("config")),
+            github_token: None,
+        };
+        let mut app = App::new(global, Picker::halfblocks());
+        app.snapshot = Some(Snapshot {
+            fingerprint: 0,
+            card: None,
+            verification: None,
+            library: Some(LibraryView {
+                root: tmp.path().join("library"),
+                games: vec![game(7, "Middle"), game(9, "Zulu")],
+                saves: 0,
+                platforms: vec!["gba".into()],
+            }),
+        });
+        app.rebuild_rows();
+        app.games.sel = 1;
+        let selected = app.game_selection();
+        app.snapshot
+            .as_mut()
+            .unwrap()
+            .library
+            .as_mut()
+            .unwrap()
+            .games
+            .insert(0, game(10, "Alpha"));
+        app.rebuild_rows_preserving(selected);
+        assert_eq!(app.selected_game().unwrap().game.id, 9);
+
+        let path = PathBuf::from("Assets/gba/common/nested/card-name.gba");
+        let selected = Some(GameSelection::Card(path.clone()));
+        app.snapshot
+            .as_mut()
+            .unwrap()
+            .library
+            .as_mut()
+            .unwrap()
+            .games[1]
+            .matches
+            .push(LocalMatch {
+                rom_id: 11,
+                platform: "gba".into(),
+                name: "local-name.gba".into(),
+                presence: Presence::Both,
+                copies: vec![CardMatch {
+                    path,
+                    name: "card-name.gba".into(),
+                    confidence: Confidence::Full,
+                    name_mismatch: true,
+                }],
+            });
+        app.rebuild_rows_preserving(selected);
+        assert_eq!(app.selected_game().unwrap().game.id, 7);
     }
 }

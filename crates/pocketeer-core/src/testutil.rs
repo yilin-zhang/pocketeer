@@ -6,7 +6,7 @@ use crate::{
     Pocket,
     library::{
         Library,
-        import::{self, ImportMode, ImportOptions},
+        import::{self, ImportOptions},
     },
     roms::{Dat, HashCache},
 };
@@ -67,15 +67,6 @@ pub(crate) fn dat() -> Dat {
 /// A fresh library at `<tmp>/lib` holding `files` (name, contents) imported
 /// from `<tmp>/src` on platform `fkh` by copying.
 pub(crate) fn library_with(files: &[(&str, &str)]) -> (tempfile::TempDir, Library) {
-    library_with_mode(files, ImportMode::Copy)
-}
-
-/// [`library_with`] with a chosen import mode (`Reference` leaves the files
-/// in `<tmp>/src`).
-pub(crate) fn library_with_mode(
-    files: &[(&str, &str)],
-    mode: ImportMode,
-) -> (tempfile::TempDir, Library) {
     let tmp = tempfile::tempdir().unwrap();
     let mut lib = Library::init(&tmp.path().join("lib")).unwrap();
     let src = tmp.path().join("src");
@@ -86,7 +77,6 @@ pub(crate) fn library_with_mode(
     let opts = ImportOptions {
         platform: "fkh".into(),
         platform_name: None,
-        mode,
         dat_only: false,
     };
     let plan = import::plan_import(

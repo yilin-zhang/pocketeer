@@ -181,17 +181,23 @@ impl CoreReport {
 
 /// Installed cores annotated with inventory data (when available).
 pub fn report(pocket: &Pocket, inventory: &InventoryLoad) -> Result<CoreListReport> {
-    let list = list_installed(pocket)?;
-    let inv = inventory.inventory();
-    Ok(CoreListReport {
-        cores: list
-            .cores
-            .into_iter()
-            .map(|c| CoreReport::new(c, inv))
-            .collect(),
-        broken: list.broken,
-        inventory: inventory.status(),
-    })
+    Ok(list_installed(pocket)?.report(inventory))
+}
+
+impl CoreList {
+    /// Annotates this scan without rereading installed definitions.
+    pub fn report(self, inventory: &InventoryLoad) -> CoreListReport {
+        let inv = inventory.inventory();
+        CoreListReport {
+            cores: self
+                .cores
+                .into_iter()
+                .map(|c| CoreReport::new(c, inv))
+                .collect(),
+            broken: self.broken,
+            inventory: inventory.status(),
+        }
+    }
 }
 
 /// One row of `cores search`.

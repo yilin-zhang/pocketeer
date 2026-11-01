@@ -39,30 +39,45 @@ pocketeer library remove "Game (USA)"            # → .trash/ inside the librar
 
 With a DAT, hash matches take the DAT's name and count as verified. Without
 one the file name is kept; `--standard-names` imports under the No-Intro name
-when one matches. A rename moves file, game, card copy and saves together.
+when one matches. A library rename changes only the local file and title.
+Card names are independent.
+Imports always copy into the managed library.
 
-## Devices
+## Card
 
 ```sh
-pocketeer device add --name "Pocket A"           # register the mounted card
-pocketeer device subscribe --platform gba --core spiritualized.GBA
-pocketeer device sync                            # library → card: ROMs and cores
-pocketeer device orphans                         # ROMs only on the card
-pocketeer device import                          # … into the library
+pocketeer card list                              # metadata + cached identities, no ROM reads
+pocketeer card check                             # sample cached files; fully hash new/changed files
+pocketeer card check --full                      # explicit full verification
+pocketeer card copy "Game.gba"                   # copy selected local ROM, no subscriptions
+pocketeer card import "Assets/gba/common/sub/Game.gba"
+pocketeer card rename "Assets/gba/common/sub/Game.gba" "New name"
 ```
 
-Sync is one way. Pending renames are replayed by name; nothing on the card is
-hashed unless you pass `--verify`.
+Use exact card-relative paths for import/rename. Same platform + hash matches
+content regardless of name; duplicate copies retain distinct paths. Pending or
+failed checks stay unknown. Copies/imports preserve existing destination files.
+A card rename previews the ROM and its ordinary save companions; save states in
+Memories stay unchanged because their association is not reliably established.
 
 ## Saves and covers
 
 ```sh
-pocketeer saves sync                             # card ⇄ library, newest wins, history kept
+pocketeer saves backup                           # AP → computer; unresolved conflicts exit 1
+pocketeer saves backup --conflicts ap             # explicitly choose AP for all conflicts
+pocketeer saves backup --conflicts computer       # explicitly restore computer versions
+pocketeer saves backup --conflicts skip           # leave conflicting pairs unchanged
 pocketeer saves versions "Saves/gba/common/Game.sav"
-pocketeer saves restore <ID>
+pocketeer saves restore "Saves/gba/common/Game.sav" --version 12
 pocketeer covers fetch [--platform gba]
 pocketeer covers fetch --platform xyz --libretro-system "Vendor - System"
 ```
+
+A newer computer file or different bytes with ambiguous timestamps needs a
+choice. Nonconflicting backups may proceed while conflicts remain untouched.
+Every overwritten save is archived first. `restore` without `--version` uses
+the current computer backup; with it, a specific history entry. Local-only
+backups are retained, never automatically pushed to AP.
 
 ## Options
 

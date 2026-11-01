@@ -11,6 +11,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
+        atomic::{AtomicU64, Ordering},
         mpsc::{Receiver, Sender, TryRecvError, channel},
     },
     thread,
@@ -23,26 +24,29 @@ use pocketeer_core::{
     install::{Action, PlacePlan, PlanOptions, Prepared, UninstallPlan},
     inventory::{Inventory, InventoryLoad},
     library::{
-        Library, covers,
+        Library,
+        card_import::CardImportPlan,
+        covers,
         db::Game,
-        device::{self, Device},
-        device_sync::DeviceSyncPrepared,
         import::{ImportAction, ImportOptions, ImportPlan},
-        orphans::{self, CardImportPlan, CardOnlyRom},
+        matching::{self, LocalMatch, Presence},
         remove::RemovePlan as LibraryRemovePlan,
         rename::RenamePlan,
         saves::SavesPlan,
+        transfer::CopyPlan,
     },
     progress::Event,
     required::{self, BiosReport},
-    status::{self, Status},
+    roms::index::{CardRom, Index},
+    status::Status,
 };
 
 use crate::{
-    cli::{DeviceImportArgs, ImportArgs, SyncArgs},
+    cli::{CardImportArgs, ImportArgs},
     commands::{
-        Applied, Mode, Plan, Staged, apply_actions, card as card_cmd, cores as cores_cmd,
-        device as device_cmd, library as library_cmd, saves as saves_cmd,
+        Applied, Mode, Plan, Staged, apply_actions, card as card_cmd,
+        card_import as card_import_cmd, cores as cores_cmd, library as library_cmd,
+        saves as saves_cmd,
     },
     context::Context,
     human,
@@ -58,6 +62,7 @@ pub struct Snapshot {
     pub card: Option<CardSnapshot>,
     /// `None` when there is no library at the configured path.
     pub library: Option<LibraryView>,
+    pub verification: Option<Box<Index>>,
 }
 
 /// What the Cores, BIOS and Device tabs show of the mounted card.
@@ -66,18 +71,16 @@ pub struct CardSnapshot {
     pub cores: CoreListReport,
     pub inventory: Option<Arc<Inventory>>,
     pub bios: BiosReport,
-    pub clean: CleanPlan,
     /// ROM files on the card the library doesn't hold (every ROM file when
     /// there is no library). BIOS and other core-declared files are excluded.
-    pub card_roms: Vec<CardOnlyRom>,
+    pub card_roms: Vec<CardRom>,
+    pub card_presence: Vec<Presence>,
 }
 
 /// What the Games tab shows of the library.
 pub struct LibraryView {
     pub root: PathBuf,
     pub games: Vec<GameRow>,
-    /// Device registered on the mounted card, if any.
-    pub device: Option<Device>,
     pub saves: usize,
     /// Platform ids the library holds ROMs for.
     pub platforms: Vec<String>,
@@ -86,15 +89,27 @@ pub struct LibraryView {
 pub struct GameRow {
     pub game: Game,
     pub cover: Option<PathBuf>,
-    /// First ROM of the game exists under Assets/<platform>/common/ on the card.
-    pub on_card: bool,
+    pub matches: Vec<LocalMatch>,
+}
+
+impl GameRow {
+    pub fn on_card(&self) -> bool {
+        self.matches.iter().any(|m| m.presence == Presence::Both)
+    }
 }
 
 /// Something to plan on the worker; the plan comes back as a [`Pending`]
 /// for the user to confirm.
 pub enum Request {
-    /// Sync the device registered on the mounted card.
-    DeviceSync,
+    CardRename {
+        path: PathBuf,
+        new_name: String,
+    },
+    Clean,
+    Copy {
+        platform: Option<String>,
+        roms: Vec<String>,
+    },
     Saves,
     Import(ImportArgs),
     Standardize,
@@ -103,11 +118,12 @@ pub enum Request {
         spec: String,
         new_name: String,
     },
-    CardImport(DeviceImportArgs),
+    CardImport(CardImportArgs),
 }
 
 /// A plan: shown in a dialog, then applied once confirmed.
 pub enum Pending {
+    CardRename(pocketeer_core::roms::rename::CardRenamePlan),
     Install(Vec<Prepared>),
     Remove(Vec<UninstallPlan>),
     Place(PlacePlan),
@@ -117,7 +133,7 @@ pub enum Pending {
         label: String,
         actions: Vec<Action>,
     },
-    DeviceSync(Box<DeviceSyncPrepared>),
+    Copy(CopyPlan),
     Saves(Box<SavesPlan>),
     Rename(Box<RenamePlan>),
     /// Renames of existing games to standard names.
@@ -164,6 +180,12 @@ impl Pending {
 }
 
 pub enum Job {
+    Verify {
+        index: Box<Index>,
+        cursor: usize,
+        epoch: u64,
+        token: Arc<AtomicU64>,
+    },
     Load,
     Plan(Request),
     Apply(Pending),
@@ -186,6 +208,11 @@ pub enum Job {
 }
 
 pub enum Msg {
+    Verified {
+        result: Result<Box<Index>>,
+        next: usize,
+        epoch: u64,
+    },
     Loaded(Result<Box<Snapshot>>),
     Planned(Result<Pending>),
     Progress(Event),
@@ -209,6 +236,7 @@ pub struct Worker {
     tx: Sender<(Context, Job)>,
     side_tx: Sender<(Context, Job)>,
     rx: Receiver<Msg>,
+    pub epoch: Arc<AtomicU64>,
 }
 
 impl Worker {
@@ -246,6 +274,7 @@ impl Worker {
             tx: job_tx,
             side_tx,
             rx: msg_rx,
+            epoch: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -269,6 +298,31 @@ impl Worker {
 
 fn run(ctx: &Context, job: Job, progress: &mut dyn FnMut(Event)) -> Msg {
     match job {
+        Job::Verify {
+            mut index,
+            cursor,
+            epoch,
+            token,
+        } => {
+            let cancelled = || token.load(Ordering::Relaxed) != epoch;
+            let mut next = cursor;
+            let result = ctx.pocket().map(|pocket| {
+                if index.verify(&pocket, cursor, false, &cancelled) {
+                    next += 1;
+                }
+                if !cancelled() {
+                    if let Err(e) = index.save(&pocket) {
+                        index.warning = Some(e.to_string());
+                    }
+                }
+                index
+            });
+            Msg::Verified {
+                result,
+                next,
+                epoch,
+            }
+        }
         Job::Load => Msg::Loaded(load(ctx, progress).map(Box::new)),
         Job::Plan(request) => Msg::Planned(plan(ctx, request, progress)),
         Job::Apply(pending) => apply(ctx, pending, progress),
@@ -287,24 +341,27 @@ fn run(ctx: &Context, job: Job, progress: &mut dyn FnMut(Event)) -> Msg {
         )),
         Job::RefreshLibrary => Msg::LibraryRefreshed(
             ctx.library()
-                .and_then(|lib| library_view(&lib, ctx.pocket_opt().as_ref()).map(Box::new)),
+                .and_then(|lib| library_view(&lib).map(Box::new)),
         ),
     }
 }
 
 fn plan(ctx: &Context, request: Request, progress: &mut dyn FnMut(Event)) -> Result<Pending> {
     Ok(match request {
-        Request::DeviceSync => Pending::DeviceSync(Box::new(device_cmd::plan_sync(
+        Request::CardRename { path, new_name } => {
+            Pending::CardRename(card_cmd::plan_rename(ctx, &path, &new_name)?)
+        }
+        Request::Clean => {
+            progress(Event::Status("Scanning for junk".into()));
+            Pending::Clean(clean::plan(&ctx.pocket()?, false)?)
+        }
+        Request::Copy { platform, roms } => Pending::Copy(card_cmd::plan_copy(
             ctx,
-            &SyncArgs::default(),
+            platform.as_deref(),
+            &roms,
             progress,
-        )?)),
-        Request::Saves => Pending::Saves(Box::new(saves_cmd::plan_sync(
-            ctx,
-            saves_cmd::Direction::Both,
-            true,
-            progress,
-        )?)),
+        )?),
+        Request::Saves => Pending::Saves(Box::new(saves_cmd::plan_sync(ctx, true, progress)?)),
         Request::Import(args) => {
             Pending::Import(Box::new(library_cmd::plan_import(ctx, &args, progress)?))
         }
@@ -320,7 +377,7 @@ fn plan(ctx: &Context, request: Request, progress: &mut dyn FnMut(Event)) -> Res
             &new_name,
         )?)),
         Request::CardImport(args) => {
-            let (plan, _not_found) = device_cmd::plan_import(ctx, &args, progress)?;
+            let (plan, _not_found) = card_import_cmd::plan_import(ctx, &args, progress)?;
             Pending::CardImport(Box::new(plan))
         }
     })
@@ -330,6 +387,10 @@ fn plan(ctx: &Context, request: Request, progress: &mut dyn FnMut(Event)) -> Res
 /// the CLI prints (`Mode::Interactive`: no CLI flags in it).
 fn apply(ctx: &Context, pending: Pending, progress: &mut dyn FnMut(Event)) -> Msg {
     match pending {
+        Pending::CardRename(plan) => {
+            let result = card_cmd::apply_rename(ctx, &plan);
+            shown(plan, result, |s| card_cmd::rename_report(&s))
+        }
         Pending::Install(preps) => {
             let pocket = match ctx.pocket() {
                 Ok(p) => p,
@@ -374,10 +435,9 @@ fn apply(ctx: &Context, pending: Pending, progress: &mut dyn FnMut(Event)) -> Ms
                 Err(e) => applied(format!("✗ {label}: {e}"), 1),
             }
         }
-        Pending::DeviceSync(prep) => {
-            let plan = prep.plan.clone();
-            let result = device_cmd::apply_sync(ctx, *prep, progress);
-            shown(plan, result, |s| device_cmd::device_sync(&s))
+        Pending::Copy(plan) => {
+            let result = card_cmd::apply_copy(ctx, &plan, progress);
+            shown(plan, result, |s| card_cmd::copy_report(&s))
         }
         Pending::Saves(plan) => {
             let result = saves_cmd::apply_sync(ctx, &plan, progress);
@@ -389,13 +449,7 @@ fn apply(ctx: &Context, pending: Pending, progress: &mut dyn FnMut(Event)) -> Ms
             shown(*plan, result, |s| library_cmd::library_rename(&s))
         }
         Pending::Standardize(renames) => {
-            let result = renames
-                .iter()
-                .map(|p| {
-                    progress(Event::Status(format!("Renaming {}", p.old_name)));
-                    library_cmd::apply_rename(ctx, p)
-                })
-                .collect();
+            let result = library_cmd::apply_standardize(ctx, &renames, progress);
             shown(library_cmd::StandardizePlan { renames }, result, |s| {
                 library_cmd::library_standardize(&s)
             })
@@ -406,9 +460,9 @@ fn apply(ctx: &Context, pending: Pending, progress: &mut dyn FnMut(Event)) -> Ms
             shown(*plan, result, |s| library_cmd::library_remove(&s))
         }
         Pending::CardImport(plan) => {
-            let result = device_cmd::apply_import(ctx, &plan, progress);
+            let result = card_import_cmd::apply_import(ctx, &plan, progress);
             shown(*plan, result, |staged| {
-                device_cmd::device_import(&device_cmd::ImportReport {
+                card_import_cmd::report(&card_import_cmd::ImportReport {
                     staged,
                     not_found: Vec::new(),
                     covers: None,
@@ -479,39 +533,23 @@ fn fetch_covers(
     }
 }
 
-/// The Games tab's view of the library: cheap enough to rebuild after every
-/// imported file (database reads plus one `stat` per game on the card).
-/// Without a card nothing is "on card" and no device is current.
-fn library_view(lib: &Library, pocket: Option<&Pocket>) -> Result<LibraryView> {
+/// Library metadata; card presence is joined separately by content hash.
+fn library_view(lib: &Library) -> Result<LibraryView> {
     let games = lib.list_games(None, None)?;
     let rows = games
         .into_iter()
         .map(|game| {
             let cover = covers::path_for(lib, game.id).ok().flatten();
-            let on_card = pocket.is_some_and(|pocket| {
-                game.roms.first().is_some_and(|r| {
-                    pocket
-                        .assets_dir()
-                        .join(&game.platform)
-                        .join("common")
-                        .join(&r.name)
-                        .is_file()
-                })
-            });
             GameRow {
                 game,
                 cover,
-                on_card,
+                matches: Vec::new(),
             }
         })
         .collect();
     Ok(LibraryView {
         root: lib.root().to_path_buf(),
         games: rows,
-        device: match pocket {
-            Some(p) => device::current(lib, p)?,
-            None => None,
-        },
         saves: pocketeer_core::library::saves::list(lib)?.len(),
         platforms: lib
             .platform_stats()?
@@ -525,56 +563,93 @@ fn load(ctx: &Context, progress: &mut dyn FnMut(Event)) -> Result<Snapshot> {
     let pocket = ctx.pocket_opt();
     let fingerprint =
         pocketeer_core::watch::fingerprint(pocket.as_ref(), ctx.library_path().ok().as_deref());
-    let lib = ctx.library().ok();
+    let lib = match ctx.library() {
+        Ok(lib) => Some(lib),
+        Err(Error::LibraryNotFound { .. }) => None,
+        Err(e) => return Err(e),
+    };
+    let mut verification = None;
     let card = match &pocket {
-        Some(pocket) => Some(load_card(ctx, pocket, lib.as_ref(), progress)?),
+        Some(pocket) => {
+            let (card, index) = load_card(ctx, pocket, progress)?;
+            verification = Some(Box::new(index));
+            Some(card)
+        }
         None => None,
     };
     let library = match &lib {
         Some(lib) => {
             progress(Event::Status("Reading library".into()));
-            Some(library_view(lib, pocket.as_ref())?)
+            Some(library_view(lib)?)
         }
         None => None,
     };
-    Ok(Snapshot {
+    let mut snapshot = Snapshot {
         fingerprint,
         card,
         library,
-    })
+        verification,
+    };
+    snapshot.rematch();
+    Ok(snapshot)
 }
 
 fn load_card(
     ctx: &Context,
     pocket: &Pocket,
-    lib: Option<&Library>,
     progress: &mut dyn FnMut(Event),
-) -> Result<CardSnapshot> {
+) -> Result<(CardSnapshot, Index)> {
     progress(Event::Status("Reading card".into()));
-    let status = status::status(pocket)?;
+    let installed = cores::list_installed(pocket)?;
+    let status = Status::read(pocket, &installed);
     progress(Event::Status("Loading inventory".into()));
     let inventory = ctx.inventory_lenient();
-    let cores = cores::report(pocket, &inventory)?;
     progress(Event::Status("Checking required files".into()));
-    let installed = cores::list_installed(pocket)?;
     let bios = required::check(pocket, &installed, None)?;
-    progress(Event::Status("Scanning for junk".into()));
-    let clean = clean::plan(pocket, false)?;
     progress(Event::Status("Listing ROMs".into()));
-    // Name and size only: nothing is read from the card here.
-    let card_roms = match lib {
-        Some(lib) => orphans::list(lib, pocket, None)?,
-        None => orphans::scan_card(pocket, None)?,
-    };
-    Ok(CardSnapshot {
-        status,
-        cores,
-        inventory: match inventory {
-            InventoryLoad::Loaded(inv) => Some(Arc::new(inv)),
-            InventoryLoad::Unavailable(_) => None,
+    let declared = bios.all_files().map(|f| f.path.clone()).collect();
+    let mut index = Index::scan_with_protected(pocket, &declared)?;
+    // Persist removed paths even when no ROM remains to schedule verification.
+    if let Err(e) = index.save(pocket) {
+        index.warning = Some(format!("Cache not saved: {e}"));
+    }
+    let cores = installed.report(&inventory);
+    Ok((
+        CardSnapshot {
+            status,
+            cores,
+            inventory: match inventory {
+                InventoryLoad::Loaded(inv) => Some(Arc::new(inv)),
+                InventoryLoad::Unavailable(_) => None,
+            },
+            bios,
+            card_roms: index.roms.clone(),
+            card_presence: Vec::new(),
         },
-        bios,
-        clean,
-        card_roms,
-    })
+        index,
+    ))
+}
+
+impl Snapshot {
+    pub fn rematch(&mut self) {
+        let Some(card) = &mut self.card else {
+            return;
+        };
+        let games = self
+            .library
+            .iter()
+            .flat_map(|l| l.games.iter().map(|r| &r.game));
+        let comparison = matching::compare(games, &card.card_roms);
+        if let Some(library) = &mut self.library {
+            for row in &mut library.games {
+                row.matches = row
+                    .game
+                    .roms
+                    .iter()
+                    .filter_map(|r| comparison.local.get(&r.id).cloned())
+                    .collect();
+            }
+        }
+        card.card_presence = comparison.card;
+    }
 }

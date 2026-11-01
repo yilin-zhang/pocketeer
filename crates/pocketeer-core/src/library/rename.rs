@@ -1,79 +1,13 @@
-//! Renaming a library ROM. The display name *is* the file name: the game
-//! row, the ROM row, the managed file, the card's copy and every save keyed
-//! to the old name move together.
-//!
-//! When no card is mounted (or another card has the old name), the rename is
-//! remembered in the `renames` table and `device sync` applies it to any card
-//! that still carries the old name: no file is read, just renamed.
+//! Explicit local ROM rename. Card paths and save backups have independent identities.
 
-use std::path::{Path, PathBuf};
-
-use rusqlite::params;
 use serde::Serialize;
 
 use crate::{
-    Error, Pocket, Result, fsutil,
-    roms::{
-        card,
-        rename::{
-            FileRename, RenameKind, apply_renames, companion_renames, extension, stem,
-            validate_name,
-        },
-    },
+    Error, Result,
+    roms::rename::{FileRename, RenameKind, apply_renames, complete_name, stem, validate_name},
 };
 
-use super::{Library, covers, db, resolve_rom, saves};
-
-pub(crate) const MIGRATION_RENAMES: &str = "
-    CREATE TABLE renames (
-        id         INTEGER PRIMARY KEY,
-        platform   TEXT NOT NULL,
-        old_name   TEXT NOT NULL,
-        new_name   TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-    );
-    CREATE INDEX renames_platform ON renames(platform, id);
-";
-
-/// Remembers a rename so cards that still have `old_name` get it on sync.
-pub fn record_rename(
-    conn: &rusqlite::Connection,
-    platform: &str,
-    old: &str,
-    new: &str,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO renames (platform, old_name, new_name, created_at) VALUES (?1, ?2, ?3, ?4)",
-        params![platform, old, new, fsutil::now_secs()],
-    )
-    .map_err(|e| Error::db(e, "record rename"))?;
-    Ok(())
-}
-
-/// Every rename ever made on a platform, oldest first (so chains A→B→C replay
-/// in order). Cards apply the ones whose old name they still carry.
-pub fn pending_renames(
-    conn: &rusqlite::Connection,
-    platform: &str,
-) -> Result<Vec<(String, String)>> {
-    db::query_rows(
-        conn,
-        "SELECT old_name, new_name FROM renames WHERE platform = ?1 ORDER BY id",
-        params![platform],
-        "pending renames",
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )
-}
-
-/// What a card contributes to the rename.
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct CardPart {
-    pub root: PathBuf,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub device: Option<String>,
-    /// ROM copies and their saves, relative to the card root.
-    pub renames: Vec<FileRename>,
-}
+use super::{Library, covers, db, resolve_rom};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RenamePlan {
@@ -88,34 +22,17 @@ pub struct RenamePlan {
     /// Managed file move, relative to the library root (`None` for references).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub library_file: Option<FileRename>,
-    /// Save mirror moves, relative to the library root.
-    pub library_saves: Vec<FileRename>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub card: Option<CardPart>,
 }
 
 impl RenamePlan {
     /// File moves plus the index update.
     pub fn changes(&self) -> usize {
         1 + self.library_file.is_some() as usize
-            + self.library_saves.len()
-            + self.card.as_ref().map(|c| c.renames.len()).unwrap_or(0)
-    }
-}
-
-/// `new_name` without an extension inherits the old one.
-fn complete_name(old_name: &str, new_name: &str) -> String {
-    let new_name = new_name.trim();
-    if extension(new_name).is_empty() {
-        format!("{new_name}{}", extension(old_name))
-    } else {
-        new_name.to_string()
     }
 }
 
 pub fn plan(
     lib: &Library,
-    pocket: Option<&Pocket>,
     platform: Option<&str>,
     spec: &str,
     new_name: &str,
@@ -168,59 +85,6 @@ pub fn plan(
         }
         None => None,
     };
-    let library_saves = companion_renames(
-        &lib.root().join("saves"),
-        &game.platform,
-        &rom.name,
-        &new_name,
-    )
-    .into_iter()
-    .map(|r| FileRename {
-        from: Path::new("saves").join(r.from),
-        to: Path::new("saves").join(r.to),
-        kind: r.kind,
-    })
-    .collect();
-
-    let card = match pocket {
-        None => None,
-        Some(pocket) => {
-            let mut renames = Vec::new();
-            for dir in card::platform_dirs(pocket, &game.platform)? {
-                if !dir.files.iter().any(|f| f.name == rom.name) {
-                    continue;
-                }
-                let to = dir.path.join(&new_name);
-                if pocket.root().join(&to).exists() {
-                    return Err(taken(&format!(
-                        "a file on the card in {}",
-                        dir.path.display()
-                    )));
-                }
-                renames.push(FileRename {
-                    from: dir.path.join(&rom.name),
-                    to,
-                    kind: RenameKind::Rom,
-                });
-            }
-            if renames.is_empty() {
-                None
-            } else {
-                renames.extend(companion_renames(
-                    pocket.root(),
-                    &game.platform,
-                    &rom.name,
-                    &new_name,
-                ));
-                Some(CardPart {
-                    root: pocket.root().to_path_buf(),
-                    device: super::device::read_marker(pocket)?.map(|m| m.name),
-                    renames,
-                })
-            }
-        }
-    };
-
     Ok(RenamePlan {
         rom_id: rom.id,
         game_id: game.id,
@@ -230,101 +94,71 @@ pub fn plan(
         old_game_name: game.name,
         new_game_name,
         library_file,
-        library_saves,
-        card,
     })
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct RenameResult {
     pub library_renamed: usize,
-    pub card_renamed: usize,
-    pub failed: Vec<RenameFailure>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct RenameFailure {
-    pub path: PathBuf,
-    pub error: crate::ErrorInfo,
-}
-
-/// Library first (file, then index in one transaction), card second. A card
-/// failure leaves the library renamed; the next sync finishes the card.
-pub fn apply(
-    lib: &mut Library,
-    pocket: Option<&Pocket>,
-    plan: &RenamePlan,
-) -> Result<RenameResult> {
-    let mut result = RenameResult::default();
+pub fn apply(lib: &mut Library, plan: &RenamePlan) -> Result<RenameResult> {
     let root = lib.root().to_path_buf();
-
-    // One atomic batch: a failed save move puts the ROM file back too, so
-    // the index still matches the disk.
-    let library_moves: Vec<FileRename> = plan
-        .library_file
-        .iter()
-        .chain(&plan.library_saves)
-        .cloned()
-        .collect();
-    result.library_renamed = apply_renames(&root, &library_moves)?;
-
     let tx = lib
         .conn_mut()
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| Error::db(e, "begin rename"))?;
-    db::rename_rom(
-        &tx,
-        plan.rom_id,
-        &plan.new_name,
-        plan.library_file.as_ref().and_then(|f| f.to.to_str()),
-    )?;
-    if plan.new_game_name != plan.old_game_name {
-        db::rename_game(&tx, plan.game_id, &plan.new_game_name)?;
+    let current: String = tx
+        .query_row("SELECT name FROM roms WHERE id = ?1", [plan.rom_id], |r| {
+            r.get(0)
+        })
+        .map_err(|e| Error::db(e, "validate rename preview"))?;
+    if current != plan.old_name {
+        return Err(Error::Usage {
+            message: "ROM changed since rename preview; preview again".into(),
+            hint: None,
+        });
     }
-    for r in &plan.library_saves {
-        // Save rows are keyed by the card-relative path (without `saves/`).
-        saves::rename_path(&tx, strip_saves(&r.from), strip_saves(&r.to))?;
-    }
-    record_rename(&tx, &plan.platform, &plan.old_name, &plan.new_name)?;
-    if plan.new_game_name != plan.old_game_name {
-        // A cover that wasn't found under the old name may exist under the new one.
-        covers::reset_unfound(&tx, plan.game_id)?;
-    }
-    tx.commit().map_err(|e| Error::db(e, "commit rename"))?;
-
-    if let (Some(card), Some(pocket)) = (&plan.card, pocket) {
-        match apply_renames(pocket.root(), &card.renames) {
-            Ok(n) => result.card_renamed = n,
-            Err(e) => result.failed.push(RenameFailure {
-                path: failing_path(&e)
-                    .and_then(|p| p.strip_prefix(pocket.root()).ok())
-                    .map(Path::to_path_buf)
-                    .unwrap_or_default(),
-                error: e.to_info(),
-            }),
+    let moves: Vec<_> = plan.library_file.iter().cloned().collect();
+    let renamed = apply_renames(&root, &moves)?;
+    let updated = (|| -> Result<()> {
+        db::rename_rom(
+            &tx,
+            plan.rom_id,
+            &plan.new_name,
+            plan.library_file.as_ref().and_then(|f| f.to.to_str()),
+        )?;
+        if plan.new_game_name != plan.old_game_name {
+            db::rename_game(&tx, plan.game_id, &plan.new_game_name)?;
+            covers::reset_unfound(&tx, plan.game_id)?;
         }
+        tx.commit().map_err(|e| Error::db(e, "commit rename"))
+    })();
+    if let Err(error) = updated {
+        let undo: Vec<_> = moves
+            .iter()
+            .rev()
+            .map(|m| FileRename {
+                from: m.to.clone(),
+                to: m.from.clone(),
+                kind: m.kind,
+            })
+            .collect();
+        return Err(Error::ApplyFailed {
+            step: renamed,
+            rolled_back: apply_renames(&root, &undo).is_ok(),
+            source: Box::new(error),
+        });
     }
-    Ok(result)
-}
-
-fn strip_saves(p: &Path) -> &Path {
-    p.strip_prefix("saves").unwrap_or(p)
-}
-
-/// The file a rename failure is about, when the error names one.
-fn failing_path(e: &Error) -> Option<&Path> {
-    match e {
-        Error::Io { path, .. } | Error::AlreadyExists { path } | Error::NotADirectory { path } => {
-            Some(path)
-        }
-        _ => None,
-    }
+    Ok(RenameResult {
+        library_renamed: renamed,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{library_with, sd, write};
+    use crate::testutil::{library_with, write};
 
     #[test]
     fn resolves_by_id_name_or_game() {
@@ -349,93 +183,31 @@ mod tests {
     }
 
     #[test]
-    fn renames_library_and_card_together() {
-        let (_t, mut lib) = library_with(&[("Foo (USA).fkh", "hello world"), ("Bar.fkh", "22")]);
-        let (_sd, pocket) = sd();
-        write(
-            pocket.root(),
-            "Assets/fkh/common/Foo (USA).fkh",
-            "hello world",
+    fn local_rename_updates_the_managed_file_and_library_index() {
+        let (_tmp, mut lib) = library_with(&[("Foo.fkh", "rom"), ("Bar.fkh", "other")]);
+        write(lib.root(), "saves/Saves/fkh/common/Foo.sav", "backup");
+        let preview = plan(&lib, None, "Foo.fkh", "New name").unwrap();
+        assert_eq!(preview.new_name, "New name.fkh");
+        apply(&mut lib, &preview).unwrap();
+        let (game, rom) = resolve_rom(&lib, None, "New name.fkh").unwrap();
+        assert_eq!(game.name, "New name");
+        assert_eq!(std::fs::read(lib.rom_abs_path(&rom)).unwrap(), b"rom");
+        assert_eq!(
+            std::fs::read(lib.root().join("saves/Saves/fkh/common/Foo.sav")).unwrap(),
+            b"backup"
         );
-        write(pocket.root(), "Saves/fkh/common/Foo (USA).sav", "s");
-        write(pocket.root(), "Saves/fkh/common/Bar.sav", "s");
-        write(lib.root(), "saves/Saves/fkh/common/Foo (USA).sav", "s");
-        lib.conn()
-            .execute(
-                "INSERT INTO saves (rel_path, size, sha1, mtime, updated_at) VALUES ('Saves/fkh/common/Foo (USA).sav', 1, 'x', 0, 0)",
-                [],
-            )
-            .unwrap();
+        assert!(plan(&lib, None, "Bar.fkh", "New name.fkh").is_err());
+        assert!(apply(&mut lib, &preview).is_err());
+    }
 
-        // Extension is inherited.
-        let plan = plan(&lib, Some(&pocket), None, "Foo (USA)", "Foo (Europe)").unwrap();
-        assert_eq!(plan.new_name, "Foo (Europe).fkh");
-        assert_eq!(plan.new_game_name, "Foo (Europe)");
-        assert_eq!(
-            plan.library_file.as_ref().unwrap().to,
-            Path::new("roms/fkh/Foo (Europe).fkh")
-        );
-        assert_eq!(plan.library_saves.len(), 1);
-        let card = plan.card.as_ref().unwrap();
-        assert_eq!(card.renames.len(), 2, "{:?}", card.renames);
-        assert_eq!(plan.changes(), 5);
-
-        let r = apply(&mut lib, Some(&pocket), &plan).unwrap();
-        assert!(r.failed.is_empty());
-        assert_eq!((r.library_renamed, r.card_renamed), (2, 2));
-        assert!(lib.root().join("roms/fkh/Foo (Europe).fkh").is_file());
-        assert!(
-            lib.root()
-                .join("saves/Saves/fkh/common/Foo (Europe).sav")
-                .is_file()
-        );
-        assert!(
-            pocket
-                .root()
-                .join("Assets/fkh/common/Foo (Europe).fkh")
-                .is_file()
-        );
-        assert!(
-            pocket
-                .root()
-                .join("Saves/fkh/common/Foo (Europe).sav")
-                .is_file()
-        );
-        assert!(pocket.root().join("Saves/fkh/common/Bar.sav").is_file());
-        let (g, rom) = resolve_rom(&lib, None, "Foo (Europe).fkh").unwrap();
-        assert_eq!(g.name, "Foo (Europe)");
-        assert_eq!(
-            rom.rel_path.as_deref(),
-            Some(Path::new("roms/fkh/Foo (Europe).fkh"))
-        );
-        let saved: String = lib
-            .conn()
-            .query_row("SELECT rel_path FROM saves", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(saved, "Saves/fkh/common/Foo (Europe).sav");
-
-        // Conflicts.
-        assert_eq!(
-            super::plan(&lib, None, None, "Bar.fkh", "Foo (Europe).fkh")
-                .unwrap_err()
-                .code(),
-            "NAME_TAKEN"
-        );
-        assert_eq!(
-            super::plan(&lib, None, None, "Bar.fkh", "a/b")
-                .unwrap_err()
-                .code(),
-            "INVALID_NAME"
-        );
-        assert_eq!(
-            super::plan(&lib, None, None, "Bar.fkh", "Bar")
-                .unwrap_err()
-                .code(),
-            "NAME_TAKEN"
-        );
-        // No card: library only.
-        let p2 = super::plan(&lib, None, None, "Bar.fkh", "Baz").unwrap();
-        assert!(p2.card.is_none());
-        assert_eq!(p2.changes(), 2);
+    #[test]
+    fn database_failure_restores_the_original_file_and_index() {
+        let (_tmp, mut lib) = library_with(&[("Foo.fkh", "rom")]);
+        let preview = plan(&lib, None, "Foo.fkh", "New name").unwrap();
+        lib.conn().execute_batch("CREATE TRIGGER reject_rename BEFORE UPDATE ON roms BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
+        assert!(apply(&mut lib, &preview).is_err());
+        let (_, rom) = resolve_rom(&lib, None, "Foo.fkh").unwrap();
+        assert_eq!(std::fs::read(lib.rom_abs_path(&rom)).unwrap(), b"rom");
+        assert!(!lib.root().join("roms/fkh/New name.fkh").exists());
     }
 }

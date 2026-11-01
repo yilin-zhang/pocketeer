@@ -19,7 +19,6 @@ use pocketeer_core::{
         import::{ImportAction, ImportSkip},
     },
     net::Source,
-    roms::{rename::FileRename, sync::SyncAction},
 };
 
 use crate::commands::Mode;
@@ -189,7 +188,7 @@ pub(crate) fn file_name(p: &std::path::Path) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Core plans (cores install/remove, device sync).
+// Core installation and removal plans.
 
 pub(crate) fn install_plan(out: &mut String, plan: &InstallPlan, mode: Mode) {
     let transition = match &plan.installed_version {
@@ -300,54 +299,6 @@ pub(crate) fn remove_plan(out: &mut String, plan: &UninstallPlan) {
         let _ = writeln!(out, "  nothing to remove");
     }
     actions(out, &plan.actions);
-}
-
-// ---------------------------------------------------------------------------
-// ROM sync plans (roms sync, device sync).
-
-/// One planned sync action; `None` for skips (summarised separately).
-pub(crate) fn sync_action_line(a: &SyncAction) -> Option<String> {
-    let mark = |overwrite: bool| if overwrite { "~" } else { "+" };
-    Some(match a {
-        SyncAction::Copy { to, overwrite, .. } => {
-            format!("  {} {}", mark(*overwrite), to.display())
-        }
-        SyncAction::Extract {
-            to,
-            overwrite,
-            inner,
-            ..
-        } => format!(
-            "  {} {}  (from zip: {inner})",
-            mark(*overwrite),
-            to.display()
-        ),
-        SyncAction::Rename {
-            from,
-            to,
-            companions,
-            ..
-        } => sync_rename_line(from, to, companions),
-        SyncAction::Delete { path } => format!("  - {}", path.display()),
-        SyncAction::Skip { .. } => return None,
-    })
-}
-
-pub(crate) fn sync_rename_line(
-    from: &std::path::Path,
-    to: &std::path::Path,
-    companions: &[FileRename],
-) -> String {
-    format!(
-        "  ⇢ {}  →  {}{}",
-        from.display(),
-        file_name(to),
-        if companions.is_empty() {
-            String::new()
-        } else {
-            format!("  (+{} save file(s))", companions.len())
-        }
-    )
 }
 
 // ---------------------------------------------------------------------------

@@ -105,7 +105,7 @@ pub enum Error {
         found: Vec<String>,
     },
 
-    #[error("apply failed at step {step}{}: {source}", if *rolled_back { ", all changes rolled back" } else { ", ROLLBACK FAILED (see .pocketeer/staging on the card)" })]
+    #[error("apply failed at step {step}{}: {source}", if *rolled_back { ", all changes rolled back" } else { ", ROLLBACK FAILED" })]
     ApplyFailed {
         step: usize,
         rolled_back: bool,
@@ -278,7 +278,7 @@ pub const CODES: &[(&str, &str)] = &[
     ("DEVICE_NOT_FOUND", "no device with that id or name"),
     (
         "NO_DEVICE",
-        "mounted card has no device marker; run device add",
+        "legacy device registration missing (reserved code)",
     ),
     ("DEVICE_EXISTS", "card or name already registered"),
     (
@@ -485,10 +485,7 @@ impl Error {
             }
             Error::ApplyFailed {
                 rolled_back: false, ..
-            } => Some("The files moved aside are under .pocketeer/staging on the card".into()),
-            Error::NoDevice => {
-                Some("Register the card first: `pocketeer device add --name <NAME>`".into())
-            }
+            } => Some("Some changes could not be rolled back; inspect the reported paths. Core install recovery files, if any, are under .pocketeer/staging".into()),
             Error::LibraryNotFound { .. } => Some(
                 "Run `pocketeer library init`, or point at one with --library / `pocketeer config set library <DIR>`"
                     .into(),

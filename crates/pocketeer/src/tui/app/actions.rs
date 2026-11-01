@@ -162,20 +162,6 @@ impl App {
         if self.card().is_none() {
             return;
         }
-        let Some(snap) = self.card_view() else {
-            return;
-        };
-        if snap.clean.entries.is_empty() {
-            self.notice("No macOS junk on the card.");
-            return;
-        }
-        let title = format!(
-            "Delete {} junk item(s), {}?",
-            snap.clean.entries.len(),
-            human::bytes(snap.clean.bytes)
-        );
-        let plan = snap.clean.clone();
-        let lines = text_lines(&card_cmd::clean_report(&Staged::preview(plan.clone())));
-        self.confirm(title, lines, Pending::Clean(plan));
+        self.submit("Scanning for junk", Job::Plan(Request::Clean));
     }
 }

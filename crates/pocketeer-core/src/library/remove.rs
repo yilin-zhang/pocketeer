@@ -1,7 +1,6 @@
 //! Removing ROMs from the library. Managed files go to `.trash/<timestamp>/`
 //! inside the library (never erased); referenced originals are left alone.
-//! Cards are untouched: `device sync --delete` is what takes a removed ROM
-//! off a card.
+//! Card copies are managed separately.
 
 use std::path::PathBuf;
 

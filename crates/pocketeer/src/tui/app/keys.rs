@@ -81,12 +81,7 @@ impl App {
             KeyCode::Char('C') if self.tab == Tab::Games => self.fetch_all_covers(),
             KeyCode::Char('t') if self.tab == Tab::Games => self.standardize(),
             // Games + Device
-            KeyCode::Char('D') if matches!(self.tab, Tab::Games | Tab::Device) => {
-                self.device_dialog()
-            }
-            KeyCode::Char('S') if matches!(self.tab, Tab::Games | Tab::Device) => {
-                self.plan_device_sync()
-            }
+            KeyCode::Char('S') if self.tab == Tab::Games => self.copy_selected(),
             KeyCode::Char('V') if matches!(self.tab, Tab::Games | Tab::Device) => self.plan_saves(),
             // Device
             KeyCode::Char('c') if self.tab == Tab::Device => self.clean(),

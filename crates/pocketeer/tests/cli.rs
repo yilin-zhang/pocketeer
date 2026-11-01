@@ -283,7 +283,7 @@ fn docs_render_whole_tree_and_subtree() {
     for needle in [
         "# pocketeer CLI reference",
         "### `pocketeer cores install`",
-        "### `pocketeer device sync`",
+        "### `pocketeer card copy`",
         "### `pocketeer library import`",
         "| `USAGE` |",
         "--dry-run",

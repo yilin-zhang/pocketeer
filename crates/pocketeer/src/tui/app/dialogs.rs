@@ -1,11 +1,11 @@
 //! What happens when an input / pick / toggle dialog is submitted, and the
 //! small text helpers those dialogs need.
 
-use pocketeer_core::library::{device, import::apply_suggestions};
+use pocketeer_core::library::import::apply_suggestions;
 
 use super::*;
 use crate::{
-    cli::{ApplyArgs, ImportArgs, ImportModeArg},
+    cli::{ApplyArgs, ImportArgs},
     commands::library as library_cmd,
 };
 
@@ -19,6 +19,13 @@ impl App {
 
     pub(super) fn submit_input(&mut self, kind: InputKind, value: String) {
         match kind {
+            InputKind::CardRename { path } => self.submit(
+                "Planning AP rename",
+                Job::Plan(Request::CardRename {
+                    path,
+                    new_name: value,
+                }),
+            ),
             InputKind::Rename { platform, spec } => {
                 if value.trim().is_empty() {
                     return;
@@ -99,33 +106,11 @@ impl App {
                         platform,
                         dat,
                         dat_only: false,
-                        mode: ImportModeArg::Copy,
                         no_covers: false,
                         standard_names: false,
                         apply: ApplyArgs::default(),
                     })),
                 );
-            }
-            InputKind::DeviceName => {
-                let name = value.trim().to_string();
-                if name.is_empty() {
-                    return;
-                }
-                if self.card().is_none() {
-                    return;
-                }
-                let Some(ctx) = self.lib_ctx() else {
-                    return;
-                };
-                match crate::commands::device::add(&ctx, &name) {
-                    Ok(d) => {
-                        self.notice(format!("✓ registered this card as {}", d.name));
-                        // Straight on to subscriptions once the reload lands.
-                        self.open_subscriptions_after_reload = true;
-                        self.reload();
-                    }
-                    Err(e) => self.error("Can't register the card", &e),
-                }
             }
             InputKind::CoverSystem { platform } => {
                 let system = value.trim().to_string();
@@ -175,9 +160,24 @@ impl App {
 
     pub(super) fn submit_pick(&mut self, kind: PickKind, selected: usize) {
         match kind {
+            PickKind::SaveConflict { mut plan, index } => {
+                use pocketeer_core::library::saves::ConflictChoice;
+                let choice = match selected {
+                    0 => ConflictChoice::Card,
+                    1 => ConflictChoice::Computer,
+                    _ => ConflictChoice::Skip,
+                };
+                plan.resolve(index, choice);
+                self.review_saves(plan);
+            }
+            PickKind::RenameActions(mut actions) => {
+                if selected < actions.len() {
+                    self.choose_rename(actions.remove(selected));
+                }
+            }
             PickKind::RenameRom { platform, roms } => {
                 if let Some(name) = roms.get(selected) {
-                    self.rename_prompt(platform, name.clone(), false);
+                    self.rename_options(platform, name.clone());
                 }
             }
             PickKind::ImportPlatform { dir, platforms } => match platforms.get(selected) {
@@ -242,39 +242,6 @@ impl App {
                     lines,
                     Pending::Standardize(chosen),
                 );
-            }
-            ToggleKind::Subscribe {
-                device_id,
-                platforms,
-                cores,
-            } => {
-                let checked: Vec<bool> = items.iter().map(|(_, on)| *on).collect();
-                let split = |names: &[String], flags: &[bool]| -> (Vec<String>, Vec<String>) {
-                    let (on, off): (Vec<_>, Vec<_>) =
-                        names.iter().cloned().zip(flags).partition(|(_, c)| **c);
-                    (
-                        on.into_iter().map(|(n, _)| n).collect(),
-                        off.into_iter().map(|(n, _)| n).collect(),
-                    )
-                };
-                let (p_on, p_off) = split(&platforms, &checked);
-                let (c_on, c_off) = split(&cores, &checked[platforms.len().min(checked.len())..]);
-                let result = self.ctx().library().and_then(|lib| {
-                    device::subscribe(&lib, &device_id, &p_off, &c_off, false)?;
-                    device::subscribe(&lib, &device_id, &p_on, &c_on, true)
-                });
-                match result {
-                    Ok(d) => {
-                        self.notice(format!(
-                            "✓ {} subscribes to {} platform(s), {} core(s)",
-                            d.name,
-                            d.platforms.len(),
-                            d.cores.len()
-                        ));
-                        self.reload();
-                    }
-                    Err(e) => self.error("Can't save subscriptions", &e),
-                }
             }
         }
     }

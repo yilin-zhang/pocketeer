@@ -19,7 +19,7 @@ impl Cycle for Tab {
             Tab::Cores => "1  CORES",
             Tab::Bios => "2  BIOS",
             Tab::Games => "3  GAMES",
-            Tab::Device => "4  DEVICE",
+            Tab::Device => "4  CARD",
         }
     }
 }
@@ -185,7 +185,7 @@ impl Splits {
 }
 
 /// One line of the Games table.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameRef {
     /// Index into `LibraryView::games`.
     Library(usize),
@@ -237,6 +237,9 @@ pub enum Modal {
 pub const HELP: &str = include_str!("../../../docs/tui-help.txt");
 
 pub enum InputKind {
+    CardRename {
+        path: PathBuf,
+    },
     Rename {
         platform: String,
         spec: String,
@@ -250,8 +253,6 @@ pub enum InputKind {
         dir: PathBuf,
         platform: String,
     },
-    /// Register the mounted card as a device.
-    DeviceName,
     /// libretro system name for a platform without a built-in mapping.
     CoverSystem {
         platform: String,
@@ -277,8 +278,16 @@ pub struct Suggestion {
 }
 
 pub enum PickKind {
+    SaveConflict {
+        plan: Box<pocketeer_core::library::saves::SavesPlan>,
+        index: usize,
+    },
+    RenameActions(Vec<RenameChoice>),
     /// Which ROM of a multi-ROM game to rename.
-    RenameRom { platform: String, roms: Vec<String> },
+    RenameRom {
+        platform: String,
+        roms: Vec<String>,
+    },
     /// Folder import, step 2: a known platform, or the last item to type one.
     ImportPlatform {
         dir: PathBuf,
@@ -287,12 +296,6 @@ pub enum PickKind {
 }
 
 pub enum ToggleKind {
-    /// Device subscriptions: library platforms, then installed cores.
-    Subscribe {
-        device_id: String,
-        platforms: Vec<String>,
-        cores: Vec<String>,
-    },
     /// Standard names suggested for an import; items are "old → new".
     ImportNames {
         import: Box<Pending>,
@@ -301,4 +304,24 @@ pub enum ToggleKind {
     },
     /// Renames of existing games to standard names; items align with `plans`.
     Standardize { plans: Vec<RenamePlan> },
+}
+
+pub enum RenameChoice {
+    LocalCustom {
+        platform: String,
+        name: String,
+    },
+    CardCustom {
+        path: PathBuf,
+        name: String,
+    },
+    LocalAdopt {
+        platform: String,
+        spec: String,
+        new_name: String,
+    },
+    CardAdopt {
+        path: PathBuf,
+        new_name: String,
+    },
 }

@@ -1,7 +1,5 @@
-//! A cheap "did anything change?" signal for the TUI: the modification times
-//! of the folders whose listings matter (card Assets/Cores/Saves trees two
-//! levels deep, the library database). Only `stat` calls, no file contents,
-//! so it is safe to poll every couple of seconds even over USB.
+//! Directory metadata signals for external additions, removals and renames.
+//! Nested ROM/save folders participate; file contents are never read.
 
 use std::{
     hash::{Hash, Hasher},
@@ -20,20 +18,15 @@ fn stamp(path: &Path, h: &mut impl Hasher) {
     }
 }
 
-/// Hashes `dir` and its children up to `depth` levels down (directories only).
-fn stamp_tree(dir: &Path, depth: u8, h: &mut impl Hasher) {
-    stamp(dir, h);
-    if depth == 0 {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let p = entry.path();
-        if p.is_dir() && !crate::fsutil::is_hidden(&entry.file_name()) {
-            stamp_tree(&p, depth - 1, h);
-        }
+fn stamp_tree(dir: &Path, h: &mut impl Hasher) {
+    for entry in walkdir::WalkDir::new(dir)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|e| e.file_type().is_dir() && !crate::fsutil::is_hidden(e.file_name()))
+        .filter_map(std::result::Result::ok)
+    {
+        stamp(entry.path(), h);
     }
 }
 
@@ -44,11 +37,12 @@ pub fn fingerprint(pocket: Option<&Pocket>, library: Option<&Path>) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     if let Some(pocket) = pocket {
         let root = pocket.root();
-        stamp_tree(&root.join("Assets"), 2, &mut h);
-        stamp_tree(&root.join("Cores"), 1, &mut h);
-        stamp_tree(&root.join("Saves"), 2, &mut h);
-        stamp_tree(&root.join("Memories").join("Save States"), 2, &mut h);
-        stamp(&crate::library::device::marker_path(pocket), &mut h);
+        stamp_tree(&root.join("Assets"), &mut h);
+        stamp_tree(&root.join("Cores"), &mut h);
+        stamp_tree(&root.join("Saves"), &mut h);
+        stamp_tree(&root.join("GB Studio"), &mut h);
+        stamp_tree(&root.join("Memories").join("Beta"), &mut h);
+        stamp_tree(&root.join("Memories").join("Save States"), &mut h);
     }
     if let Some(lib) = library {
         for f in ["library.sqlite", "library.sqlite-wal"] {
@@ -66,7 +60,7 @@ mod tests {
     #[test]
     fn changes_when_a_rom_is_added_or_renamed() {
         let (tmp, pocket) = sd();
-        write(tmp.path(), "Assets/gba/common/a.gba", "1");
+        write(tmp.path(), "Assets/gba/common/series/region/a.gba", "1");
         let a = fingerprint(Some(&pocket), None);
         assert_eq!(
             a,
@@ -76,11 +70,11 @@ mod tests {
         // Directory mtimes have 1 s granularity on some file systems; force a
         // different listing rather than relying on time passing.
         std::fs::rename(
-            tmp.path().join("Assets/gba/common/a.gba"),
-            tmp.path().join("Assets/gba/common/b.gba"),
+            tmp.path().join("Assets/gba/common/series/region/a.gba"),
+            tmp.path().join("Assets/gba/common/series/region/b.gba"),
         )
         .unwrap();
-        let dir = tmp.path().join("Assets/gba/common");
+        let dir = tmp.path().join("Assets/gba/common/series/region");
         let f = std::fs::File::open(&dir).unwrap();
         let _ = f.set_modified(
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000),

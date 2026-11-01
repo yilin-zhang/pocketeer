@@ -1,12 +1,12 @@
 use std::{path::PathBuf, process::ExitCode};
 
 use pocketeer_core::{
-    Error, Result,
+    Error, ErrorInfo, Result,
     library::{
         self, Library,
         covers::{self, CoverStats, FetchOptions, FetchReport},
         db::Game,
-        import::{self, ImportMode, ImportOptions, ImportPlan, ImportResult},
+        import::{self, ImportOptions, ImportPlan, ImportResult},
         remove::{self, RemovePlan, RemoveResult},
         rename::{self, RenamePlan, RenameResult},
     },
@@ -14,21 +14,17 @@ use pocketeer_core::{
 };
 use serde::Serialize;
 
-use crate::commands::Mode;
 use crate::human::{
     bytes, covers_summary, import_actions, plan_lines, skipped_summary, staged_footer,
     suggestion_footer, table,
 };
 use crate::{
-    cli::{ApplyArgs, CoversCommand, ImportArgs, ImportModeArg, LibraryCommand},
+    cli::{ApplyArgs, CoversCommand, ImportArgs, LibraryCommand},
     commands::{Applied, Plan, Staged, load_dat, stage},
     context::Context,
     output::{Outcome, Output},
 };
-use pocketeer_core::{
-    library::{Status as LibraryStatus, covers::CoverStatus},
-    roms::rename::RenameKind,
-};
+use pocketeer_core::library::{Status as LibraryStatus, covers::CoverStatus};
 use std::fmt::Write;
 
 pub fn run(
@@ -68,16 +64,6 @@ pub fn run(
             standardize(ctx, platform.as_deref(), apply),
             library_standardize,
         ),
-    }
-}
-
-impl From<ImportModeArg> for ImportMode {
-    fn from(m: ImportModeArg) -> Self {
-        match m {
-            ImportModeArg::Copy => ImportMode::Copy,
-            ImportModeArg::Reference => ImportMode::Reference,
-            ImportModeArg::Link => ImportMode::Link,
-        }
     }
 }
 
@@ -191,7 +177,6 @@ pub fn plan_import(
     let opts = ImportOptions {
         platform: args.platform.clone(),
         platform_name: ctx.platform_name(&args.platform),
-        mode: args.mode.into(),
         dat_only: args.dat_only,
     };
     let mut plan = import::plan_import(
@@ -258,25 +243,18 @@ pub fn list(ctx: &Context, platform: Option<&str>, query: Option<&str>) -> Resul
 
 pub type RenameReport = Staged<RenamePlan, RenameResult>;
 
-/// The card is optional: without one, only the library changes and the next
-/// device sync renames the card's copy by name.
+/// Rename a managed ROM locally.
 pub fn plan_rename(
     ctx: &Context,
     platform: Option<&str>,
     spec: &str,
     new_name: &str,
 ) -> Result<RenamePlan> {
-    rename::plan(
-        &ctx.library()?,
-        ctx.pocket_opt().as_ref(),
-        platform,
-        spec,
-        new_name,
-    )
+    rename::plan(&ctx.library()?, platform, spec, new_name)
 }
 
 pub fn apply_rename(ctx: &Context, plan: &RenamePlan) -> Result<RenameResult> {
-    rename::apply(&mut ctx.library()?, ctx.pocket_opt().as_ref(), plan)
+    rename::apply(&mut ctx.library()?, plan)
 }
 
 pub fn rename(
@@ -323,20 +301,35 @@ impl Plan for StandardizePlan {
 }
 
 /// `result` of a standardize: one entry per rename, in plan order.
-impl Applied for Vec<RenameResult> {
+pub type StandardizeResults = Vec<std::result::Result<RenameResult, ErrorInfo>>;
+
+impl Applied for StandardizeResults {
     fn failed(&self) -> usize {
-        self.iter().map(|r| r.failed.len()).sum()
+        self.iter().filter(|r| r.is_err()).count()
     }
 }
 
-pub type StandardizeReport = Staged<StandardizePlan, Vec<RenameResult>>;
+pub type StandardizeReport = Staged<StandardizePlan, StandardizeResults>;
+
+pub fn apply_standardize(
+    ctx: &Context,
+    renames: &[RenamePlan],
+    progress: &mut dyn FnMut(Event),
+) -> Result<StandardizeResults> {
+    let mut lib = ctx.library()?;
+    Ok(renames
+        .iter()
+        .map(|plan| {
+            progress(Event::Status(format!("Renaming {}", plan.old_name)));
+            rename::apply(&mut lib, plan).map_err(|e| e.to_info())
+        })
+        .collect())
+}
 
 /// Every unverified game that matches a standard name, as a rename plan
-/// (card copies and saves follow, as with `library rename`).
+/// for the local library.
 pub fn plan_standardize(ctx: &Context, platform: Option<&str>) -> Result<Vec<RenamePlan>> {
-    library::names::standardize_plan(&ctx.library()?, ctx.pocket_opt().as_ref(), platform, |p| {
-        names_for(ctx, p)
-    })
+    library::names::standardize_plan(&ctx.library()?, platform, |p| names_for(ctx, p))
 }
 
 pub fn standardize(
@@ -346,7 +339,7 @@ pub fn standardize(
 ) -> Result<StandardizeReport> {
     let renames = plan_standardize(ctx, platform)?;
     stage(apply, StandardizePlan { renames }, |plan| {
-        plan.renames.iter().map(|p| apply_rename(ctx, p)).collect()
+        apply_standardize(ctx, &plan.renames, &mut |_| {})
     })
 }
 
@@ -459,17 +452,7 @@ pub fn library_status(s: &LibraryStatus) -> String {
 pub fn library_import(r: &ImportReport) -> String {
     let mut out = String::new();
     let p = &r.staged.plan;
-    let _ = writeln!(
-        out,
-        "{}  →  library/{} ({})",
-        p.dir.display(),
-        p.platform,
-        match p.mode {
-            ImportMode::Copy => "copy",
-            ImportMode::Reference => "reference in place",
-            ImportMode::Link => "hard link",
-        }
-    );
+    let _ = writeln!(out, "{}  →  library/{} (copy)", p.dir.display(), p.platform);
     let skipped = import_actions(&mut out, p.actions.iter());
     let s = &p.summary;
     let _ = writeln!(
@@ -549,14 +532,6 @@ pub fn library_list(r: &ListReport) -> String {
     out
 }
 
-fn rename_kind(k: RenameKind) -> &'static str {
-    match k {
-        RenameKind::Rom => "ROM",
-        RenameKind::Save => "save",
-        RenameKind::SaveState => "state",
-    }
-}
-
 pub fn library_rename(r: &RenameReport) -> String {
     let mut out = String::new();
     let p = &r.plan;
@@ -577,34 +552,6 @@ pub fn library_rename(r: &RenameReport) -> String {
             let _ = writeln!(out, "  library  (referenced file; index only)");
         }
     }
-    for f in &p.library_saves {
-        let _ = writeln!(
-            out,
-            "  library  {} {}  →  {}",
-            rename_kind(f.kind),
-            f.from.display(),
-            f.to.display()
-        );
-    }
-    match &p.card {
-        Some(card) => {
-            for f in &card.renames {
-                let _ = writeln!(
-                    out,
-                    "  card     {} {}  →  {}",
-                    rename_kind(f.kind),
-                    f.from.display(),
-                    f.to.display()
-                );
-            }
-        }
-        None => {
-            let _ = writeln!(
-                out,
-                "  card     not mounted or no copy there; remembered, the next device sync renames it"
-            );
-        }
-    }
     staged_footer(
         &mut out,
         r.mode,
@@ -612,14 +559,7 @@ pub fn library_rename(r: &RenameReport) -> String {
         p.changes().max(1),
         "",
         |out, res| {
-            let _ = writeln!(
-                out,
-                "✓ renamed ({} library, {} card file(s))",
-                res.library_renamed, res.card_renamed
-            );
-            for f in &res.failed {
-                let _ = writeln!(out, "✗ {}: {}", f.path.display(), f.error.message);
-            }
+            let _ = writeln!(out, "✓ renamed {} library file(s)", res.library_renamed);
         },
     );
     out
@@ -649,15 +589,10 @@ pub fn library_remove(r: &RemoveReport) -> String {
     }
     let _ = writeln!(
         out,
-        "{} ROM(s), {}  →  {}/{}",
+        "{} ROM(s), {}  →  {}/  (card copies are managed separately)",
         p.items.len(),
         bytes(p.bytes),
-        p.trash.display(),
-        if r.mode == Mode::Interactive {
-            "  (cards are untouched; a device sync with deletes removes them there)"
-        } else {
-            "  (cards are untouched; `device sync --delete` removes them there)"
-        }
+        p.trash.display()
     );
     staged_footer(
         &mut out,
@@ -696,18 +631,11 @@ pub fn library_standardize(r: &StandardizeReport) -> String {
     }
     for p in renames {
         let _ = writeln!(out, "  [{}] {}  →  {}", p.platform, p.old_name, p.new_name);
-        if let Some(card) = &p.card {
-            let _ = writeln!(
-                out,
-                "           + {} file(s) on the card",
-                card.renames.len()
-            );
-        }
     }
     if r.result.is_none() {
         let _ = writeln!(
             out,
-            "{} game(s) would be renamed (library file, game, card copy and saves).",
+            "{} game(s) would be renamed (library file and game).",
             renames.len()
         );
     }
@@ -718,10 +646,16 @@ pub fn library_standardize(r: &StandardizeReport) -> String {
         renames.len(),
         "",
         |out, res| {
-            let ok = res.iter().filter(|x| x.failed.is_empty()).count();
+            let ok = res.iter().filter(|x| x.is_ok()).count();
             let _ = writeln!(out, "✓ renamed {ok} of {} game(s)", res.len());
-            for x in res.iter().flat_map(|x| x.failed.iter()) {
-                let _ = writeln!(out, "✗ {}: {}", x.path.display(), x.error.message);
+            for (plan, result) in renames.iter().zip(res) {
+                if let Err(error) = result {
+                    let _ = writeln!(
+                        out,
+                        "✗ [{}] {}: {}",
+                        plan.platform, plan.old_name, error.message
+                    );
+                }
             }
         },
     );
@@ -793,4 +727,70 @@ pub fn covers_status_text(r: &CoversStatusReport) -> String {
         &rows,
     );
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use pocketeer_core::roms::hash::HashCache;
+
+    #[test]
+    fn standardize_reports_partial_success_and_continues_after_a_collision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        for name in ["one", "two", "three"] {
+            std::fs::write(source.join(format!("{name}.gba")), name).unwrap();
+        }
+        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
+        let options = ImportOptions {
+            platform: "gba".into(),
+            platform_name: None,
+            dat_only: false,
+        };
+        let import = import::plan_import(
+            &lib,
+            &source,
+            &options,
+            None,
+            &mut HashCache::in_memory(),
+            &mut |_| {},
+        )
+        .unwrap();
+        import::apply_import(&mut lib, &options, &import, &mut |_| {}).unwrap();
+        let renames: Vec<_> = ["one", "two", "three"]
+            .into_iter()
+            .map(|name| rename::plan(&lib, Some("gba"), name, &format!("new {name}")).unwrap())
+            .collect();
+        std::fs::write(lib.root().join("roms/gba/new two.gba"), b"keep").unwrap();
+        let cli = crate::cli::Cli::parse_from([
+            "pocketeer",
+            "--library",
+            lib.root().to_str().unwrap(),
+            "--config",
+            tmp.path().join("config.toml").to_str().unwrap(),
+        ]);
+        let result = apply_standardize(&Context::new(cli.global), &renames, &mut |_| {}).unwrap();
+        assert!(result[0].is_ok());
+        assert!(result[1].is_err());
+        assert!(result[2].is_ok());
+        assert_eq!(result.failed(), 1);
+        assert_eq!(
+            std::fs::read(lib.root().join("roms/gba/new one.gba")).unwrap(),
+            b"one"
+        );
+        assert_eq!(
+            std::fs::read(lib.root().join("roms/gba/two.gba")).unwrap(),
+            b"two"
+        );
+        assert_eq!(
+            std::fs::read(lib.root().join("roms/gba/new two.gba")).unwrap(),
+            b"keep"
+        );
+        assert_eq!(
+            std::fs::read(lib.root().join("roms/gba/new three.gba")).unwrap(),
+            b"three"
+        );
+    }
 }

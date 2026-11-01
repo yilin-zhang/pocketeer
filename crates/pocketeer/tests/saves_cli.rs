@@ -1,77 +1,56 @@
-//! End-to-end: saves sync / list / versions / restore.
-
 mod common;
-
 use common::Harness;
+use pocketeer_core::fsutil::set_mtime;
 use std::fs;
 
-fn env() -> Harness {
-    Harness::new().with_card()
-}
-
 #[test]
-fn pull_version_restore_push() {
-    let env = env();
-    env.json(&["library", "init"]);
-    env.write("Saves/gba/common/Game.sav", "v1");
-    let p = env.sd.join("Saves/gba/common/Game.sav");
-    // Card times are set in the past so a later restore (stamped "now") wins.
-    let set_mtime = |secs_ago: u64| {
-        let t = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
-        fs::File::options()
-            .write(true)
-            .open(&p)
+fn backup_conflict_choice_and_explicit_history_restore() {
+    let env = Harness::new().with_card();
+    assert_eq!(env.json(&["library", "init"]).1, 0);
+    let rel = "Saves/gba/common/game.sav";
+    env.write(rel, "AP first");
+    set_mtime(&env.sd.join(rel), 100).unwrap();
+    let (result, code) = env.json(&["saves", "backup"]);
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(result["data"]["result"]["pulled"], 1);
+    env.write(rel, "AP second");
+    set_mtime(&env.sd.join(rel), 200).unwrap();
+    assert_eq!(env.json(&["saves", "backup"]).1, 0);
+    let backup = env.lib.join("saves").join(rel);
+    fs::write(&backup, "PC version").unwrap();
+    set_mtime(&backup, 300).unwrap();
+    let (conflict, code) = env.json(&["saves", "backup"]);
+    assert_eq!(code, 1, "{conflict}");
+    assert_eq!(conflict["data"]["summary"]["conflicts"], 1);
+    assert_eq!(fs::read(env.sd.join(rel)).unwrap(), b"AP second");
+    let (chosen, code) = env.json(&["saves", "backup", "--conflicts", "computer"]);
+    assert_eq!(code, 0, "{chosen}");
+    assert_eq!(chosen["data"]["result"]["pushed"], 1);
+    assert_eq!(fs::read(env.sd.join(rel)).unwrap(), b"PC version");
+    let (versions, code) = env.json(&["saves", "versions", rel]);
+    assert_eq!(code, 0, "{versions}");
+    let original = versions["data"]["versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["mtime"] == 100)
+        .unwrap();
+    let id = original["id"].as_i64().unwrap().to_string();
+    let (preview, code) = env.json(&["saves", "restore", rel, "--version", &id, "--dry-run"]);
+    assert_eq!(code, 0, "{preview}");
+    assert_eq!(fs::read(env.sd.join(rel)).unwrap(), b"PC version");
+    let (restored, code) = env.json(&["saves", "restore", rel, "--version", &id]);
+    assert_eq!(code, 0, "{restored}");
+    assert_eq!(fs::read(env.sd.join(rel)).unwrap(), b"AP first");
+    let (versions, _) = env.json(&["saves", "versions", rel]);
+    assert!(
+        versions["data"]["versions"]
+            .as_array()
             .unwrap()
-            .set_modified(t)
-            .unwrap();
-    };
-    set_mtime(120);
-
-    let (v, code) = env.json(&["saves", "sync", "--dry-run"]);
-    assert_eq!(code, 0, "{v}");
-    assert_eq!(v["data"]["summary"]["pull"], 1);
-    assert!(!env.lib.join("saves/Saves/gba/common/Game.sav").exists());
-
-    let (v, code) = env.json(&["saves", "sync"]);
-    assert_eq!(code, 0, "{v}");
-    assert_eq!(v["data"]["result"]["pulled"], 1);
-    assert!(env.lib.join("saves/Saves/gba/common/Game.sav").is_file());
-
-    // A later save on the card (mtime must move past the 2 s tolerance).
-    env.write("Saves/gba/common/Game.sav", "v2");
-    set_mtime(60);
-    let (v, code) = env.json(&["saves", "sync"]);
-    assert_eq!(code, 0, "{v}");
-    assert_eq!(v["data"]["result"]["versions_created"], 1);
-
-    let (v, _) = env.json(&["saves", "list"]);
-    assert_eq!(v["data"]["saves"][0]["versions"], 1);
-
-    let (v, _) = env.json(&["saves", "versions", "Saves/gba/common/Game.sav"]);
-    let id = v["data"]["versions"][0]["id"].as_i64().unwrap();
-
-    let (v, code) = env.json(&["saves", "restore", &id.to_string(), "--dry-run"]);
-    assert_eq!(code, 0, "{v}");
-    assert_eq!(v["data"]["version"]["id"], id);
-    assert!(v["data"]["result"].is_null());
-    let (v, code) = env.json(&["saves", "restore", &id.to_string()]);
-    assert_eq!(code, 0, "{v}");
-    assert_eq!(v["data"]["result"]["restored"], true);
-    assert_eq!(
-        fs::read_to_string(env.lib.join("saves/Saves/gba/common/Game.sav")).unwrap(),
-        "v1"
+            .iter()
+            .any(
+                |v| fs::read(env.lib.join(v["stored_path"].as_str().unwrap())).unwrap()
+                    == b"PC version"
+            )
     );
-
-    // Pull-only refuses to push the restored copy; push does it.
-    let (v, code) = env.json(&["saves", "sync", "--pull"]);
-    assert_eq!(code, 0);
-    assert_eq!(v["data"]["summary"]["excluded"], 1);
-    let (v, code) = env.json(&["saves", "sync", "--push"]);
-    assert_eq!(code, 0, "{v}");
-    assert_eq!(v["data"]["result"]["pushed"], 1);
-    assert_eq!(fs::read_to_string(&p).unwrap(), "v1");
-
-    let (v, code) = env.json(&["saves", "restore", "4242"]);
-    assert_eq!(code, 1);
-    assert_eq!(v["error"]["code"], "SAVE_VERSION_NOT_FOUND");
 }

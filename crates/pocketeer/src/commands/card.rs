@@ -338,3 +338,244 @@ pub fn refresh_text(r: &RefreshReport) -> String {
         r.cache_dir.display()
     )
 }
+
+#[derive(Debug, Serialize)]
+pub struct RomsReport {
+    pub roms: Vec<pocketeer_core::roms::index::CardRom>,
+    pub comparison: pocketeer_core::library::matching::Comparison,
+    pub warnings: Vec<String>,
+}
+
+impl crate::output::Outcome for RomsReport {
+    fn error(&self) -> Option<pocketeer_core::Error> {
+        let failed = self.roms.iter().filter(|r| r.error.is_some()).count();
+        (failed > 0).then_some(pocketeer_core::Error::SomeFailed {
+            failed,
+            total: self.roms.len(),
+        })
+    }
+}
+
+pub fn roms(
+    ctx: &Context,
+    out: &Output,
+    cmd: crate::cli::CardCommand,
+    progress: &mut dyn FnMut(Event),
+) -> ExitCode {
+    match cmd {
+        crate::cli::CardCommand::Rename {
+            path,
+            new_name,
+            apply,
+        } => {
+            let result = plan_rename(ctx, &path, &new_name)
+                .and_then(|plan| stage(apply, plan, |p| apply_rename(ctx, p)));
+            out.emit_outcome(result, rename_report)
+        }
+        crate::cli::CardCommand::Copy {
+            roms,
+            platform,
+            apply,
+        } => {
+            let result = plan_copy(ctx, platform.as_deref(), &roms, progress)
+                .and_then(|plan| stage(apply, plan, |p| apply_copy(ctx, p, progress)));
+            out.emit_outcome(result, copy_report)
+        }
+        crate::cli::CardCommand::Import(args) => out.emit_outcome(
+            super::card_import::import(ctx, &args, progress),
+            super::card_import::report,
+        ),
+        _ => out.emit_outcome(roms_report(ctx, cmd, progress), roms_text),
+    }
+}
+
+fn roms_report(
+    ctx: &Context,
+    cmd: crate::cli::CardCommand,
+    progress: &mut dyn FnMut(Event),
+) -> Result<RomsReport> {
+    use pocketeer_core::{Error, library::matching, roms::index::Index};
+    let pocket = ctx.pocket()?;
+    let games = match ctx.library() {
+        Ok(lib) => lib.list_games(None, None)?,
+        Err(Error::LibraryNotFound { .. }) => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    let mut index = Index::scan(&pocket)?;
+    let mut warnings: Vec<String> = index.warning.take().into_iter().collect();
+    if let crate::cli::CardCommand::Check { full } = cmd {
+        for i in 0..index.roms.len() {
+            progress(Event::Status(format!(
+                "Checking {}",
+                index.roms[i].rel_path.display()
+            )));
+            index.verify(&pocket, i, full, &|| false);
+            progress(Event::Step {
+                done: i + 1,
+                total: index.roms.len(),
+            });
+        }
+        if let Err(e) = index.save(&pocket) {
+            warnings.push(format!(
+                "ROM identities updated in memory; cache not saved: {e}"
+            ));
+        }
+    }
+    Ok(RomsReport {
+        comparison: matching::compare(&games, &index.roms),
+        roms: index.roms,
+        warnings,
+    })
+}
+
+fn roms_text(report: &RomsReport) -> String {
+    let mut text = String::new();
+    for (rom, presence) in report.roms.iter().zip(&report.comparison.card) {
+        let _ = writeln!(
+            text,
+            "{}  {:?}  {:?}",
+            rom.rel_path.display(),
+            presence,
+            rom.confidence
+        );
+        if let Some(error) = &rom.error {
+            let _ = writeln!(text, "  {error}");
+        }
+    }
+    for local in report.comparison.local.values() {
+        if local.presence != pocketeer_core::library::matching::Presence::Both {
+            let _ = writeln!(
+                text,
+                "[{}] {}  {:?}",
+                local.platform, local.name, local.presence
+            );
+        } else {
+            for copy in local.copies.iter().filter(|c| c.name_mismatch) {
+                let _ = writeln!(
+                    text,
+                    "[{}] {} ≠ {}",
+                    local.platform,
+                    local.name,
+                    copy.path.display()
+                );
+            }
+        }
+    }
+    for warning in &report.warnings {
+        let _ = writeln!(text, "Warning: {warning}");
+    }
+    text
+}
+
+pub type CopyReport = Staged<
+    pocketeer_core::library::transfer::CopyPlan,
+    pocketeer_core::library::transfer::CopyResult,
+>;
+
+pub fn plan_copy(
+    ctx: &Context,
+    platform: Option<&str>,
+    roms: &[String],
+    progress: &mut dyn FnMut(Event),
+) -> Result<pocketeer_core::library::transfer::CopyPlan> {
+    pocketeer_core::library::transfer::plan(
+        &ctx.library()?,
+        &ctx.pocket()?,
+        platform,
+        roms,
+        progress,
+    )
+}
+
+pub fn apply_copy(
+    ctx: &Context,
+    plan: &pocketeer_core::library::transfer::CopyPlan,
+    progress: &mut dyn FnMut(Event),
+) -> Result<pocketeer_core::library::transfer::CopyResult> {
+    pocketeer_core::library::transfer::apply(&ctx.pocket()?, plan, progress)
+}
+
+pub fn copy_report(report: &CopyReport) -> String {
+    let mut text = String::new();
+    for file in &report.plan.files {
+        let _ = writeln!(
+            text,
+            "+ {} ({})",
+            file.destination.display(),
+            bytes(file.size)
+        );
+    }
+    for path in &report.plan.already_present {
+        let _ = writeln!(text, "= already present: {}", path.display());
+    }
+    for warning in &report.plan.warnings {
+        let _ = writeln!(text, "Warning: {warning}");
+    }
+    staged_footer(
+        &mut text,
+        report.mode,
+        report.result.as_ref(),
+        report.plan.changes(),
+        "Nothing to copy.",
+        |text, result| {
+            let _ = writeln!(text, "Copied {} ROM(s)", result.copied);
+            for error in &result.failed {
+                let _ = writeln!(text, "✗ {}", error.message);
+            }
+            for warning in &result.warnings {
+                let _ = writeln!(text, "Warning: {warning}");
+            }
+        },
+    );
+    text
+}
+
+pub type RenameReport = Staged<
+    pocketeer_core::roms::rename::CardRenamePlan,
+    pocketeer_core::roms::rename::CardRenameResult,
+>;
+
+pub fn plan_rename(
+    ctx: &Context,
+    path: &std::path::Path,
+    name: &str,
+) -> Result<pocketeer_core::roms::rename::CardRenamePlan> {
+    pocketeer_core::roms::rename::plan_card(&ctx.pocket()?, path, name)
+}
+
+pub fn apply_rename(
+    ctx: &Context,
+    plan: &pocketeer_core::roms::rename::CardRenamePlan,
+) -> Result<pocketeer_core::roms::rename::CardRenameResult> {
+    pocketeer_core::roms::rename::apply_card(&ctx.pocket()?, plan)
+}
+
+pub fn rename_report(report: &RenameReport) -> String {
+    let mut text = String::new();
+    for file in &report.plan.moves {
+        let _ = writeln!(
+            text,
+            "{:?}: {} → {}",
+            file.kind,
+            file.from.display(),
+            file.to.display()
+        );
+    }
+    for warning in &report.plan.warnings {
+        let _ = writeln!(text, "Warning: {warning}");
+    }
+    staged_footer(
+        &mut text,
+        report.mode,
+        report.result.as_ref(),
+        report.plan.changes(),
+        "Nothing to rename.",
+        |text, result| {
+            let _ = writeln!(text, "Renamed {} file(s)", result.renamed);
+            for warning in &result.warnings {
+                let _ = writeln!(text, "Warning: {warning}");
+            }
+        },
+    );
+    text
+}

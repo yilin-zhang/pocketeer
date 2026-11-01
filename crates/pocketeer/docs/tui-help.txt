@@ -21,27 +21,33 @@ Games   (the library and the card in one list; WHERE says which)
   n     create the library (when there is none yet)
   a     import ROMs from this computer: a folder, or one ROM / zip (→ platform → optional DAT)
   i/I   import the selected card-only ROM / every card-only ROM into the library
-  e     rename: file, game, card copy and its saves move together
+  e     choose local/AP rename, or adopt the other copy's name; preview first
   t     rename games to the standard (No-Intro) names they match; imports offer this too
   x     library game → .trash/ inside the library;  card-only ROM → deleted from the card
   f/F   fetch the cover for this game / for its whole platform
   C     fetch every missing cover (missing covers are also fetched on start)
-  D     register this card as a device / choose what it subscribes to
-  S     sync this card from the library (ROMs + cores it subscribes to)
-  V     sync save files and save states (newest wins, nothing is lost)
+  S     copy the selected local game to the card
+  V     back up AP saves; conflicts offer AP / computer / leave unchanged
 
-Device
-  D   register this card / choose its subscriptions     S, V  sync ROMs+cores / saves
-  c   delete macOS junk (._* files, .DS_Store, __MACOSX)
+Card
+  V   back up saves
+  c   scan for macOS junk in the background, then preview removal
+      (._* files, .DS_Store, __MACOSX); never scanned on startup
 
-Every change shows its plan first with Apply / Cancel buttons: click one, or
+Every file change shows its plan first with Apply / Cancel buttons: click one, or
 y / Enter applies, n / Esc cancels, ←/→ moves the focus. In checklists Space
 toggles one item and a toggles all; in path prompts matching entries are listed
 as you type: ↓ picks one, Tab completes, Enter takes the pick (or submits when
 nothing is picked).
 
-No SD card? The Games tab still manages the library; Cores, BIOS and Device
+No SD card? The Games tab still manages the library; Cores, BIOS and Card
 wait for one. A card that is plugged in (or pulled) is noticed without pressing
 r, and the screen reloads by itself when the card or the library changes
 outside pocketeer. The library is the backup: what pocketeer removes from the
 card is deleted.
+
+ROM identity checks run in the background. New files need a full read; cached
+files use small samples. WHERE uses ? while identity is unresolved. A local
+ROM keeps its local filename as the title; ≠ means an AP copy has another name.
+Details show each exact AP path and verification confidence. No automatic rename
+is queued. `pocketeer card check --full` explicitly reads every ROM byte.

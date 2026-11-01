@@ -1,4 +1,4 @@
-//! Renaming a ROM file and everything the Pocket keys to its name.
+//! File rename primitives and explicit card rename previews.
 //!
 //! The Pocket stores a game's save as `Saves/<platform>/<owner>/<stem>.sav`
 //! and its save states under `Memories/Save States/<platform>/…/<stem>*`,
@@ -27,17 +27,17 @@ pub struct FileRename {
     pub kind: RenameKind,
 }
 
-/// Folders (relative to a root) whose files are named after the ROM.
-const COMPANION_ROOTS: [(&str, RenameKind); 2] = [
-    ("Saves", RenameKind::Save),
-    ("Memories/Save States", RenameKind::SaveState),
-];
-
 /// File name without its extension, when it has a short one
 /// (`Foo (USA).gba` → `Foo (USA)`; `Foo.v1.2 Final` stays as is).
 pub fn stem(name: &str) -> &str {
     match name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() && ext.len() <= 4 => stem,
+        Some((stem, ext))
+            if !stem.is_empty()
+                && !ext.is_empty()
+                && (ext.len() <= 4 || ext.eq_ignore_ascii_case("pocket")) =>
+        {
+            stem
+        }
         _ => name,
     }
 }
@@ -73,52 +73,6 @@ pub fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Saves and save states under `root` that belong to `old_name` on
-/// `platform`, each mapped to its new name. Matches `<stem>.<anything>` so
-/// `Foo.sav`, `Foo.1.sta` move but `Foo Bar.sav` doesn't.
-pub fn companion_renames(
-    root: &Path,
-    platform: &str,
-    old_name: &str,
-    new_name: &str,
-) -> Vec<FileRename> {
-    let old_stem = stem(old_name);
-    let new_stem = stem(new_name);
-    let mut out = Vec::new();
-    if old_stem == new_stem {
-        return out;
-    }
-    for (base, kind) in COMPANION_ROOTS {
-        let dir = root.join(base).join(platform);
-        if !dir.is_dir() {
-            continue;
-        }
-        for path in fsutil::visible_files(&dir) {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let Some(rest) = name.strip_prefix(old_stem) else {
-                continue;
-            };
-            if !rest.starts_with('.') {
-                continue;
-            }
-            let Ok(rel) = path.strip_prefix(root) else {
-                continue;
-            };
-            let to = rel.with_file_name(format!("{new_stem}{rest}"));
-            out.push(FileRename {
-                from: rel.to_path_buf(),
-                to,
-                kind,
-            });
-        }
-    }
-    out.sort_by(|a, b| a.from.cmp(&b.from));
-    out
-}
-
 /// Renames in order, all or nothing: the first failure moves every rename
 /// already done back, then is returned. A target that already exists is a
 /// failure, never an overwrite. Returns how many files were renamed.
@@ -130,10 +84,16 @@ pub fn apply_renames(root: &Path, renames: &[FileRename]) -> Result<usize> {
         Ok(())
     });
     if let Err(e) = result {
+        let mut rolled_back = true;
         for r in renames.iter().take(done).rev() {
-            let _ = std::fs::rename(root.join(&r.to), root.join(&r.from));
+            rolled_back &=
+                fsutil::rename_no_replace(&root.join(&r.to), &root.join(&r.from)).is_ok();
         }
-        return Err(e);
+        return Err(Error::ApplyFailed {
+            step: done,
+            rolled_back,
+            source: Box::new(e),
+        });
     }
     Ok(done)
 }
@@ -147,7 +107,7 @@ fn rename_one(root: &Path, r: &FileRename) -> Result<()> {
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
     }
-    std::fs::rename(&from, &to).map_err(|e| Error::io(&from, e))
+    fsutil::rename_no_replace(&from, &to)
 }
 
 #[cfg(test)]
@@ -179,62 +139,293 @@ mod tests {
     }
 
     #[test]
-    fn companions_follow_the_stem_only() {
+    fn collision_rolls_back_previous_moves_and_preserves_destinations() {
         let tmp = tempfile::tempdir().unwrap();
-        let w = |rel: &str| {
-            let p = tmp.path().join(rel);
-            fs::create_dir_all(p.parent().unwrap()).unwrap();
-            fs::write(p, "x").unwrap();
-        };
-        w("Saves/gba/common/Foo.sav");
-        w("Saves/gba/common/Foo Bar.sav");
-        w("Saves/gba/x.Core/Foo.sav");
-        w("Saves/gb/common/Foo.sav");
-        w("Memories/Save States/gba/common/Foo.1.sta");
-        w("Memories/Save States/gba/common/.Foo.1.sta");
+        fs::write(tmp.path().join("a"), "first").unwrap();
+        fs::write(tmp.path().join("b"), "second").unwrap();
+        fs::write(tmp.path().join("occupied"), "keep").unwrap();
+        let moves = [
+            FileRename {
+                from: "a".into(),
+                to: "new".into(),
+                kind: RenameKind::Rom,
+            },
+            FileRename {
+                from: "b".into(),
+                to: "occupied".into(),
+                kind: RenameKind::Save,
+            },
+        ];
+        assert!(apply_renames(tmp.path(), &moves).is_err());
+        assert_eq!(fs::read(tmp.path().join("a")).unwrap(), b"first");
+        assert_eq!(fs::read(tmp.path().join("b")).unwrap(), b"second");
+        assert_eq!(fs::read(tmp.path().join("occupied")).unwrap(), b"keep");
+        assert!(!tmp.path().join("new").exists());
+    }
+}
 
-        let r = companion_renames(tmp.path(), "gba", "Foo.gba", "Bar (USA).gba");
-        let moves: Vec<(String, String)> = r
-            .iter()
-            .map(|m| (m.from.display().to_string(), m.to.display().to_string()))
-            .collect();
+#[derive(Debug, Clone, Serialize)]
+pub struct CardRenamePlan {
+    pub moves: Vec<FileRename>,
+    pub warnings: Vec<String>,
+    #[serde(skip)]
+    identity: crate::sd::CardIdentity,
+    #[serde(skip)]
+    modified: std::time::SystemTime,
+    pub size: u64,
+}
+impl CardRenamePlan {
+    pub fn changes(&self) -> usize {
+        self.moves.len()
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CardRenameResult {
+    pub renamed: usize,
+    pub warnings: Vec<String>,
+}
+
+pub fn complete_name(old_name: &str, new_name: &str) -> String {
+    if extension(new_name).is_empty() {
+        format!("{new_name}{}", extension(old_name))
+    } else {
+        new_name.to_string()
+    }
+}
+
+pub fn plan_card(pocket: &crate::Pocket, path: &Path, new_name: &str) -> Result<CardRenamePlan> {
+    let index = super::index::Index::scan(pocket)?;
+    let rom = index
+        .roms
+        .iter()
+        .find(|r| r.rel_path == path)
+        .ok_or_else(|| Error::RomNotFound {
+            spec: path.display().to_string(),
+        })?;
+    let new_name = complete_name(&rom.name, new_name);
+    validate_name(&new_name)?;
+    let destination = path.with_file_name(&new_name);
+    if pocket.root().join(&destination).exists() {
+        return Err(Error::AlreadyExists { path: destination });
+    }
+    let mut moves = vec![FileRename {
+        from: path.to_path_buf(),
+        to: destination,
+        kind: RenameKind::Rom,
+    }];
+    let save_dir = if let Ok(relative) = path.strip_prefix("Assets") {
+        PathBuf::from("Saves").join(relative.parent().expect("asset parent"))
+    } else if path.parent() == Some(Path::new("GB Studio")) {
+        PathBuf::from("GB Studio/Saves")
+    } else {
+        return Err(Error::Usage {
+            message: "Unsupported ROM location".into(),
+            hint: None,
+        });
+    };
+    let old_stem = stem(&rom.name);
+    let new_stem = stem(&new_name);
+    if old_stem != new_stem {
+        if index.roms.iter().any(|r| {
+            r.rel_path != path
+                && r.rel_path.parent() == path.parent()
+                && [old_stem, new_stem]
+                    .iter()
+                    .any(|s| s.eq_ignore_ascii_case(stem(&r.name)))
+        }) {
+            return Err(Error::Usage { message: "Another ROM in this folder shares the save filename; the save owner is ambiguous".into(), hint: None });
+        }
+        let dir = pocket.root().join(&save_dir);
+        match std::fs::read_dir(&dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|e| Error::io(&dir, e))?;
+                    if !entry
+                        .file_type()
+                        .map_err(|e| Error::io(entry.path(), e))?
+                        .is_file()
+                    {
+                        continue;
+                    }
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if stem(&name).eq_ignore_ascii_case(old_stem) && !extension(&name).is_empty() {
+                        let suffix = extension(&name);
+                        let to = save_dir.join(format!("{new_stem}{suffix}"));
+                        if pocket.root().join(&to).exists() {
+                            return Err(Error::AlreadyExists { path: to });
+                        }
+                        moves.push(FileRename {
+                            from: save_dir.join(name),
+                            to,
+                            kind: RenameKind::Save,
+                        });
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Error::io(&dir, e)),
+        }
+    }
+    moves[1..].sort_by(|a, b| a.from.cmp(&b.from));
+    let warnings = vec![
+        "Memories stay unchanged; loading an existing save state may require the old ROM name."
+            .into(),
+    ];
+    let full = pocket.root().join(path);
+    let modified = std::fs::metadata(&full)
+        .and_then(|m| m.modified())
+        .map_err(|e| Error::io(&full, e))?;
+    Ok(CardRenamePlan {
+        moves,
+        warnings,
+        identity: crate::sd::CardIdentity::read(pocket)?,
+        modified,
+        size: rom.size,
+    })
+}
+
+pub fn apply_card(pocket: &crate::Pocket, plan: &CardRenamePlan) -> Result<CardRenameResult> {
+    if plan.identity != crate::sd::CardIdentity::read(pocket)? {
+        return Err(Error::Usage {
+            message: "Card changed since rename preview".into(),
+            hint: None,
+        });
+    }
+    let rom = &plan.moves[0];
+    let source = pocket.root().join(&rom.from);
+    let meta = std::fs::metadata(&source).map_err(|e| Error::io(&source, e))?;
+    if meta.len() != plan.size
+        || meta.modified().map_err(|e| Error::io(&source, e))? != plan.modified
+    {
+        return Err(Error::Usage {
+            message: "ROM changed since rename preview".into(),
+            hint: None,
+        });
+    }
+    let mut index = super::index::Index::scan(pocket)?;
+    let renamed = apply_renames(pocket.root(), &plan.moves)?;
+    let mut warnings = plan.warnings.clone();
+    if let Err(e) = index
+        .relocate(pocket, &rom.from, &rom.to)
+        .and_then(|_| index.save(pocket))
+    {
+        warnings.push(format!("Files renamed, but cache update failed: {e}"));
+    }
+    Ok(CardRenameResult { renamed, warnings })
+}
+
+#[cfg(test)]
+mod card_tests {
+    use super::*;
+    use crate::{
+        roms::index::{Confidence, Index},
+        testutil::{sd, write},
+    };
+
+    #[test]
+    fn rename_moves_only_the_selected_copy_and_its_mirrored_saves() {
+        let (tmp, pocket) = sd();
+        for folder in ["one", "two"] {
+            write(
+                tmp.path(),
+                &format!("Assets/gba/common/{folder}/game.gba"),
+                "ROM",
+            );
+            write(
+                tmp.path(),
+                &format!("Saves/gba/common/{folder}/game.sav"),
+                "save",
+            );
+        }
+        write(tmp.path(), "Saves/gba/common/one/game.rtc", "clock");
+        write(tmp.path(), "Memories/Save States/game.state", "state");
+        write(tmp.path(), "Assets/gba/common/one/game.v2.gba", "other ROM");
+        write(tmp.path(), "Saves/gba/common/one/game.v2.sav", "other save");
+        let mut index = Index::scan(&pocket).unwrap();
+        for i in 0..index.roms.len() {
+            index.verify(&pocket, i, false, &|| false);
+        }
+        let sha1 = index.roms[0].sha1.clone();
+        index.save(&pocket).unwrap();
+        let preview = plan_card(
+            &pocket,
+            Path::new("Assets/gba/common/one/game.gba"),
+            "new name",
+        )
+        .unwrap();
+        assert_eq!(preview.moves.len(), 3);
+        let result = apply_card(&pocket, &preview).unwrap();
+        assert_eq!(result.renamed, 3);
         assert_eq!(
-            moves,
-            [
-                (
-                    "Memories/Save States/gba/common/Foo.1.sta".to_string(),
-                    "Memories/Save States/gba/common/Bar (USA).1.sta".to_string()
-                ),
-                (
-                    "Saves/gba/common/Foo.sav".to_string(),
-                    "Saves/gba/common/Bar (USA).sav".to_string()
-                ),
-                (
-                    "Saves/gba/x.Core/Foo.sav".to_string(),
-                    "Saves/gba/x.Core/Bar (USA).sav".to_string()
-                ),
-            ]
+            std::fs::read(tmp.path().join("Memories/Save States/game.state")).unwrap(),
+            b"state"
         );
-        assert_eq!(r[0].kind, RenameKind::SaveState);
-        assert!(companion_renames(tmp.path(), "gba", "Foo.gba", "Foo.bin").is_empty());
-
-        assert_eq!(apply_renames(tmp.path(), &r).unwrap(), 3);
-        assert!(tmp.path().join("Saves/gba/common/Bar (USA).sav").is_file());
-        assert!(tmp.path().join("Saves/gba/common/Foo Bar.sav").is_file());
-
-        // Refuses to overwrite, and puts back what it had already moved.
-        w("Saves/gba/common/Foo.sav");
-        w("Saves/gb/common/Foo.sav");
-        w("Memories/Save States/gba/common/Foo.1.sta");
-        let again = companion_renames(tmp.path(), "gba", "Foo.gba", "Bar (USA).gba");
-        assert_eq!(again.len(), 2);
-        let err = apply_renames(tmp.path(), &again).unwrap_err();
-        assert_eq!(err.code(), "ALREADY_EXISTS");
+        assert_eq!(result.warnings, preview.warnings);
+        assert_eq!(
+            std::fs::read(tmp.path().join("Saves/gba/common/one/new name.sav")).unwrap(),
+            b"save"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("Saves/gba/common/two/game.sav")).unwrap(),
+            b"save"
+        );
+        assert!(tmp.path().join("Assets/gba/common/two/game.gba").exists());
+        assert_eq!(
+            std::fs::read(tmp.path().join("Saves/gba/common/one/game.v2.sav")).unwrap(),
+            b"other save"
+        );
         assert!(
-            tmp.path()
-                .join("Memories/Save States/gba/common/Foo.1.sta")
-                .is_file(),
-            "first rename rolled back"
+            plan_card(
+                &pocket,
+                Path::new("Assets/gba/common/one/game.v2.gba"),
+                "new name.gb"
+            )
+            .is_err()
+        );
+        let index = Index::scan(&pocket).unwrap();
+        let renamed = index
+            .roms
+            .iter()
+            .find(|r| r.name == "new name.gba")
+            .unwrap();
+        assert_eq!(renamed.confidence, Confidence::Cached);
+        assert_eq!(renamed.sha1, sha1);
+    }
+
+    #[test]
+    fn rename_rejects_a_target_save_name_owned_by_another_rom() {
+        let (tmp, pocket) = sd();
+        write(tmp.path(), "Assets/gb/common/game.gb", "source");
+        write(tmp.path(), "Assets/gb/common/OTHER.gbc", "other");
+        assert!(plan_card(&pocket, Path::new("Assets/gb/common/game.gb"), "other.gb").is_err());
+        assert_eq!(
+            std::fs::read(tmp.path().join("Assets/gb/common/game.gb")).unwrap(),
+            b"source"
+        );
+    }
+
+    #[test]
+    fn gbstudio_scans_only_supported_root_files_and_renames_its_save() {
+        let (tmp, pocket) = sd();
+        write(tmp.path(), "GB Studio/demo.pocket", "ROM");
+        write(
+            tmp.path(),
+            "GB Studio/folder/ignored.pocket",
+            "not browsable",
+        );
+        write(tmp.path(), "GB Studio/Saves/demo.sav", "save");
+        let index = Index::scan(&pocket).unwrap();
+        assert_eq!(index.roms.len(), 1);
+        assert_eq!(index.roms[0].platform, "gbstudio");
+        let preview = plan_card(&pocket, Path::new("GB Studio/demo.pocket"), "new").unwrap();
+        apply_card(&pocket, &preview).unwrap();
+        let scanned = Index::scan(&pocket).unwrap();
+        assert_eq!(scanned.roms.len(), 1);
+        assert_eq!(scanned.roms[0].name, "new.pocket");
+        assert_eq!(
+            std::fs::read(tmp.path().join("GB Studio/Saves/new.sav")).unwrap(),
+            b"save"
         );
     }
 }

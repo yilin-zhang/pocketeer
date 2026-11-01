@@ -5,8 +5,8 @@
 pub mod card;
 pub mod dat;
 pub mod hash;
+pub mod index;
 pub mod rename;
-pub mod sync;
 pub mod verify;
 
 use std::path::{Path, PathBuf};

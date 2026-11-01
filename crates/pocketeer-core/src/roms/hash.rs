@@ -30,7 +30,7 @@ impl Hashes {
 
 /// Feeds `reader` to `chunk` in 256 KiB pieces until it is exhausted. The
 /// one read loop every hash in the crate goes through.
-fn for_each_chunk(
+pub(super) fn for_each_chunk(
     reader: &mut (impl Read + ?Sized),
     mut chunk: impl FnMut(&[u8]) -> std::io::Result<()>,
 ) -> std::io::Result<()> {

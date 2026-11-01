@@ -6,8 +6,8 @@
 //! that turns failures into the exit status every command shares.
 
 pub mod card;
+pub mod card_import;
 pub mod cores;
-pub mod device;
 pub mod library;
 pub mod meta;
 pub mod saves;
@@ -19,8 +19,8 @@ use pocketeer_core::{
     clean::CleanResult,
     install::{self, Action},
     library::{
+        card_import::CardImportPlan,
         import::{ImportPlan, ImportResult},
-        orphans::CardImportPlan,
         remove::{RemovePlan, RemoveResult},
         rename::{RenamePlan, RenameResult},
         saves::{SavesPlan, SavesResult},
@@ -90,15 +90,22 @@ plan_by_changes!(
     RenamePlan,
     RemovePlan,
     CardImportPlan,
-    SavesPlan
+    pocketeer_core::library::transfer::CopyPlan,
+    pocketeer_core::roms::rename::CardRenamePlan
 );
 applied_by_failed!(
     ImportResult,
-    RenameResult,
     RemoveResult,
     SavesResult,
-    CleanResult
+    CleanResult,
+    pocketeer_core::library::transfer::CopyResult
 );
+
+impl Applied for RenameResult {
+    fn failed(&self) -> usize {
+        0
+    }
+}
 
 /// A plan plus, when it was applied, its result. Serialises as
 /// `{mode, ...plan fields, result?}`.
@@ -236,4 +243,19 @@ pub fn apply_actions(
         &mut |_, _| unreachable!("file actions never install a core"),
         progress,
     )
+}
+
+impl Applied for pocketeer_core::roms::rename::CardRenameResult {
+    fn failed(&self) -> usize {
+        0
+    }
+}
+
+impl Plan for SavesPlan {
+    fn changes(&self) -> usize {
+        self.changes()
+    }
+    fn errors(&self) -> usize {
+        self.summary.conflicts
+    }
 }

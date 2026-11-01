@@ -1,30 +1,27 @@
-//! Save files (`Saves/`) and save states (`Memories/Save States/`) between the
-//! card and the library, with history.
-//!
-//! The library keeps one *current* copy per file at `saves/<same path as on
-//! the card>` and every superseded copy under `saves/.history/`. Sync is
-//! newest-wins by modification time; the loser is never discarded.
-
-use std::path::{Path, PathBuf};
-
-use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
-
+//! Backup-first saves. Current files are the source of truth; the database
+//! indexes immutable history. A restore always archives the card copy first.
+use super::{Library, db};
 use crate::{
     Error, ErrorInfo, Pocket, Result,
-    fsutil::{self, mtime_secs, set_mtime, size_of},
+    fsutil::{self, mtime_secs, set_mtime},
     progress::{Event, Progress},
-    roms::hash::HashCache,
+    roms::hash::{copy_and_hash, hash_file},
+};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    path::{Component, Path, PathBuf},
 };
 
-use super::{Library, db, device};
-
-/// Card folders that hold saves. Relative paths are kept verbatim.
-pub const ROOTS: [&str; 2] = ["Saves", "Memories/Save States"];
-
-/// FAT32 stores mtimes with 2-second precision.
+pub const ROOTS: [&str; 4] = [
+    "Saves",
+    "GB Studio/Saves",
+    "Memories/Save States",
+    "Memories/Beta",
+];
 const MTIME_TOLERANCE: i64 = 2;
-
 pub(crate) const MIGRATION_SAVES: &str = "
     CREATE TABLE saves (
         rel_path   TEXT PRIMARY KEY,
@@ -45,43 +42,50 @@ pub(crate) const MIGRATION_SAVES: &str = "
     );
     CREATE INDEX save_versions_rel ON save_versions(rel_path);
 ";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Direction {
-    Both,
-    Pull,
-    Push,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct SavesOptions {
-    pub direction: Direction,
     pub include_states: bool,
 }
-
 impl Default for SavesOptions {
     fn default() -> Self {
-        SavesOptions {
-            direction: Direction::Both,
+        Self {
             include_states: true,
         }
     }
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SaveInfo {
+    pub size: u64,
+    pub sha1: String,
+    pub mtime: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictChoice {
+    Card,
+    Computer,
+    Skip,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum SaveAction {
-    /// Card → library.
     Pull {
         rel: PathBuf,
         size: u64,
         reason: SaveReason,
     },
-    /// Library → card.
     Push {
         rel: PathBuf,
-        size: u64,
+        source: PathBuf,
+        identity: SaveInfo,
+    },
+    Conflict {
+        rel: PathBuf,
+        card: SaveInfo,
+        computer: SaveInfo,
         reason: SaveReason,
     },
     Skip {
@@ -90,23 +94,33 @@ pub enum SaveAction {
     },
 }
 
+impl SaveAction {
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Pull { rel, .. }
+            | Self::Push { rel, .. }
+            | Self::Conflict { rel, .. }
+            | Self::Skip { rel, .. } => rel,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SaveReason {
     OnlyOnCard,
-    OnlyInLibrary,
     CardNewer,
-    LibraryNewer,
-    /// Same mtime, different bytes: the card wins (that's where you played).
-    Tie,
+    ComputerNewer,
+    DifferentContent,
+    UserChoice,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SaveSkip {
     UpToDate,
-    /// Would go the other way than `--pull` / `--push` allows.
-    DirectionExcluded,
+    OnlyInLibrary,
+    LeftUnchanged,
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
@@ -114,144 +128,278 @@ pub struct SavesSummary {
     pub pull: usize,
     pub push: usize,
     pub up_to_date: usize,
-    pub excluded: usize,
+    pub retained: usize,
+    pub conflicts: usize,
     pub bytes: u64,
+}
+#[derive(Debug, Clone, PartialEq)]
+struct Observed {
+    card: Option<SaveInfo>,
+    computer: Option<SaveInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SavesPlan {
-    pub direction: Direction,
     pub actions: Vec<SaveAction>,
     pub summary: SavesSummary,
+    #[serde(skip)]
+    observed: BTreeMap<PathBuf, Observed>,
+    #[serde(skip)]
+    library_root: PathBuf,
+    #[serde(skip)]
+    card_identity: crate::sd::CardIdentity,
 }
-
 impl SavesPlan {
     pub fn changes(&self) -> usize {
         self.summary.pull + self.summary.push
     }
-}
-
-/// Save files on the card, as paths relative to the SD root.
-pub fn card_files(pocket: &Pocket, include_states: bool) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for root in ROOTS {
-        if root != "Saves" && !include_states {
-            continue;
-        }
-        let dir = pocket.root().join(root);
-        if !dir.is_dir() {
-            continue;
-        }
-        for path in fsutil::visible_files(&dir) {
-            if let Ok(rel) = path.strip_prefix(pocket.root()) {
-                out.push(rel.to_path_buf());
+    pub fn resolve(&mut self, i: usize, choice: ConflictChoice) {
+        let SaveAction::Conflict {
+            rel,
+            card,
+            computer,
+            ..
+        } = self.actions[i].clone()
+        else {
+            return;
+        };
+        self.actions[i] = match choice {
+            ConflictChoice::Card => SaveAction::Pull {
+                rel,
+                size: card.size,
+                reason: SaveReason::UserChoice,
+            },
+            ConflictChoice::Computer => SaveAction::Push {
+                source: self.library_root.join("saves").join(&rel),
+                rel,
+                identity: computer,
+            },
+            ConflictChoice::Skip => SaveAction::Skip {
+                rel,
+                reason: SaveSkip::LeftUnchanged,
+            },
+        };
+        self.recount();
+    }
+    fn recount(&mut self) {
+        self.summary = SavesSummary::default();
+        for action in &self.actions {
+            match action {
+                SaveAction::Pull { size, .. } => {
+                    self.summary.pull += 1;
+                    self.summary.bytes += size;
+                }
+                SaveAction::Push { identity, .. } => {
+                    self.summary.push += 1;
+                    self.summary.bytes += identity.size;
+                }
+                SaveAction::Conflict { .. } => self.summary.conflicts += 1,
+                SaveAction::Skip {
+                    reason: SaveSkip::UpToDate,
+                    ..
+                } => self.summary.up_to_date += 1,
+                SaveAction::Skip { .. } => self.summary.retained += 1,
             }
         }
     }
-    out.sort();
-    out
 }
 
-fn lib_current(lib: &Library, rel: &Path) -> PathBuf {
+fn validate_path(rel: &Path) -> Result<()> {
+    if rel.components().any(|c| !matches!(c, Component::Normal(_)))
+        || !ROOTS
+            .iter()
+            .any(|r| rel.starts_with(r) && rel != Path::new(r))
+    {
+        return Err(Error::Usage {
+            message: "Expected a card-relative save path within Saves, GB Studio/Saves or Memories"
+                .into(),
+            hint: None,
+        });
+    }
+    Ok(())
+}
+
+fn files(root: &Path, include_states: bool) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for folder in ROOTS {
+        if !include_states && folder.starts_with("Memories") {
+            continue;
+        }
+        let dir = root.join(folder);
+        match std::fs::symlink_metadata(&dir) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(Error::io(&dir, e)),
+            Ok(m) if m.file_type().is_symlink() => continue,
+            Ok(_) => {}
+        }
+        for entry in walkdir::WalkDir::new(&dir)
+            .min_depth(1)
+            .into_iter()
+            .filter_entry(|e| !fsutil::is_hidden(e.file_name()))
+        {
+            let entry = entry.map_err(|e| {
+                Error::io(
+                    e.path().unwrap_or(&dir),
+                    std::io::Error::other(e.to_string()),
+                )
+            })?;
+            if entry.file_type().is_file() {
+                paths.push(
+                    entry
+                        .path()
+                        .strip_prefix(root)
+                        .expect("descendant")
+                        .to_path_buf(),
+                );
+            }
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn current(lib: &Library, rel: &Path) -> PathBuf {
     lib.root().join("saves").join(rel)
 }
 
-fn in_scope(rel: &Path, include_states: bool) -> bool {
-    include_states || rel.starts_with("Saves")
+fn inspect(path: &Path) -> Result<Option<SaveInfo>> {
+    let before = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Error::io(path, e)),
+    };
+    let hashes = hash_file(path)?;
+    let after = std::fs::metadata(path).map_err(|e| Error::io(path, e))?;
+    if before.len() != after.len()
+        || before.modified().map_err(|e| Error::io(path, e))?
+            != after.modified().map_err(|e| Error::io(path, e))?
+    {
+        return Err(Error::io(
+            path,
+            std::io::Error::other("save changed while being read"),
+        ));
+    }
+    Ok(Some(SaveInfo {
+        size: hashes.size,
+        sha1: hashes.sha1,
+        mtime: mtime_secs(path)?,
+    }))
 }
 
 pub fn plan(
     lib: &Library,
     pocket: &Pocket,
     opts: SavesOptions,
-    cache: &mut HashCache,
     progress: Progress<'_>,
 ) -> Result<SavesPlan> {
-    let on_card = card_files(pocket, opts.include_states);
-    let in_lib: Vec<PathBuf> = list(lib)?
-        .into_iter()
-        .map(|s| s.rel_path)
-        .filter(|r| in_scope(r, opts.include_states))
-        .collect();
-    let mut all: Vec<PathBuf> = on_card.iter().chain(in_lib.iter()).cloned().collect();
-    all.sort();
-    all.dedup();
-    progress(Event::Status(format!(
-        "Comparing {} save file(s)",
-        all.len()
-    )));
-
-    let can_pull = opts.direction != Direction::Push;
-    let can_push = opts.direction != Direction::Pull;
+    let mut paths = files(pocket.root(), opts.include_states)?;
+    paths.extend(files(&lib.root().join("saves"), opts.include_states)?);
+    paths.sort();
+    paths.dedup();
     let mut plan = SavesPlan {
-        direction: opts.direction,
         actions: Vec::new(),
         summary: SavesSummary::default(),
+        observed: BTreeMap::new(),
+        library_root: lib.root().to_path_buf(),
+        card_identity: crate::sd::CardIdentity::read(pocket)?,
     };
-
-    for (i, rel) in all.iter().enumerate() {
-        progress(Event::Step {
-            done: i + 1,
-            total: all.len(),
-        });
-        let card_path = pocket.root().join(rel);
-        let lib_path = lib_current(lib, rel);
-        let (card_exists, lib_exists) = (card_path.is_file(), lib_path.is_file());
-
-        let decision: Option<(bool, SaveReason, u64)> = match (card_exists, lib_exists) {
-            (true, false) => Some((true, SaveReason::OnlyOnCard, size_of(&card_path))),
-            (false, true) => Some((false, SaveReason::OnlyInLibrary, size_of(&lib_path))),
-            (false, false) => None,
-            (true, true) => {
-                let a = cache.file(&card_path)?;
-                let b = cache.file(&lib_path)?;
-                if a.sha1 == b.sha1 {
-                    plan.summary.up_to_date += 1;
-                    plan.actions.push(SaveAction::Skip {
-                        rel: rel.clone(),
-                        reason: SaveSkip::UpToDate,
-                    });
-                    continue;
-                }
-                let (cm, lm) = (mtime_secs(&card_path)?, mtime_secs(&lib_path)?);
-                if cm > lm + MTIME_TOLERANCE {
-                    Some((true, SaveReason::CardNewer, a.size))
-                } else if lm > cm + MTIME_TOLERANCE {
-                    Some((false, SaveReason::LibraryNewer, b.size))
-                } else {
-                    Some((true, SaveReason::Tie, a.size))
+    for (i, rel) in paths.iter().enumerate() {
+        progress(Event::Status(format!("Comparing {}", rel.display())));
+        let card = inspect(&pocket.root().join(rel))?;
+        let computer = inspect(&current(lib, rel))?;
+        let action = match (&card, &computer) {
+            (Some(c), None) => SaveAction::Pull {
+                rel: rel.clone(),
+                size: c.size,
+                reason: SaveReason::OnlyOnCard,
+            },
+            (None, Some(_)) => SaveAction::Skip {
+                rel: rel.clone(),
+                reason: SaveSkip::OnlyInLibrary,
+            },
+            (Some(c), Some(l)) if c.sha1 == l.sha1 => SaveAction::Skip {
+                rel: rel.clone(),
+                reason: SaveSkip::UpToDate,
+            },
+            (Some(c), Some(l)) if c.mtime > l.mtime.saturating_add(MTIME_TOLERANCE) => {
+                SaveAction::Pull {
+                    rel: rel.clone(),
+                    size: c.size,
+                    reason: SaveReason::CardNewer,
                 }
             }
+            (Some(c), Some(l)) => SaveAction::Conflict {
+                rel: rel.clone(),
+                card: c.clone(),
+                computer: l.clone(),
+                reason: if l.mtime > c.mtime.saturating_add(MTIME_TOLERANCE) {
+                    SaveReason::ComputerNewer
+                } else {
+                    SaveReason::DifferentContent
+                },
+            },
+            (None, None) => continue,
         };
-        let Some((pull, reason, size)) = decision else {
-            continue;
-        };
-        if (pull && !can_pull) || (!pull && !can_push) {
-            plan.summary.excluded += 1;
-            plan.actions.push(SaveAction::Skip {
-                rel: rel.clone(),
-                reason: SaveSkip::DirectionExcluded,
-            });
-            continue;
-        }
-        plan.summary.bytes += size;
-        if pull {
-            plan.summary.pull += 1;
-            plan.actions.push(SaveAction::Pull {
-                rel: rel.clone(),
-                size,
-                reason,
-            });
-        } else {
-            plan.summary.push += 1;
-            plan.actions.push(SaveAction::Push {
-                rel: rel.clone(),
-                size,
-                reason,
-            });
-        }
+        plan.observed
+            .insert(rel.clone(), Observed { card, computer });
+        plan.actions.push(action);
+        progress(Event::Step {
+            done: i + 1,
+            total: paths.len(),
+        });
     }
-    cache.save_best_effort();
+    plan.recount();
+    Ok(plan)
+}
+
+pub fn plan_restore(
+    lib: &Library,
+    pocket: &Pocket,
+    rel: &Path,
+    version: Option<i64>,
+) -> Result<SavesPlan> {
+    validate_path(rel)?;
+    let source = match version {
+        None => current(lib, rel),
+        Some(id) => {
+            let v = versions_by_id(lib, id)?;
+            if v.rel_path != rel {
+                return Err(Error::Usage {
+                    message: "Version belongs to a different save path".into(),
+                    hint: None,
+                });
+            }
+            let stored = lib.root().join(v.stored_path);
+            if !inspect(&stored)?
+                .is_some_and(|actual| actual.sha1 == v.sha1 && actual.size == v.size)
+            {
+                return Err(Error::io(
+                    &stored,
+                    std::io::Error::other("historical save is missing or corrupt"),
+                ));
+            }
+            stored
+        }
+    };
+    let identity = inspect(&source)?.ok_or_else(|| Error::RootNotFound {
+        path: source.clone(),
+    })?;
+    let observed = Observed {
+        card: inspect(&pocket.root().join(rel))?,
+        computer: inspect(&current(lib, rel))?,
+    };
+    let mut plan = SavesPlan {
+        actions: vec![SaveAction::Push {
+            rel: rel.to_path_buf(),
+            source,
+            identity,
+        }],
+        summary: SavesSummary::default(),
+        observed: BTreeMap::from([(rel.to_path_buf(), observed)]),
+        library_root: lib.root().to_path_buf(),
+        card_identity: crate::sd::CardIdentity::read(pocket)?,
+    };
+    plan.recount();
     Ok(plan)
 }
 
@@ -263,7 +411,6 @@ pub struct SavesResult {
     pub bytes: u64,
     pub failed: Vec<SaveFailure>,
 }
-
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SaveFailure {
     pub rel: PathBuf,
@@ -274,92 +421,153 @@ pub fn apply(
     lib: &mut Library,
     pocket: &Pocket,
     plan: &SavesPlan,
-    cache: &mut HashCache,
     progress: Progress<'_>,
 ) -> Result<SavesResult> {
-    let device_id = device::read_marker(pocket)?.map(|m| m.id);
-    let total = plan.changes();
-    progress(Event::Status(format!("Syncing {total} save file(s)")));
     let mut result = SavesResult::default();
     let mut done = 0;
-
     for action in &plan.actions {
-        let (rel, size, outcome, counter) = match action {
-            SaveAction::Skip { .. } => continue,
-            SaveAction::Pull { rel, size, .. } => (
-                rel,
-                size,
-                pull_one(lib, pocket, rel, device_id.as_deref(), cache),
-                &mut result.pulled,
-            ),
-            SaveAction::Push { rel, size, .. } => (
-                rel,
-                size,
-                push_one(lib, pocket, rel, cache),
-                &mut result.pushed,
-            ),
-        };
-        match outcome {
-            Ok(created) => {
-                *counter += 1;
-                result.bytes += size;
-                if created {
-                    result.versions_created += 1;
+        if matches!(
+            action,
+            SaveAction::Skip { .. } | SaveAction::Conflict { .. }
+        ) {
+            continue;
+        }
+        let rel = action.path();
+        validate_path(rel)?;
+        let outcome = (|| -> Result<(bool, u64)> {
+            if lib.root() != plan.library_root
+                || crate::sd::CardIdentity::read(pocket)? != plan.card_identity
+            {
+                return Err(Error::Usage {
+                    message: "Card or library changed since save preview".into(),
+                    hint: None,
+                });
+            }
+            let observed = plan.observed.get(rel).expect("planned action");
+            if observed.card != inspect(&pocket.root().join(rel))?
+                || observed.computer != inspect(&current(lib, rel))?
+            {
+                return Err(Error::io(
+                    rel,
+                    std::io::Error::other("save changed since preview; review again"),
+                ));
+            }
+            match action {
+                SaveAction::Pull { .. } => {
+                    let source = pocket.root().join(rel);
+                    let destination = current(lib, rel);
+                    let identity = observed.card.as_ref().expect("pull source");
+                    let archived = if let Some(old) = &observed.computer {
+                        archive(lib, rel, &destination, old)?
+                    } else {
+                        false
+                    };
+                    copy_checked(&source, &destination, identity)?;
+                    Ok((archived, identity.size))
                 }
+                SaveAction::Push {
+                    source, identity, ..
+                } => {
+                    if inspect(source)?.as_ref() != Some(identity) {
+                        return Err(Error::io(
+                            source,
+                            std::io::Error::other("restore source changed since preview"),
+                        ));
+                    }
+                    let destination = pocket.root().join(rel);
+                    let archived = if let Some(old) = &observed.card {
+                        archive(lib, rel, &destination, old)?
+                    } else {
+                        false
+                    };
+                    copy_checked(source, &destination, identity)?;
+                    Ok((archived, identity.size))
+                }
+                _ => unreachable!(),
+            }
+        })();
+        match outcome {
+            Ok((archived, size)) => {
+                if matches!(action, SaveAction::Pull { .. }) {
+                    result.pulled += 1;
+                } else {
+                    result.pushed += 1;
+                }
+                result.versions_created += usize::from(archived);
+                result.bytes += size;
             }
             Err(e) => result.failed.push(SaveFailure {
-                rel: rel.clone(),
+                rel: rel.to_path_buf(),
                 error: e.to_info(),
             }),
         }
         done += 1;
-        progress(Event::Step { done, total });
+        progress(Event::Step {
+            done,
+            total: plan.changes(),
+        });
     }
-    cache.save_best_effort();
     Ok(result)
 }
 
-/// Copies a card file into the library as the new current; the previous
-/// current (if different) becomes a version. Returns whether a version was made.
-fn pull_one(
-    lib: &mut Library,
-    pocket: &Pocket,
-    rel: &Path,
-    device_id: Option<&str>,
-    cache: &mut HashCache,
-) -> Result<bool> {
-    let card_path = pocket.root().join(rel);
-    let current = lib_current(lib, rel);
-    let new = cache.file(&card_path)?;
-    let mtime = mtime_secs(&card_path)?;
-
-    let mut versioned = false;
-    if current.is_file() {
-        let old = cache.file(&current)?;
-        if old.sha1 != new.sha1 {
-            archive_current(lib, rel, &current, &old.sha1, old.size)?;
-            versioned = true;
+fn copy_checked(source: &Path, destination: &Path, identity: &SaveInfo) -> Result<()> {
+    fsutil::write_via_temp(destination, |out| {
+        let mut input = File::open(source).map_err(|e| Error::io(source, e))?;
+        let hashes = copy_and_hash(&mut input, out).map_err(|e| Error::io(source, e))?;
+        if hashes.sha1 != identity.sha1 || hashes.size != identity.size {
+            return Err(Error::io(
+                source,
+                std::io::Error::other("save changed during copy"),
+            ));
         }
-    }
-    fsutil::copy_file(&card_path, &current)?;
-    set_mtime(&current, mtime)?;
-    upsert(lib.conn(), rel, new.size, &new.sha1, mtime, device_id)?;
-    Ok(versioned)
+        Ok(())
+    })?;
+    set_mtime(destination, identity.mtime)
 }
 
-/// Where a superseded copy of `rel` with these bytes is kept, relative to
-/// the library root: `saves/.history/<rel>/<timestamp>-<sha1[..8]>-<name>`.
-fn history_path(rel: &Path, sha1: &str) -> PathBuf {
-    let stem = rel
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    PathBuf::from("saves/.history").join(rel).join(format!(
-        "{}-{}-{}",
-        fsutil::timestamp(),
-        &sha1[..8.min(sha1.len())],
-        stem
-    ))
+fn archive(lib: &Library, rel: &Path, source: &Path, identity: &SaveInfo) -> Result<bool> {
+    for version in versions(lib, rel)? {
+        if version.sha1 == identity.sha1
+            && inspect(&lib.root().join(version.stored_path))?
+                .is_some_and(|v| v.sha1 == identity.sha1)
+        {
+            return Ok(false);
+        }
+    }
+    let stored_rel = PathBuf::from("saves/.history")
+        .join(rel)
+        .join(&identity.sha1);
+    let stored = lib.root().join(&stored_rel);
+    match inspect(&stored)? {
+        Some(existing) if existing.sha1 == identity.sha1 && existing.size == identity.size => {}
+        Some(_) => {
+            return Err(Error::io(
+                &stored,
+                std::io::Error::other("existing history file has incorrect content"),
+            ));
+        }
+        None => fsutil::write_new_via_temp(&stored, |out| {
+            let mut input = File::open(source).map_err(|e| Error::io(source, e))?;
+            let hashes = copy_and_hash(&mut input, out).map_err(|e| Error::io(source, e))?;
+            if hashes.sha1 != identity.sha1 || hashes.size != identity.size {
+                return Err(Error::io(
+                    source,
+                    std::io::Error::other("save changed during archival"),
+                ));
+            }
+            Ok(())
+        })?,
+    }
+    set_mtime(&stored, identity.mtime)?;
+    insert_version(
+        lib.conn(),
+        rel,
+        identity.size,
+        &identity.sha1,
+        identity.mtime,
+        &stored_rel,
+    )?;
+    Ok(true)
 }
 
 fn insert_version(
@@ -368,105 +576,9 @@ fn insert_version(
     size: u64,
     sha1: &str,
     mtime: i64,
-    stored_rel: &Path,
+    stored: &Path,
 ) -> Result<()> {
-    conn.execute(
-        "INSERT INTO save_versions (rel_path, size, sha1, mtime, stored_path, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            rel.to_string_lossy(),
-            size as i64,
-            sha1,
-            mtime,
-            stored_rel.to_string_lossy(),
-            fsutil::now_secs()
-        ],
-    )
-    .map_err(|e| Error::db(e, "insert save version"))?;
-    Ok(())
-}
-
-/// Moves the current copy into `.history` and records it.
-fn archive_current(lib: &Library, rel: &Path, current: &Path, sha1: &str, size: u64) -> Result<()> {
-    let mtime = mtime_secs(current)?;
-    let stored_rel = history_path(rel, sha1);
-    let stored = lib.root().join(&stored_rel);
-    if let Some(dir) = stored.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
-    }
-    std::fs::rename(current, &stored).map_err(|e| Error::io(current, e))?;
-    insert_version(lib.conn(), rel, size, sha1, mtime, &stored_rel)
-}
-
-/// Overwrites the card's copy with the library's current one. If the card's
-/// bytes aren't anywhere in the library yet, they are copied into the
-/// history first, so a push never destroys a save. Returns whether a
-/// version was created.
-fn push_one(lib: &Library, pocket: &Pocket, rel: &Path, cache: &mut HashCache) -> Result<bool> {
-    let current = lib_current(lib, rel);
-    let card_path = pocket.root().join(rel);
-    let mut versioned = false;
-    if card_path.is_file() {
-        let old = cache.file(&card_path)?;
-        let current_sha1 = cache.file(&current)?.sha1;
-        if old.sha1 != current_sha1 && !is_version(lib, rel, &old.sha1)? {
-            let stored_rel = history_path(rel, &old.sha1);
-            let stored = lib.root().join(&stored_rel);
-            fsutil::copy_file(&card_path, &stored)?;
-            let mtime = mtime_secs(&card_path)?;
-            set_mtime(&stored, mtime)?;
-            insert_version(lib.conn(), rel, old.size, &old.sha1, mtime, &stored_rel)?;
-            versioned = true;
-        }
-    }
-    fsutil::copy_file(&current, &card_path)?;
-    set_mtime(&card_path, mtime_secs(&current)?)?;
-    Ok(versioned)
-}
-
-/// Whether the history already holds these bytes for `rel`.
-fn is_version(lib: &Library, rel: &Path, sha1: &str) -> Result<bool> {
-    let n: i64 = lib
-        .conn()
-        .query_row(
-            "SELECT COUNT(*) FROM save_versions WHERE rel_path = ?1 AND sha1 = ?2",
-            params![rel.to_string_lossy(), sha1],
-            |r| r.get(0),
-        )
-        .map_err(|e| Error::db(e, "is version"))?;
-    Ok(n > 0)
-}
-
-fn upsert(
-    conn: &Connection,
-    rel: &Path,
-    size: u64,
-    sha1: &str,
-    mtime: i64,
-    device_id: Option<&str>,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO saves (rel_path, size, sha1, mtime, updated_at, device_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(rel_path) DO UPDATE SET size = excluded.size, sha1 = excluded.sha1,
-            mtime = excluded.mtime, updated_at = excluded.updated_at, device_id = excluded.device_id",
-        params![rel.to_string_lossy(), size as i64, sha1, mtime, fsutil::now_secs(), device_id],
-    )
-    .map_err(|e| Error::db(e, "upsert save"))?;
-    Ok(())
-}
-
-/// Re-keys the current row and every version of a save after its ROM was
-/// renamed. Paths are card-relative, as stored.
-pub fn rename_path(conn: &Connection, from: &Path, to: &Path) -> Result<()> {
-    let (from, to) = (from.to_string_lossy(), to.to_string_lossy());
-    for table in ["saves", "save_versions"] {
-        conn.execute(
-            &format!("UPDATE {table} SET rel_path = ?2 WHERE rel_path = ?1"),
-            params![from, to],
-        )
-        .map_err(|e| Error::db(e, "rename save"))?;
-    }
+    conn.execute("INSERT INTO save_versions (rel_path,size,sha1,mtime,stored_path,created_at) VALUES (?1,?2,?3,?4,?5,?6)",params![rel.to_string_lossy(),size as i64,sha1,mtime,stored.to_string_lossy(),fsutil::now_secs()]).map_err(|e| Error::db(e,"record save history"))?;
     Ok(())
 }
 
@@ -474,37 +586,40 @@ pub fn rename_path(conn: &Connection, from: &Path, to: &Path) -> Result<()> {
 pub struct SaveEntry {
     pub rel_path: PathBuf,
     pub size: u64,
-    pub sha1: String,
-    /// mtime of the current copy (seconds since the epoch).
     pub mtime: i64,
-    pub updated_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub device_id: Option<String>,
     pub versions: usize,
 }
 
 pub fn list(lib: &Library) -> Result<Vec<SaveEntry>> {
-    db::query_rows(
+    let counts: BTreeMap<String, usize> = db::query_rows(
         lib.conn(),
-        "SELECT s.rel_path, s.size, s.sha1, s.mtime, s.updated_at, s.device_id,
-                (SELECT COUNT(*) FROM save_versions v WHERE v.rel_path = s.rel_path)
-         FROM saves s ORDER BY s.rel_path",
+        "SELECT rel_path,COUNT(*) FROM save_versions GROUP BY rel_path",
         [],
-        "list saves",
-        |r| {
+        "count save history",
+        |r| Ok((r.get(0)?, db::get_usize(r, 1)?)),
+    )?
+    .into_iter()
+    .collect();
+    files(&lib.root().join("saves"), true)?
+        .into_iter()
+        .map(|rel| {
+            let path = current(lib, &rel);
+            let size = std::fs::metadata(&path)
+                .map_err(|e| Error::io(&path, e))?
+                .len();
+            let versions = counts
+                .get(rel.to_string_lossy().as_ref())
+                .copied()
+                .unwrap_or(0);
             Ok(SaveEntry {
-                rel_path: PathBuf::from(r.get::<_, String>(0)?),
-                size: db::get_u64(r, 1)?,
-                sha1: r.get(2)?,
-                mtime: r.get(3)?,
-                updated_at: r.get(4)?,
-                device_id: r.get(5)?,
-                versions: db::get_usize(r, 6)?,
+                size,
+                mtime: mtime_secs(&path)?,
+                versions,
+                rel_path: rel,
             })
-        },
-    )
+        })
+        .collect()
 }
-
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SaveVersion {
     pub id: i64,
@@ -551,268 +666,107 @@ pub fn versions_by_id(lib: &Library, version_id: i64) -> Result<SaveVersion> {
         .ok_or(Error::SaveVersionNotFound { id: version_id })
 }
 
-/// Makes a stored version the current copy (the old current becomes a
-/// version). Push it to the card afterwards with `saves sync --push`.
-pub fn restore(lib: &mut Library, version_id: i64, cache: &mut HashCache) -> Result<SaveVersion> {
-    let v = versions_by_id(lib, version_id)?;
-    let current = lib_current(lib, &v.rel_path);
-    if current.is_file() {
-        let old = cache.file(&current)?;
-        if old.sha1 != v.sha1 {
-            archive_current(lib, &v.rel_path, &current, &old.sha1, old.size)?;
-        }
-    }
-    let stored = lib.root().join(&v.stored_path);
-    fsutil::copy_file(&stored, &current)?;
-    // Restored saves get a fresh mtime so the next sync pushes them.
-    let now = fsutil::now_secs();
-    set_mtime(&current, now)?;
-    upsert(lib.conn(), &v.rel_path, v.size, &v.sha1, now, None)?;
-    Ok(v)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-
     use crate::testutil::{sd, write_with_mtime as write};
-
-    fn kinds(plan: &SavesPlan) -> Vec<String> {
-        plan.actions
-            .iter()
-            .map(|a| match a {
-                SaveAction::Pull { rel, reason, .. } => {
-                    format!("pull {} {reason:?}", rel.display())
-                }
-                SaveAction::Push { rel, reason, .. } => {
-                    format!("push {} {reason:?}", rel.display())
-                }
-                SaveAction::Skip { rel, reason } => format!("skip {} {reason:?}", rel.display()),
-            })
-            .collect()
+    const REL: &str = "Saves/gba/common/nested/game.sav";
+    fn backup(lib: &Library, pocket: &Pocket) -> SavesPlan {
+        plan(lib, pocket, SavesOptions::default(), &mut |_| {}).unwrap()
     }
 
     #[test]
-    fn newest_wins_and_history_is_kept() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut lib = Library::init(&tmp.path().join("lib")).unwrap();
-        let (_sd, pocket) = sd();
-        let t0 = 1_700_000_000;
-        write(pocket.root(), "Saves/gba/common/zelda.sav", "save-v1", t0);
-        write(pocket.root(), "Memories/Save States/gba/x.sta", "state", t0);
-        write(pocket.root(), "Saves/.hidden", "no", t0);
-
-        let mut cache = HashCache::in_memory();
-        let p = plan(
-            &lib,
-            &pocket,
-            SavesOptions::default(),
-            &mut cache,
-            &mut |_| {},
-        )
-        .unwrap();
+    fn backup_keeps_history_and_requires_a_choice_for_computer_newer() {
+        let (tmp, pocket) = sd();
+        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
+        write(pocket.root(), REL, "AP one", 100);
+        write(lib.root(), "saves/Saves/gb/common/offline.sav", "keep", 200);
+        let plan = backup(&lib, &pocket);
         assert_eq!(
-            kinds(&p),
-            [
-                "pull Memories/Save States/gba/x.sta OnlyOnCard",
-                "pull Saves/gba/common/zelda.sav OnlyOnCard",
-            ]
+            (plan.summary.pull, plan.summary.push, plan.summary.retained),
+            (1, 0, 1)
         );
-        let r = apply(&mut lib, &pocket, &p, &mut cache, &mut |_| {}).unwrap();
-        assert_eq!((r.pulled, r.pushed, r.versions_created), (2, 0, 0));
+        let result = apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        assert_eq!(result.pulled, 1);
+        assert!(!pocket.root().join("Saves/gb/common/offline.sav").exists());
+        write(pocket.root(), REL, "AP two", 300);
+        let plan = backup(&lib, &pocket);
+        apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        let history = versions(&lib, Path::new(REL)).unwrap();
+        assert_eq!(history.len(), 1);
         assert_eq!(
-            fs::read_to_string(lib.root().join("saves/Saves/gba/common/zelda.sav")).unwrap(),
-            "save-v1"
+            std::fs::read(lib.root().join(&history[0].stored_path)).unwrap(),
+            b"AP one"
         );
-        assert_eq!(list(&lib).unwrap().len(), 2);
-
-        // Nothing to do now.
-        let p = plan(
-            &lib,
-            &pocket,
-            SavesOptions::default(),
-            &mut cache,
-            &mut |_| {},
-        )
-        .unwrap();
-        assert_eq!(p.changes(), 0);
-        assert_eq!(p.summary.up_to_date, 2);
-
-        // Play on the card: newer save → pulled, old copy becomes a version.
-        write(
-            pocket.root(),
-            "Saves/gba/common/zelda.sav",
-            "save-v2",
-            t0 + 100,
-        );
-        let p = plan(
-            &lib,
-            &pocket,
-            SavesOptions::default(),
-            &mut HashCache::in_memory(),
-            &mut |_| {},
-        )
-        .unwrap();
-        assert_eq!(kinds(&p)[1], "pull Saves/gba/common/zelda.sav CardNewer");
-        let r = apply(
-            &mut lib,
-            &pocket,
-            &p,
-            &mut HashCache::in_memory(),
-            &mut |_| {},
-        )
-        .unwrap();
-        assert_eq!(r.versions_created, 1);
-        let vs = versions(&lib, Path::new("Saves/gba/common/zelda.sav")).unwrap();
-        assert_eq!(vs.len(), 1);
-        assert_eq!(
-            fs::read_to_string(lib.root().join(&vs[0].stored_path)).unwrap(),
-            "save-v1"
-        );
-
-        // Library newer (e.g. restored) → pushed, card copy backed up.
-        fs::write(
-            lib.root().join("saves/Saves/gba/common/zelda.sav"),
-            "save-v3",
-        )
-        .unwrap();
-        set_mtime(
-            &lib.root().join("saves/Saves/gba/common/zelda.sav"),
-            t0 + 500,
-        )
-        .unwrap();
-        let p = plan(
-            &lib,
-            &pocket,
-            SavesOptions::default(),
-            &mut HashCache::in_memory(),
-            &mut |_| {},
-        )
-        .unwrap();
-        assert_eq!(kinds(&p)[1], "push Saves/gba/common/zelda.sav LibraryNewer");
-        let r = apply(
-            &mut lib,
-            &pocket,
-            &p,
-            &mut HashCache::in_memory(),
-            &mut |_| {},
-        )
-        .unwrap();
-        assert_eq!(r.pushed, 1);
-        assert_eq!(
-            fs::read_to_string(pocket.root().join("Saves/gba/common/zelda.sav")).unwrap(),
-            "save-v3"
-        );
-        // The card's v2 wasn't anywhere in the library: it became a version.
-        let kept: Vec<String> = versions(&lib, Path::new("Saves/gba/common/zelda.sav"))
-            .unwrap()
+        write(lib.root(), &format!("saves/{REL}"), "PC new", 400);
+        let mut plan = backup(&lib, &pocket);
+        assert_eq!(plan.summary.conflicts, 1);
+        assert_eq!(plan.changes(), 0);
+        apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        assert_eq!(std::fs::read(pocket.root().join(REL)).unwrap(), b"AP two");
+        let i = plan
+            .actions
             .iter()
-            .map(|v| fs::read_to_string(lib.root().join(&v.stored_path)).unwrap())
-            .collect();
-        assert!(kept.contains(&"save-v2".to_string()), "{kept:?}");
-        assert!(!pocket.root().join(".pocketeer/backup").exists());
-        assert_eq!(
-            mtime_secs(&pocket.root().join("Saves/gba/common/zelda.sav")).unwrap(),
-            t0 + 500
-        );
-
-        // Tie (same mtime, different bytes): card wins.
-        fs::write(pocket.root().join("Saves/gba/common/zelda.sav"), "save-v4").unwrap();
-        set_mtime(&pocket.root().join("Saves/gba/common/zelda.sav"), t0 + 501).unwrap();
-        let p = plan(
-            &lib,
-            &pocket,
-            SavesOptions::default(),
-            &mut HashCache::in_memory(),
-            &mut |_| {},
-        )
-        .unwrap();
-        assert_eq!(kinds(&p)[1], "pull Saves/gba/common/zelda.sav Tie");
-
-        // Direction filters.
-        let p = plan(
-            &lib,
-            &pocket,
-            SavesOptions {
-                direction: Direction::Push,
-                include_states: false,
-            },
-            &mut HashCache::in_memory(),
-            &mut |_| {},
-        )
-        .unwrap();
-        assert_eq!(
-            kinds(&p),
-            ["skip Saves/gba/common/zelda.sav DirectionExcluded"]
-        );
-    }
-
-    #[test]
-    fn restore_makes_version_current_and_pushable() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut lib = Library::init(&tmp.path().join("lib")).unwrap();
-        let (_sd, pocket) = sd();
-        let t0 = 1_700_000_000;
-        write(pocket.root(), "Saves/gb/common/a.sav", "one", t0);
-        let mut cache = HashCache::in_memory();
-        let p = plan(
-            &lib,
-            &pocket,
-            SavesOptions::default(),
-            &mut cache,
-            &mut |_| {},
-        )
-        .unwrap();
-        apply(&mut lib, &pocket, &p, &mut cache, &mut |_| {}).unwrap();
-        write(pocket.root(), "Saves/gb/common/a.sav", "two", t0 + 10);
-        let p = plan(
-            &lib,
-            &pocket,
-            SavesOptions::default(),
-            &mut HashCache::in_memory(),
-            &mut |_| {},
-        )
-        .unwrap();
-        apply(
-            &mut lib,
-            &pocket,
-            &p,
-            &mut HashCache::in_memory(),
-            &mut |_| {},
-        )
-        .unwrap();
-
-        let vs = versions(&lib, Path::new("Saves/gb/common/a.sav")).unwrap();
-        assert_eq!(vs.len(), 1);
-        let restored = restore(&mut lib, vs[0].id, &mut HashCache::in_memory()).unwrap();
-        assert_eq!(restored.sha1, vs[0].sha1);
-        assert_eq!(
-            fs::read_to_string(lib.root().join("saves/Saves/gb/common/a.sav")).unwrap(),
-            "one"
-        );
-        // "two" is now a version too.
-        assert_eq!(
-            versions(&lib, Path::new("Saves/gb/common/a.sav"))
+            .position(|a| matches!(a, SaveAction::Conflict { .. }))
+            .unwrap();
+        plan.resolve(i, ConflictChoice::Computer);
+        let result = apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        assert_eq!(result.pushed, 1);
+        assert_eq!(std::fs::read(pocket.root().join(REL)).unwrap(), b"PC new");
+        assert!(
+            versions(&lib, Path::new(REL))
                 .unwrap()
-                .len(),
-            2
+                .iter()
+                .any(|v| std::fs::read(lib.root().join(&v.stored_path)).unwrap() == b"AP two")
         );
-        // And the next sync pushes the restored save to the card.
-        let p = plan(
-            &lib,
-            &pocket,
-            SavesOptions::default(),
-            &mut HashCache::in_memory(),
-            &mut |_| {},
-        )
-        .unwrap();
-        assert_eq!(kinds(&p), ["push Saves/gb/common/a.sav LibraryNewer"]);
+    }
+
+    #[test]
+    fn equal_metadata_different_bytes_conflicts_and_stale_preview_is_rejected() {
+        let (tmp, pocket) = sd();
+        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
+        write(pocket.root(), REL, "AAAA", 100);
+        write(lib.root(), &format!("saves/{REL}"), "BBBB", 100);
+        let mut plan = backup(&lib, &pocket);
+        assert_eq!(plan.summary.conflicts, 1);
+        plan.resolve(0, ConflictChoice::Card);
+        write(lib.root(), &format!("saves/{REL}"), "CCCC", 100);
+        let result = apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        assert_eq!(result.failed.len(), 1);
         assert_eq!(
-            restore(&mut lib, 9999, &mut HashCache::in_memory())
-                .unwrap_err()
-                .code(),
-            "SAVE_VERSION_NOT_FOUND"
+            std::fs::read(current(&lib, Path::new(REL))).unwrap(),
+            b"CCCC"
         );
+        let mut plan = backup(&lib, &pocket);
+        plan.resolve(0, ConflictChoice::Skip);
+        assert_eq!(plan.summary.conflicts, 0);
+        assert_eq!(plan.summary.retained, 1);
+    }
+
+    #[test]
+    fn restoring_history_archives_ap_first_and_rejects_corrupt_history() {
+        let (tmp, pocket) = sd();
+        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
+        write(pocket.root(), REL, "old", 100);
+        let plan = backup(&lib, &pocket);
+        apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        write(pocket.root(), REL, "new", 200);
+        let plan = backup(&lib, &pocket);
+        apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        let old = versions(&lib, Path::new(REL)).unwrap().remove(0);
+        write(pocket.root(), REL, "unbacked AP", 300);
+        let plan = plan_restore(&lib, &pocket, Path::new(REL), Some(old.id)).unwrap();
+        let result = apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        assert_eq!(result.pushed, 1);
+        assert_eq!(std::fs::read(pocket.root().join(REL)).unwrap(), b"old");
+        assert!(
+            versions(&lib, Path::new(REL))
+                .unwrap()
+                .iter()
+                .any(|v| std::fs::read(lib.root().join(&v.stored_path)).unwrap() == b"unbacked AP")
+        );
+        std::fs::write(lib.root().join(old.stored_path), "corrupt").unwrap();
+        assert!(plan_restore(&lib, &pocket, Path::new(REL), Some(old.id)).is_err());
+        assert!(plan_restore(&lib, &pocket, Path::new("../outside"), None).is_err());
     }
 }

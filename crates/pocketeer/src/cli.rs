@@ -89,9 +89,9 @@ pub enum Command {
     /// The local library: the source of truth your cards are synced from.
     #[command(subcommand)]
     Library(LibraryCommand),
-    /// Cards the library syncs to.
+    /// Inspect and manage the mounted card by content identity.
     #[command(subcommand)]
-    Device(DeviceCommand),
+    Card(CardCommand),
     /// Save files and save states: card ⇄ library, with history.
     #[command(subcommand)]
     Saves(SavesCommand),
@@ -114,6 +114,40 @@ pub enum Command {
         system: bool,
         #[command(flatten)]
         apply: ApplyArgs,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CardCommand {
+    /// Rename one exact card ROM path and its mirrored save files.
+    Rename {
+        /// Exact ROM path relative to the card root, including nested folders.
+        path: PathBuf,
+        /// New filename; omit the extension to keep it.
+        new_name: String,
+        #[command(flatten)]
+        apply: ApplyArgs,
+    },
+    /// Copy selected local ROMs to this card; show the plan first with --dry-run.
+    Copy {
+        /// Library ROM IDs, filenames or game names.
+        #[arg(required = true, value_name = "ROM")]
+        roms: Vec<String>,
+        /// Disambiguate names shared by several platforms.
+        #[arg(long)]
+        platform: Option<String>,
+        #[command(flatten)]
+        apply: ApplyArgs,
+    },
+    /// Copy selected card ROM paths into the library (default: all unmatched files).
+    Import(CardImportArgs),
+    /// List ROMs using cached hashes, without reading ROM contents.
+    List,
+    /// Update unknown/changed ROM hashes and sample-check cached files; waits until finished.
+    Check {
+        /// Read every byte, even when metadata and samples match.
+        #[arg(long)]
+        full: bool,
     },
 }
 
@@ -228,8 +262,7 @@ pub enum LibraryCommand {
         /// Case-insensitive substring of the game name.
         query: Option<String>,
     },
-    /// Rename a ROM: its file, its game, and (if a card is mounted) the card's
-    /// copy together with its saves and save states.
+    /// Rename a local ROM file and its game title; card copies keep their names.
     Rename {
         /// ROM id, file name or game name (case-insensitive).
         #[arg(value_name = "ROM")]
@@ -277,9 +310,6 @@ pub struct ImportArgs {
     /// Skip files the DAT doesn't know (default: import them as unverified).
     #[arg(long, requires = "dat")]
     pub dat_only: bool,
-    /// How files enter the library: copy (default), reference (index in place), link (hard link).
-    #[arg(long, value_enum, default_value_t = ImportModeArg::Copy)]
-    pub mode: ImportModeArg,
     /// Don't fetch covers for the imported games afterwards.
     #[arg(long)]
     pub no_covers: bool,
@@ -289,14 +319,6 @@ pub struct ImportArgs {
     pub standard_names: bool,
     #[command(flatten)]
     pub apply: ApplyArgs,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
-pub enum ImportModeArg {
-    #[default]
-    Copy,
-    Reference,
-    Link,
 }
 
 #[derive(Debug, Subcommand)]
@@ -326,98 +348,14 @@ pub enum ConfigCommand {
     },
 }
 
-#[derive(Debug, Subcommand)]
-pub enum DeviceCommand {
-    /// Register the mounted card as a device (writes .pocketeer/device.toml on it).
-    Add {
-        /// A name for this card, e.g. "Pocket A" (unique among your devices).
-        #[arg(long, value_name = "NAME")]
-        name: String,
-    },
-    /// List registered devices.
-    List,
-    /// Show a device (default: the one on the mounted card).
-    Show {
-        /// Device id or name (default: the device registered on the mounted card).
-        #[arg(value_name = "DEVICE")]
-        device: Option<String>,
-    },
-    /// Add platforms / cores to a device's subscriptions.
-    Subscribe {
-        /// Device id or name (default: the device registered on the mounted card).
-        #[arg(value_name = "DEVICE")]
-        device: Option<String>,
-        /// Platform ids whose library ROMs go to Assets/<platform>/common/.
-        #[arg(long = "platform", value_name = "ID")]
-        platforms: Vec<String>,
-        /// Core ids to keep installed at the latest release.
-        #[arg(long = "core", value_name = "ID")]
-        cores: Vec<String>,
-    },
-    /// Remove platforms / cores from a device's subscriptions.
-    Unsubscribe {
-        /// Device id or name (default: the device registered on the mounted card).
-        #[arg(value_name = "DEVICE")]
-        device: Option<String>,
-        /// Platform ids to stop syncing (their files stay on the card).
-        #[arg(long = "platform", value_name = "ID")]
-        platforms: Vec<String>,
-        /// Core ids to stop keeping up to date (they stay installed).
-        #[arg(long = "core", value_name = "ID")]
-        cores: Vec<String>,
-    },
-    /// Bring the card up to date with its subscriptions.
-    Sync(SyncArgs),
-    /// Forget a device (the marker on its card is left alone).
-    Forget {
-        /// Device id or name.
-        #[arg(value_name = "DEVICE")]
-        device: String,
-    },
-    /// List ROMs on the mounted card that the library doesn't have (by name and size).
-    Orphans {
-        /// Only this platform.
-        #[arg(long, value_name = "ID")]
-        platform: Option<String>,
-        /// Also read same-size files and drop the ones whose crc32 matches a
-        /// library ROM (renamed copies). Slow over USB.
-        #[arg(long)]
-        verify: bool,
-    },
-    /// Copy ROMs that are only on the mounted card into the library.
-    Import(DeviceImportArgs),
-}
-
 #[derive(Debug, Args, Clone, Default)]
-pub struct SyncArgs {
-    /// Device id or name (default: the device registered on the mounted card).
-    /// The card must be the one registered as that device.
-    #[arg(value_name = "DEVICE")]
-    pub device: Option<String>,
-    /// Only ROMs.
-    #[arg(long, conflicts_with = "cores_only")]
-    pub roms_only: bool,
-    /// Only cores.
-    #[arg(long)]
-    pub cores_only: bool,
-    /// Delete card files no library ROM maps to.
-    #[arg(long)]
-    pub delete: bool,
-    /// Compare contents (crc32), not just sizes.
-    #[arg(long)]
-    pub verify: bool,
-    #[command(flatten)]
-    pub apply: ApplyArgs,
-}
-
-#[derive(Debug, Args, Clone, Default)]
-pub struct DeviceImportArgs {
+pub struct CardImportArgs {
     /// Only this platform.
     #[arg(long, value_name = "ID")]
     pub platform: Option<String>,
-    /// Only these file names (default: every orphan).
-    #[arg(value_name = "NAME")]
-    pub names: Vec<String>,
+    /// Card-relative ROM paths (default: every unmatched file).
+    #[arg(value_name = "PATH")]
+    pub paths: Vec<PathBuf>,
     /// Logiqx DAT to verify and name the files with.
     #[arg(long, value_name = "FILE")]
     pub dat: Option<PathBuf>,
@@ -436,17 +374,14 @@ pub struct DeviceImportArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum SavesCommand {
-    /// Sync Saves/ and Memories/Save States/ with the library (newest wins; the loser is kept).
-    Sync {
-        /// Only card → library.
-        #[arg(long, conflicts_with = "push")]
-        pull: bool,
-        /// Only library → card.
-        #[arg(long)]
-        push: bool,
-        /// Leave Memories/Save States/ alone.
+    /// Back up AP saves. Newer computer copies and content conflicts need a choice.
+    Backup {
+        /// Leave Memories save states alone.
         #[arg(long)]
         no_states: bool,
+        /// Explicitly resolve every conflict; omitted means leave conflicts unchanged.
+        #[arg(long, value_enum)]
+        conflicts: Option<SaveConflictArg>,
         #[command(flatten)]
         apply: ApplyArgs,
     },
@@ -458,14 +393,24 @@ pub enum SavesCommand {
         #[arg(value_name = "PATH")]
         path: PathBuf,
     },
-    /// Make an older copy the current one (then `saves sync --push`).
+    /// Restore a computer backup to AP, archiving AP's current bytes first.
+    #[command(disable_version_flag = true)]
     Restore {
-        /// Version id from `saves versions`.
-        #[arg(value_name = "ID")]
-        version_id: i64,
+        /// Card-relative save path.
+        path: PathBuf,
+        /// Use this historical version instead of the current backup.
+        #[arg(long)]
+        version: Option<i64>,
         #[command(flatten)]
         apply: ApplyArgs,
     },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum SaveConflictArg {
+    Ap,
+    Computer,
+    Skip,
 }
 
 #[derive(Debug, Subcommand)]

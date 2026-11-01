@@ -12,15 +12,17 @@
 use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
+    sync::atomic::Ordering,
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use pocketeer_core::{
     Error, ErrorInfo, Pocket,
     cores::{self, CoreList, SearchFilter},
-    library::{orphans::CardOnlyRom, rename::RenamePlan},
+    library::rename::RenamePlan,
     progress::Event,
     required,
+    roms::index::CardRom,
 };
 use ratatui::layout::Rect;
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
@@ -43,9 +45,9 @@ use super::jobs::{
 use crate::{
     cli::Global,
     commands::{
-        Staged, device as device_cmd, device::ImportReport as DeviceImportReport,
-        library as library_cmd, library::ImportReport as LibraryImportReport,
-        library::StandardizePlan, saves as saves_cmd,
+        Staged, card as card_cmd, card_import as card_import_cmd,
+        card_import::ImportReport as CardImportReport, library as library_cmd,
+        library::ImportReport as LibraryImportReport, library::StandardizePlan, saves as saves_cmd,
     },
     context::Context,
     human,
@@ -81,8 +83,6 @@ pub struct App {
     dragging: Option<(Splitter, Rect)>,
     pub log: VecDeque<String>,
     pub should_quit: bool,
-    /// After registering a card, open its subscription dialog once the reload lands.
-    open_subscriptions_after_reload: bool,
     /// Missing covers are fetched once per session (and again after imports).
     auto_covers_done: bool,
     /// A change check is in flight on the side worker.
@@ -91,6 +91,10 @@ pub struct App {
     /// tab after each step (at most one refresh in flight).
     importing: bool,
     refresh_pending: bool,
+    verification_next: usize,
+    verification_inflight: bool,
+    snapshot_epoch: u64,
+    pub rom_status: Option<String>,
 }
 
 impl App {
@@ -129,11 +133,14 @@ impl App {
             dragging: None,
             log: VecDeque::new(),
             should_quit: false,
-            open_subscriptions_after_reload: false,
             auto_covers_done: false,
             fingerprint_pending: false,
             importing: false,
             refresh_pending: false,
+            verification_next: 0,
+            verification_inflight: false,
+            snapshot_epoch: 0,
+            rom_status: None,
             global,
         }
     }
@@ -170,6 +177,10 @@ impl App {
 
     /// Runs a job on the main worker; `status` is shown while it runs.
     pub(super) fn submit(&mut self, status: &str, job: Job) {
+        let epoch = self.worker.epoch.fetch_add(1, Ordering::Relaxed) + 1;
+        if matches!(job, Job::Load | Job::Apply(_)) {
+            self.snapshot_epoch = epoch;
+        }
         self.busy = Some(status.to_string());
         self.worker.submit(self.ctx(), job);
     }
@@ -198,6 +209,33 @@ impl App {
     pub fn pump(&mut self) {
         while let Some(msg) = self.worker.try_recv() {
             match msg {
+                Msg::Verified {
+                    result,
+                    next,
+                    epoch,
+                } => {
+                    self.verification_inflight = false;
+                    if epoch >= self.snapshot_epoch {
+                        match result {
+                            Ok(mut index) => {
+                                if let Some(warning) = index.warning.take() {
+                                    self.log(warning);
+                                }
+                                let selected = self.game_selection();
+                                if let Some(snap) = &mut self.snapshot {
+                                    if let Some(card) = &mut snap.card {
+                                        card.card_roms = index.roms.clone();
+                                    }
+                                    snap.verification = Some(index);
+                                    snap.rematch();
+                                }
+                                self.verification_next = next;
+                                self.rebuild_rows_preserving(selected);
+                            }
+                            Err(e) => self.log(format!("ROM verification stopped: {e}")),
+                        }
+                    }
+                }
                 Msg::Progress(Event::Status(s)) => {
                     self.busy = Some(s);
                     self.download_pct = None;
@@ -221,21 +259,27 @@ impl App {
                 }
                 Msg::LibraryRefreshed(result) => {
                     self.refresh_pending = false;
+                    let selected = self.game_selection();
                     if let (Ok(view), Some(snap)) = (result, &mut self.snapshot) {
                         snap.library = Some(*view);
-                        self.rebuild_rows();
+                        snap.rematch();
+                        self.rebuild_rows_preserving(selected);
                     }
                 }
                 Msg::Loaded(result) => {
                     self.clear_busy();
                     match result {
-                        Ok(snap) => {
-                            self.snapshot = Some(*snap);
-                            self.covers.clear();
-                            self.rebuild_rows();
-                            if std::mem::take(&mut self.open_subscriptions_after_reload) {
-                                self.device_dialog();
+                        Ok(mut snap) => {
+                            if let Some(warning) =
+                                snap.verification.as_mut().and_then(|i| i.warning.take())
+                            {
+                                self.log(warning);
                             }
+                            let selected = self.game_selection();
+                            self.snapshot = Some(*snap);
+                            self.verification_next = 0;
+                            self.covers.clear();
+                            self.rebuild_rows_preserving(selected);
                             self.auto_fetch_covers();
                         }
                         Err(e) => self.error("Couldn't load", &e),
@@ -293,36 +337,74 @@ impl App {
                 }
             }
         }
+        self.schedule_verification();
+    }
+
+    fn schedule_verification(&mut self) {
+        if self.busy.is_some() || self.modal.is_some() || self.verification_inflight {
+            return;
+        }
+        let Some(index) = self.snapshot.as_mut().and_then(|s| s.verification.take()) else {
+            return;
+        };
+        if self.verification_next >= index.roms.len() {
+            self.rom_status = None;
+            return;
+        }
+        self.rom_status = Some(format!(
+            "ROM check {}/{}",
+            self.verification_next + 1,
+            index.roms.len()
+        ));
+        self.verification_inflight = true;
+        self.worker.submit(
+            self.ctx(),
+            Job::Verify {
+                index,
+                cursor: self.verification_next,
+                epoch: self.worker.epoch.load(Ordering::Relaxed),
+                token: self.worker.epoch.clone(),
+            },
+        );
     }
 
     /// A plan came back: show it, or say there is nothing to do.
     fn planned(&mut self, pending: Pending) {
         match pending {
-            Pending::DeviceSync(prep) => {
-                let changes = prep.plan.changes();
-                let lines = text_lines(&device_cmd::device_sync(&Staged::preview(
-                    prep.plan.clone(),
-                )));
-                if changes == 0 {
-                    self.info("Device in sync", lines);
+            Pending::CardRename(plan) => {
+                let lines = text_lines(&card_cmd::rename_report(&Staged::preview(plan.clone())));
+                self.confirm(
+                    "Rename this AP ROM and its saves?",
+                    lines,
+                    Pending::CardRename(plan),
+                );
+            }
+            Pending::Clean(plan) => {
+                if plan.entries.is_empty() {
+                    self.notice("No macOS junk on the card.");
                 } else {
-                    let title = format!("Sync {changes} change(s) to {}?", prep.plan.device.name);
-                    self.confirm(title, lines, Pending::DeviceSync(prep));
+                    let title = format!(
+                        "Delete {} junk item(s), {}?",
+                        plan.entries.len(),
+                        human::bytes(plan.bytes)
+                    );
+                    let lines = text_lines(&card_cmd::clean_report(&Staged::preview(plan.clone())));
+                    self.confirm(title, lines, Pending::Clean(plan));
                 }
             }
-            Pending::Saves(plan) => {
-                let changes = plan.changes();
-                let lines = text_lines(&saves_cmd::saves_sync(&Staged::preview((*plan).clone())));
-                if changes == 0 {
-                    self.info("Saves in sync", lines);
+            Pending::Copy(plan) => {
+                let lines = text_lines(&card_cmd::copy_report(&Staged::preview(plan.clone())));
+                if plan.changes() == 0 {
+                    self.info("Already on this card", lines);
                 } else {
                     self.confirm(
-                        format!("Sync {changes} save file(s)?"),
+                        format!("Copy {} ROM(s) to this card?", plan.changes()),
                         lines,
-                        Pending::Saves(plan),
+                        Pending::Copy(plan),
                     );
                 }
             }
+            Pending::Saves(plan) => self.review_saves(plan),
             Pending::Rename(plan) => {
                 let lines = text_lines(&library_cmd::library_rename(&Staged::preview(
                     (*plan).clone(),
@@ -517,7 +599,7 @@ impl App {
             Pending::CardImport(plan) => (
                 plan.changes(),
                 format!("Copy {} ROM(s) into the library?", plan.changes()),
-                text_lines(&device_cmd::device_import(&DeviceImportReport::preview(
+                text_lines(&card_import_cmd::report(&CardImportReport::preview(
                     (**plan).clone(),
                 ))),
             ),
