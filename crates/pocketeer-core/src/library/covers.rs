@@ -4,6 +4,8 @@
 //! No-Intro game names (with a few characters replaced), so a library imported
 //! with a DAT can fetch covers without any guessing.
 
+pub mod import;
+
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
@@ -150,12 +152,13 @@ pub struct CoverRecord {
     pub rel_path: Option<PathBuf>,
     pub status: CoverStatus,
     pub fetched_at: i64,
+    pub imported: bool,
 }
 
 pub fn record(conn: &Connection, game_id: i64) -> Result<Option<CoverRecord>> {
     use rusqlite::OptionalExtension;
     conn.query_row(
-        "SELECT game_id, rel_path, status, fetched_at FROM covers WHERE game_id = ?1",
+        "SELECT game_id, rel_path, status, fetched_at, imported FROM covers WHERE game_id = ?1",
         params![game_id],
         |r| {
             Ok(CoverRecord {
@@ -163,6 +166,7 @@ pub fn record(conn: &Connection, game_id: i64) -> Result<Option<CoverRecord>> {
                 rel_path: r.get::<_, Option<String>>(1)?.map(PathBuf::from),
                 status: CoverStatus::parse(&r.get::<_, String>(2)?),
                 fetched_at: r.get(3)?,
+                imported: r.get(4)?,
             })
         },
     )
@@ -170,20 +174,51 @@ pub fn record(conn: &Connection, game_id: i64) -> Result<Option<CoverRecord>> {
     .map_err(|e| Error::db(e, "cover record"))
 }
 
-fn upsert(conn: &Connection, game_id: i64, rel: Option<&Path>, status: CoverStatus) -> Result<()> {
-    conn.execute(
-        "INSERT INTO covers (game_id, rel_path, status, fetched_at) VALUES (?1, ?2, ?3, ?4)
+fn upsert(
+    conn: &Connection,
+    game_id: i64,
+    rel: Option<&Path>,
+    status: CoverStatus,
+) -> Result<bool> {
+    let changed = conn
+        .execute(
+            "INSERT INTO covers (game_id, rel_path, status, fetched_at) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(game_id) DO UPDATE SET rel_path = excluded.rel_path,
-            status = excluded.status, fetched_at = excluded.fetched_at",
-        params![
-            game_id,
-            rel.map(|p| p.to_string_lossy().into_owned()),
-            status.as_str(),
-            fsutil::now_secs()
-        ],
-    )
-    .map_err(|e| Error::db(e, "upsert cover"))?;
-    Ok(())
+            status = excluded.status, fetched_at = excluded.fetched_at
+         WHERE covers.imported = 0",
+            params![
+                game_id,
+                rel.map(|p| p.to_string_lossy().into_owned()),
+                status.as_str(),
+                fsutil::now_secs()
+            ],
+        )
+        .map_err(|e| Error::db(e, "upsert cover"))?;
+    Ok(changed > 0)
+}
+
+// Check the title and record the download in the same transaction: a DAT
+// result or rename arriving during HTTP must not attach the old title's art.
+fn record_download(
+    conn: &Connection,
+    game: &db::Game,
+    rel: Option<&Path>,
+    status: CoverStatus,
+) -> Result<bool> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| Error::db(e, "begin cover result"))?;
+    let current = db::get_game(&tx, game.id)?;
+    if current
+        .as_ref()
+        .is_none_or(|g| super::identify::cover_name(g) != super::identify::cover_name(game))
+    {
+        return Ok(false);
+    }
+    let changed = upsert(&tx, game.id, rel, status)?;
+    tx.commit()
+        .map_err(|e| Error::db(e, "commit cover result"))?;
+    Ok(changed)
 }
 
 /// Forgets a `none`/`error` record so the next fetch tries again (after a
@@ -302,10 +337,10 @@ pub fn fetch_with_base(
     for (i, g) in todo.iter().enumerate() {
         match opts.system.as_deref().or_else(|| system_for(&g.platform)) {
             Some(system) => {
-                let url = url_with_base(base, system, &g.name);
+                let url = url_with_base(base, system, super::identify::cover_name(g));
                 let rel = PathBuf::from("covers")
                     .join(&g.platform)
-                    .join(thumbnail_name(&g.name));
+                    .join(thumbnail_name(super::identify::cover_name(g)));
                 jobs.push((i, url, rel));
             }
             None => {
@@ -361,25 +396,31 @@ pub fn fetch_with_base(
                 .find(|(i, _, _)| *i == game_idx)
                 .map(|(_, _, rel)| rel.clone())
                 .unwrap_or_default();
-            match status {
-                CoverStatus::Ok => report.summary.fetched += 1,
-                CoverStatus::None => report.summary.not_found += 1,
-                CoverStatus::Error => report.summary.errors += 1,
-            }
-            if let Err(e) = upsert(
+            match record_download(
                 lib.conn(),
-                g.id,
+                g,
                 (status == CoverStatus::Ok).then_some(rel.as_path()),
                 status,
             ) {
-                report.summary.errors += 1;
-                report.items.push(FetchItem {
-                    platform: g.platform.clone(),
-                    game: g.name.clone(),
-                    status: CoverStatus::Error,
-                    message: Some(e.to_string()),
-                });
-                continue;
+                Ok(false) => {
+                    report.summary.already += 1;
+                    continue;
+                }
+                Ok(true) => match status {
+                    CoverStatus::Ok => report.summary.fetched += 1,
+                    CoverStatus::None => report.summary.not_found += 1,
+                    CoverStatus::Error => report.summary.errors += 1,
+                },
+                Err(e) => {
+                    report.summary.errors += 1;
+                    report.items.push(FetchItem {
+                        platform: g.platform.clone(),
+                        game: g.name.clone(),
+                        status: CoverStatus::Error,
+                        message: Some(e.to_string()),
+                    });
+                    continue;
+                }
             }
             report.items.push(FetchItem {
                 platform: g.platform.clone(),
@@ -445,6 +486,86 @@ mod tests {
         );
         assert_eq!(system_for("GBA"), Some("Nintendo - Game Boy Advance"));
         assert_eq!(system_for("nope"), None);
+    }
+
+    #[test]
+    fn stale_download_cannot_replace_a_new_catalog_title() {
+        let (_tmp, lib) = crate::testutil::library_with(&[("game.gba", "ROM")]);
+        let game = lib.list_games(None, None).unwrap().remove(0);
+        let mut server = mockito::Server::new();
+        let old = server
+            .mock("GET", "/Sys/master/Named_Boxarts/game.png")
+            .with_body(b"old art")
+            .create();
+        let mut changed = false;
+        fetch_with_base(&lib, &Http::new(None).unwrap(), &FetchOptions { system: Some("Sys".into()), ..Default::default() }, &server.url(), &mut |event| {
+            if !changed && matches!(event, Event::Status(_)) {
+                lib.conn().execute("UPDATE roms SET dat_status='matched',dat_game_name='Identified title' WHERE game_id=?1", [game.id]).unwrap();
+                changed = true;
+            }
+        }).unwrap();
+        old.assert();
+        assert!(record(lib.conn(), game.id).unwrap().is_none());
+        let new = server
+            .mock("GET", "/Sys/master/Named_Boxarts/Identified%20title.png")
+            .with_body(b"correct art")
+            .create();
+        fetch_with_base(
+            &lib,
+            &Http::new(None).unwrap(),
+            &FetchOptions {
+                system: Some("Sys".into()),
+                ..Default::default()
+            },
+            &server.url(),
+            &mut |_| {},
+        )
+        .unwrap();
+        new.assert();
+        assert_eq!(
+            std::fs::read(path_for(&lib, game.id).unwrap().unwrap()).unwrap(),
+            b"correct art"
+        );
+    }
+
+    #[test]
+    fn imported_cover_wins_even_when_a_download_was_already_planned() {
+        let (tmp, lib) = crate::testutil::library_with(&[("game.gba", "ROM")]);
+        let game = lib.list_games(None, None).unwrap().remove(0);
+        let source = tmp.path().join("manual.png");
+        image::RgbImage::from_pixel(2, 2, image::Rgb([10, 20, 30]))
+            .save(&source)
+            .unwrap();
+        let mut server = mockito::Server::new();
+        let download = server
+            .mock("GET", "/Sys/master/Named_Boxarts/game.png")
+            .with_body(b"downloaded art")
+            .expect(1)
+            .create();
+        let mut imported = false;
+        let report = fetch_with_base(
+            &lib,
+            &Http::new(None).unwrap(),
+            &FetchOptions {
+                system: Some("Sys".into()),
+                ..Default::default()
+            },
+            &server.url(),
+            &mut |event| {
+                if !imported && matches!(event, Event::Status(_)) {
+                    let mut other = Library::open(lib.root()).unwrap();
+                    let plan = import::plan(&other, game.id, &source).unwrap();
+                    import::apply(&mut other, &plan).unwrap();
+                    imported = true;
+                }
+            },
+        )
+        .unwrap();
+        download.assert();
+        assert_eq!(report.summary.already, 1);
+        let kept = path_for(&lib, game.id).unwrap().unwrap();
+        assert_eq!(std::fs::read(kept).unwrap(), std::fs::read(source).unwrap());
+        assert!(record(lib.conn(), game.id).unwrap().unwrap().imported);
     }
 
     #[test]

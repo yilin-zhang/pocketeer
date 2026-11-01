@@ -8,6 +8,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+image.workspace = true
 dirs.workspace = true
 fs2.workspace = true
 crc32fast.workspace = true

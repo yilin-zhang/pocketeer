@@ -237,6 +237,9 @@ pub enum Modal {
 pub const HELP: &str = include_str!("../../../docs/tui-help.txt");
 
 pub enum InputKind {
+    ImportCover {
+        game_id: i64,
+    },
     CardRename {
         path: PathBuf,
     },
@@ -263,7 +266,10 @@ impl InputKind {
     /// This prompt takes a file-system path: it gets live suggestions and
     /// Tab completion.
     pub fn completes_paths(&self) -> bool {
-        matches!(self, InputKind::ImportDir | InputKind::ImportDat { .. })
+        matches!(
+            self,
+            InputKind::ImportDir | InputKind::ImportDat { .. } | InputKind::ImportCover { .. }
+        )
     }
 }
 

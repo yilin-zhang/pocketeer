@@ -101,6 +101,10 @@ impl GameRow {
 /// Something to plan on the worker; the plan comes back as a [`Pending`]
 /// for the user to confirm.
 pub enum Request {
+    ImportCover {
+        game_id: i64,
+        source: PathBuf,
+    },
     CardRename {
         path: PathBuf,
         new_name: String,
@@ -123,6 +127,7 @@ pub enum Request {
 
 /// A plan: shown in a dialog, then applied once confirmed.
 pub enum Pending {
+    ImportCover(pocketeer_core::library::covers::import::ImportPlan),
     CardRename(pocketeer_core::roms::rename::CardRenamePlan),
     Install(Vec<Prepared>),
     Remove(Vec<UninstallPlan>),
@@ -180,6 +185,7 @@ impl Pending {
 }
 
 pub enum Job {
+    Identify,
     Verify {
         index: Box<Index>,
         cursor: usize,
@@ -298,6 +304,23 @@ impl Worker {
 
 fn run(ctx: &Context, job: Job, progress: &mut dyn FnMut(Event)) -> Msg {
     match job {
+        Job::Identify => {
+            let report = match library_cmd::identify(ctx, None, progress) {
+                Ok(report) => report,
+                Err(e) => return failed(e),
+            };
+            let mut text = report.summary();
+            for error in report.errors {
+                text.push_str(&format!("\n{error}"));
+            }
+            if !ctx.offline() {
+                match library_cmd::covers_fetch(ctx, None, false, None, progress) {
+                    Ok(r) => human::covers_summary(&mut text, Some(&r), Mode::Interactive),
+                    Err(e) => text.push_str(&format!("\nCovers: {e}")),
+                }
+            }
+            applied(text, 0)
+        }
         Job::Verify {
             mut index,
             cursor,
@@ -348,6 +371,9 @@ fn run(ctx: &Context, job: Job, progress: &mut dyn FnMut(Event)) -> Msg {
 
 fn plan(ctx: &Context, request: Request, progress: &mut dyn FnMut(Event)) -> Result<Pending> {
     Ok(match request {
+        Request::ImportCover { game_id, source } => {
+            Pending::ImportCover(covers::import::plan(&ctx.library()?, game_id, &source)?)
+        }
         Request::CardRename { path, new_name } => {
             Pending::CardRename(card_cmd::plan_rename(ctx, &path, &new_name)?)
         }
@@ -387,6 +413,12 @@ fn plan(ctx: &Context, request: Request, progress: &mut dyn FnMut(Event)) -> Res
 /// the CLI prints (`Mode::Interactive`: no CLI flags in it).
 fn apply(ctx: &Context, pending: Pending, progress: &mut dyn FnMut(Event)) -> Msg {
     match pending {
+        Pending::ImportCover(plan) => {
+            let result = ctx
+                .library()
+                .and_then(|mut lib| covers::import::apply(&mut lib, &plan));
+            shown(plan, result, |s| library_cmd::cover_import(&s))
+        }
         Pending::CardRename(plan) => {
             let result = card_cmd::apply_rename(ctx, &plan);
             shown(plan, result, |s| card_cmd::rename_report(&s))

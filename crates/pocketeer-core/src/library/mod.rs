@@ -12,6 +12,7 @@
 pub mod card_import;
 pub mod covers;
 pub mod db;
+pub mod identify;
 pub mod import;
 pub mod matching;
 pub mod names;

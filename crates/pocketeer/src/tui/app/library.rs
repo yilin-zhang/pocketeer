@@ -8,7 +8,31 @@ use pocketeer_core::{
 use super::*;
 use crate::{cli::CardImportArgs, commands::library as library_cmd};
 
+fn import_start_path() -> String {
+    dirs::home_dir()
+        .map(|home| format!("{}/", home.display()))
+        .unwrap_or_default()
+}
+
 impl App {
+    pub(super) fn import_cover(&mut self) {
+        let Some(game) = self.selected_game() else {
+            self.notice("Select a library game first; import a card-only ROM with i before adding its cover.");
+            return;
+        };
+        let game_id = game.game.id;
+        let title = format!("Import cover: {}", game.game.name);
+        self.input(
+            title,
+            vec![
+                "Choose a PNG, JPEG or WebP image to copy into the library.".into(),
+                "Tab completes paths. Replacement is confirmed before saving.".into(),
+            ],
+            import_start_path(),
+            InputKind::ImportCover { game_id },
+        );
+    }
+
     /// `n`: create the library at the configured path, then reload.
     pub(super) fn init_library(&mut self) {
         if self.library_view().is_some() {
@@ -34,16 +58,13 @@ impl App {
             self.no_library();
             return;
         }
-        let home = dirs::home_dir()
-            .map(|h| format!("{}/", h.display()))
-            .unwrap_or_default();
         self.input(
             "Import ROMs  1/3: what",
             vec![
                 "A folder of ROMs on this computer, or one ROM / zip file.".into(),
                 "Matching entries are listed as you type; ↓ picks one, Tab completes.".into(),
             ],
-            home,
+            import_start_path(),
             InputKind::ImportDir,
         );
     }
@@ -67,33 +88,37 @@ impl App {
         }
     }
 
-    /// Once per session (and after imports): fetch covers nobody has tried yet.
-    pub(super) fn auto_fetch_covers(&mut self) {
-        if self.auto_covers_done || !self.online() || self.side_status.is_some() {
-            return;
-        }
-        self.auto_covers_done = true;
-        let wanted = self
-            .library_view()
-            .is_some_and(|l| l.games.iter().any(|g| g.cover.is_none()));
-        if !wanted {
-            return;
-        }
-        self.side_status = Some("fetching missing covers".into());
-        self.submit_side(Job::FetchCovers {
-            platform: None,
-            system: None,
-            quiet: true,
+    /// Identify content before fetching covers, once per session and after imports.
+    pub(super) fn auto_identify(&mut self) {
+        let unchecked = self.library_view().is_some_and(|l| {
+            l.games.iter().any(|g| {
+                g.game
+                    .roms
+                    .iter()
+                    .any(|r| r.dat.status == pocketeer_core::library::identify::Status::Unchecked)
+            })
         });
+        if (self.auto_metadata_done && !unchecked)
+            || self.side_status.is_some()
+            || self.library_view().is_none()
+        {
+            return;
+        }
+        self.auto_metadata_done = true;
+        self.identify_library();
+    }
+
+    pub(super) fn identify_library(&mut self) {
+        if self.library_view().is_none() || self.side_status.is_some() {
+            return;
+        }
+        self.side_status = Some("checking DATs".into());
+        self.submit_side(Job::Identify);
     }
 
     /// `t`: offer standard (No-Intro) names for games whose file names aren't.
     pub(super) fn standardize(&mut self) {
         if self.lib_ctx().is_none() {
-            return;
-        }
-        if !self.online() {
-            self.notice("Standard names need the libretro name list: start without --offline.");
             return;
         }
         self.submit("Matching standard names", Job::Plan(Request::Standardize));

@@ -58,6 +58,17 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_RENAMES,
     // v6
     "CREATE INDEX IF NOT EXISTS roms_name ON roms(name);",
+    // v7
+    "ALTER TABLE covers ADD COLUMN imported INTEGER NOT NULL DEFAULT 0 CHECK (imported IN (0, 1));",
+    // v8
+    "ALTER TABLE roms ADD COLUMN dat_status TEXT NOT NULL DEFAULT 'unchecked' CHECK (dat_status IN ('unchecked','matched','no_match','error','unsupported','ambiguous'));
+ALTER TABLE roms ADD COLUMN dat_game_name TEXT;
+ALTER TABLE roms ADD COLUMN dat_rom_name TEXT;
+ALTER TABLE roms ADD COLUMN dat_revision TEXT;
+ALTER TABLE roms ADD COLUMN dat_source TEXT;
+ALTER TABLE roms ADD COLUMN dat_checked_at INTEGER;
+ALTER TABLE roms ADD COLUMN dat_error TEXT;
+UPDATE roms SET dat_status='matched',dat_game_name=(SELECT name FROM games WHERE games.id=roms.game_id),dat_rom_name=name,dat_source='manual' WHERE verified=1;",
 ];
 
 /// Brings the schema to the current version, one migration per
@@ -144,6 +155,7 @@ pub struct Rom {
     pub crc32: String,
     pub sha1: String,
     pub verified: bool,
+    pub dat: super::identify::Identification,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rel_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,8 +200,11 @@ pub struct NewRom<'a> {
 
 pub fn insert_rom(conn: &Connection, rom: &NewRom<'_>) -> Result<i64> {
     conn.execute(
-        "INSERT INTO roms (game_id, name, size, crc32, sha1, verified, rel_path, source_path, mode, added_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO roms (game_id, name, size, crc32, sha1, verified, rel_path, source_path, mode, added_at, dat_status, dat_game_name, dat_rom_name, dat_source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+             CASE WHEN ?6 THEN 'matched' ELSE 'unchecked' END,
+             CASE WHEN ?6 THEN (SELECT name FROM games WHERE id=?1) END,
+             CASE WHEN ?6 THEN ?2 END, CASE WHEN ?6 THEN 'manual' END)",
         params![
             rom.game_id,
             rom.name,
@@ -216,6 +231,15 @@ fn rom_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Rom> {
         crc32: r.get("crc32")?,
         sha1: r.get("sha1")?,
         verified: r.get("verified")?,
+        dat: super::identify::Identification {
+            status: super::identify::Status::parse(&r.get::<_, String>("dat_status")?)?,
+            game_name: r.get("dat_game_name")?,
+            rom_name: r.get("dat_rom_name")?,
+            revision: r.get("dat_revision")?,
+            source: r.get("dat_source")?,
+            checked_at: r.get("dat_checked_at")?,
+            error: r.get("dat_error")?,
+        },
         rel_path: r.get::<_, Option<String>>("rel_path")?.map(PathBuf::from),
         source_path: r
             .get::<_, Option<String>>("source_path")?
@@ -233,10 +257,9 @@ fn rom_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Rom> {
     })
 }
 
-const ROM_COLS: &str =
-    "id, game_id, name, size, crc32, sha1, verified, rel_path, source_path, mode";
+const ROM_COLS: &str = "id, game_id, name, size, crc32, sha1, verified, rel_path, source_path, mode, dat_status, dat_game_name, dat_rom_name, dat_revision, dat_source, dat_checked_at, dat_error";
 /// [`ROM_COLS`] qualified with the `r` alias used in joins.
-const ROM_COLS_R: &str = "r.id, r.game_id, r.name, r.size, r.crc32, r.sha1, r.verified, r.rel_path, r.source_path, r.mode";
+const ROM_COLS_R: &str = "r.id, r.game_id, r.name, r.size, r.crc32, r.sha1, r.verified, r.rel_path, r.source_path, r.mode, r.dat_status, r.dat_game_name, r.dat_rom_name, r.dat_revision, r.dat_source, r.dat_checked_at, r.dat_error";
 
 /// A ROM on this platform whose `column` (`sha1` or `name`) equals `value`.
 fn find_rom_by(
@@ -524,13 +547,15 @@ mod tests {
     /// appending one means adding its checksum to the list.
     #[test]
     fn released_migrations_are_frozen() {
-        const PINNED: [u32; 6] = [
+        const PINNED: [u32; 8] = [
             0xb785_fcea,
             0x7e87_79a0,
             0x5aef_96de,
             0x8559_3bf3,
             0x2d5b_2239,
             0xc69f_adbb,
+            0x0d89_5ce4,
+            0xf329_8add,
         ];
         let actual: Vec<u32> = MIGRATIONS
             .iter()

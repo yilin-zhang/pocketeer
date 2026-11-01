@@ -34,6 +34,15 @@ pub fn run(
     progress: &mut dyn FnMut(Event),
 ) -> ExitCode {
     match cmd {
+        LibraryCommand::Identify { platform } => {
+            out.emit_outcome(identify(ctx, platform.as_deref(), progress), |r| {
+                let mut text = r.summary();
+                for error in &r.errors {
+                    let _ = write!(text, "\n{error}");
+                }
+                text + "\n"
+            })
+        }
         LibraryCommand::Init => out.emit(init(ctx), library_init),
         LibraryCommand::Status => out.emit(status(ctx), library_status),
         LibraryCommand::Import(args) => {
@@ -121,6 +130,9 @@ pub fn covers_after_import(
     (added, enabled): (usize, bool),
     progress: &mut dyn FnMut(Event),
 ) -> Option<FetchReport> {
+    if added > 0 {
+        let _ = identify(ctx, platform, progress);
+    }
     if added == 0 || !enabled || ctx.offline() {
         return None;
     }
@@ -353,6 +365,20 @@ pub fn covers(
     progress: &mut dyn FnMut(Event),
 ) -> ExitCode {
     match cmd {
+        CoversCommand::Import {
+            rom,
+            image,
+            platform,
+            apply,
+        } => {
+            let result = (|| {
+                let mut lib = ctx.library()?;
+                let hits = library::resolve_game_roms(&lib, platform.as_deref(), &rom)?;
+                let plan = covers::import::plan(&lib, hits[0].0.id, &image)?;
+                stage(apply, plan, |p| covers::import::apply(&mut lib, p))
+            })();
+            out.emit_outcome(result, cover_import)
+        }
         CoversCommand::Fetch {
             platform,
             retry,
@@ -369,6 +395,41 @@ pub fn covers(
         ),
         CoversCommand::Status => out.emit(covers_status(ctx), covers_status_text),
     }
+}
+
+impl Outcome for library::identify::Report {
+    fn error(&self) -> Option<Error> {
+        super::verdict(
+            self.matched + self.no_match + self.ambiguous + self.unchanged,
+            self.errors.len(),
+        )
+    }
+}
+
+pub fn identify(
+    ctx: &Context,
+    platform: Option<&str>,
+    progress: &mut dyn FnMut(Event),
+) -> Result<library::identify::Report> {
+    let policy = match ctx.policy() {
+        pocketeer_core::net::Policy::MaxAge(_) => {
+            pocketeer_core::net::Policy::MaxAge(library::identify::MAX_AGE)
+        }
+        p => p,
+    };
+    let base =
+        std::env::var("POCKETEER_DAT_BASE").unwrap_or_else(|_| library::identify::BASE.into());
+    library::identify::run(
+        &mut ctx.library()?,
+        &ctx.http()?,
+        &ctx.cache()?,
+        library::identify::Options {
+            policy,
+            base: &base,
+            platform,
+        },
+        progress,
+    )
 }
 
 pub fn covers_fetch(
@@ -511,11 +572,7 @@ pub fn library_list(r: &ListReport) -> String {
                 [
                     g.platform.clone(),
                     g.name.clone(),
-                    if rom.verified {
-                        "✓".into()
-                    } else {
-                        "?".into()
-                    },
+                    rom.dat.status.label().into(),
                     bytes(rom.size),
                 ]
             })
@@ -725,6 +782,50 @@ pub fn covers_status_text(r: &CoversStatusReport) -> String {
         &mut out,
         ["PLATFORM", "COVERS", "NOT FOUND", "MAPPED"],
         &rows,
+    );
+    out
+}
+
+impl Plan for covers::import::ImportPlan {
+    fn changes(&self) -> usize {
+        1
+    }
+}
+impl Applied for covers::import::ImportResult {
+    fn failed(&self) -> usize {
+        0
+    }
+}
+pub fn cover_import(
+    staged: &Staged<covers::import::ImportPlan, covers::import::ImportResult>,
+) -> String {
+    let plan = &staged.plan;
+    let mut out = format!(
+        "{} / {}\nCopy {} ({} × {}, {})\n  → {}\n",
+        plan.game.platform,
+        plan.game.name,
+        plan.source.display(),
+        plan.width,
+        plan.height,
+        bytes(plan.bytes as u64),
+        plan.destination.display()
+    );
+    if plan.previous.as_ref().is_some_and(|p| p.rel_path.is_some()) {
+        out.push_str("Replaces the current cover after the new copy is saved.\n");
+    }
+    out.push_str("The source image is kept. Automatic downloads will keep this cover.\n");
+    staged_footer(
+        &mut out,
+        staged.mode,
+        staged.result.as_ref(),
+        1,
+        "",
+        |out, result| {
+            let _ = writeln!(out, "✓ Cover imported: {}", result.path.display());
+            for warning in &result.warnings {
+                let _ = writeln!(out, "! {warning}");
+            }
+        },
     );
     out
 }

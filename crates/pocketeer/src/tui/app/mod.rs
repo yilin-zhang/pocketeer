@@ -83,8 +83,8 @@ pub struct App {
     dragging: Option<(Splitter, Rect)>,
     pub log: VecDeque<String>,
     pub should_quit: bool,
-    /// Missing covers are fetched once per session (and again after imports).
-    auto_covers_done: bool,
+    /// DAT identification and covers run once per session (and after imports).
+    auto_metadata_done: bool,
     /// A change check is in flight on the side worker.
     fingerprint_pending: bool,
     /// The running main-worker job adds games one by one; refresh the Games
@@ -133,7 +133,7 @@ impl App {
             dragging: None,
             log: VecDeque::new(),
             should_quit: false,
-            auto_covers_done: false,
+            auto_metadata_done: false,
             fingerprint_pending: false,
             importing: false,
             refresh_pending: false,
@@ -147,10 +147,6 @@ impl App {
 
     // -----------------------------------------------------------------------
     // jobs
-
-    pub(super) fn online(&self) -> bool {
-        !self.global.offline
-    }
 
     /// What a job needs: the CLI's context, told which card we have (if any)
     /// instead of detecting one.
@@ -280,7 +276,7 @@ impl App {
                             self.verification_next = 0;
                             self.covers.clear();
                             self.rebuild_rows_preserving(selected);
-                            self.auto_fetch_covers();
+                            self.auto_identify();
                         }
                         Err(e) => self.error("Couldn't load", &e),
                     }
@@ -317,7 +313,7 @@ impl App {
                         self.log(line.clone());
                     }
                     if failed > 0 {
-                        self.info("Cover fetch failed", lines);
+                        self.info("Background library task failed", lines);
                     }
                     // New files on disk: refresh the Games tab when nothing else is running.
                     if fetched_any && self.busy.is_none() && self.modal.is_none() {
@@ -371,6 +367,16 @@ impl App {
     /// A plan came back: show it, or say there is nothing to do.
     fn planned(&mut self, pending: Pending) {
         match pending {
+            Pending::ImportCover(plan) => {
+                let replacing = plan.previous.as_ref().is_some_and(|p| p.rel_path.is_some());
+                let title = if replacing {
+                    "Replace this game's cover?"
+                } else {
+                    "Import this game's cover?"
+                };
+                let lines = text_lines(&library_cmd::cover_import(&Staged::preview(plan.clone())));
+                self.confirm(title, lines, Pending::ImportCover(plan));
+            }
             Pending::CardRename(plan) => {
                 let lines = text_lines(&card_cmd::rename_report(&Staged::preview(plan.clone())));
                 self.confirm(

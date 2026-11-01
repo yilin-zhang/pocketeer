@@ -70,6 +70,8 @@ impl App {
             // BIOS
             KeyCode::Char('p') if self.tab == Tab::Bios => self.place(),
             // Games
+            KeyCode::Char('d') if self.tab == Tab::Games => self.identify_library(),
+            KeyCode::Char('b') if self.tab == Tab::Games => self.import_cover(),
             KeyCode::Char('e') if self.tab == Tab::Games => self.rename_selected(),
             KeyCode::Char('x') if self.tab == Tab::Games => self.remove_selected_game(),
             KeyCode::Char('i') if self.tab == Tab::Games => self.import_orphans(false),
@@ -330,7 +332,7 @@ impl App {
                 if pending.is_import() {
                     // New games: show each as it lands, fetch covers after the reload.
                     self.importing = true;
-                    self.auto_covers_done = false;
+                    self.auto_metadata_done = false;
                 }
                 self.submit("Applying", Job::Apply(pending));
             }

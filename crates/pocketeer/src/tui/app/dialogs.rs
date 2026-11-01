@@ -19,6 +19,18 @@ impl App {
 
     pub(super) fn submit_input(&mut self, kind: InputKind, value: String) {
         match kind {
+            InputKind::ImportCover { game_id } => {
+                if value.trim().is_empty() {
+                    return;
+                }
+                self.submit(
+                    "Checking cover image",
+                    Job::Plan(Request::ImportCover {
+                        game_id,
+                        source: PathBuf::from(expand_home(value.trim())),
+                    }),
+                );
+            }
             InputKind::CardRename { path } => self.submit(
                 "Planning AP rename",
                 Job::Plan(Request::CardRename {
@@ -150,7 +162,8 @@ impl App {
             "Import ROMs  3/3: DAT",
             vec![
                 format!("Folder: {}   Platform: {platform}", dir.display()),
-                "Logiqx DAT file to verify and name the files with; leave empty for none.".into(),
+                "Optional custom DAT; leave empty for automatic identification after import."
+                    .into(),
                 "Matching entries are listed as you type; ↓ picks one, Tab completes.".into(),
             ],
             String::new(),

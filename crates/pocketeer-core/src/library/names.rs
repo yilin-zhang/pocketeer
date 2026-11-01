@@ -220,20 +220,29 @@ pub fn standardize_plan(
     let mut lists: std::collections::HashMap<String, Option<Vec<String>>> = Default::default();
     let mut out = Vec::new();
     for g in &games {
-        let list = lists
-            .entry(g.platform.clone())
-            .or_insert_with(|| names(&g.platform));
-        let Some(list) = list else {
-            continue;
-        };
         for rom in &g.roms {
-            if rom.verified {
+            let new_name = if let Some(name) = &rom.dat.rom_name {
+                name.clone()
+            } else {
+                // Once a DAT has been consulted, do not guess a different
+                // version from a similar filename.
+                if rom.dat.status != super::identify::Status::Unchecked || rom.verified {
+                    continue;
+                }
+                let list = lists
+                    .entry(g.platform.clone())
+                    .or_insert_with(|| names(&g.platform));
+                let Some(list) = list else {
+                    continue;
+                };
+                let Some(s) = suggest(&rom.name, list) else {
+                    continue;
+                };
+                format!("{s}{}", crate::roms::rename::extension(&rom.name))
+            };
+            if new_name == rom.name {
                 continue;
             }
-            let Some(s) = suggest(&rom.name, list) else {
-                continue;
-            };
-            let new_name = format!("{s}{}", crate::roms::rename::extension(&rom.name));
             if let Ok(plan) =
                 super::rename::plan(lib, Some(&g.platform), &rom.id.to_string(), &new_name)
             {

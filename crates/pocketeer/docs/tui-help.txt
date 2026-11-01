@@ -22,8 +22,10 @@ Games   (the library and the card in one list; WHERE says which)
   a     import ROMs from this computer: a folder, or one ROM / zip (→ platform → optional DAT)
   i/I   import the selected card-only ROM / every card-only ROM into the library
   e     choose local/AP rename, or adopt the other copy's name; preview first
+  d     check cached/automatic DATs again; retry failed identification
   t     rename games to the standard (No-Intro) names they match; imports offer this too
   x     library game → .trash/ inside the library;  card-only ROM → deleted from the card
+  b     copy a PNG/JPEG/WebP cover from this computer (confirm before replacing)
   f/F   fetch the cover for this game / for its whole platform
   C     fetch every missing cover (missing covers are also fetched on start)
   S     copy the selected local game to the card
@@ -51,3 +53,11 @@ files use small samples. WHERE uses ? while identity is unresolved. A local
 ROM keeps its local filename as the title; ≠ means an AP copy has another name.
 Details show each exact AP path and verification confidence. No automatic rename
 is queued. `pocketeer card check --full` explicitly reads every ROM byte.
+
+DAT identification runs in the background at startup and after ROM imports.
+? = not checked, ✓ = matched, – = no match, ! = retryable failure,
+~ = multiple matches, n/a = no automatic DAT source. Details show the standard
+name and any retry error. Local filenames stay unchanged; t previews renames.
+DATs are cached for seven days. Changed catalogs trigger another lookup;
+network failures are retried on the next launch or with d. Offline mode uses
+cached DATs. No match means absent from that catalog, not a damaged ROM.

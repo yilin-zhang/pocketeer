@@ -248,6 +248,12 @@ pub enum BiosCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum LibraryCommand {
+    /// Identify ROMs by SHA-1 and size using automatically cached DATs.
+    Identify {
+        /// Only this platform.
+        #[arg(long, value_name = "ID")]
+        platform: Option<String>,
+    },
     /// Create a new library (default: ~/Pocketeer Library, or --library).
     Init,
     /// Show where the library is and what's in it.
@@ -304,7 +310,7 @@ pub struct ImportArgs {
     /// Platform id these ROMs belong to, e.g. "gba".
     #[arg(long, value_name = "ID")]
     pub platform: String,
-    /// Logiqx DAT to verify and name files with.
+    /// Optional XML/clrmamepro DAT to verify and name files with.
     #[arg(long, value_name = "FILE")]
     pub dat: Option<PathBuf>,
     /// Skip files the DAT doesn't know (default: import them as unverified).
@@ -356,7 +362,7 @@ pub struct CardImportArgs {
     /// Card-relative ROM paths (default: every unmatched file).
     #[arg(value_name = "PATH")]
     pub paths: Vec<PathBuf>,
-    /// Logiqx DAT to verify and name the files with.
+    /// Optional XML/clrmamepro DAT to verify and name the files with.
     #[arg(long, value_name = "FILE")]
     pub dat: Option<PathBuf>,
     /// Skip files the DAT doesn't know (default: import them as unverified).
@@ -415,6 +421,20 @@ pub enum SaveConflictArg {
 
 #[derive(Debug, Subcommand)]
 pub enum CoversCommand {
+    /// Copy a local PNG/JPEG/WebP into the library as this game's cover.
+    Import {
+        /// ROM id, filename or game name identifying the game.
+        #[arg(value_name = "ROM")]
+        rom: String,
+        /// Local PNG, JPEG or WebP image to copy; the source is kept.
+        #[arg(value_name = "IMAGE")]
+        image: PathBuf,
+        /// Disambiguate names shared by several platforms.
+        #[arg(long, value_name = "ID")]
+        platform: Option<String>,
+        #[command(flatten)]
+        apply: ApplyArgs,
+    },
     /// Download missing covers (matched by DAT game name).
     Fetch {
         /// Only this platform.

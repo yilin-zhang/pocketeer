@@ -1,4 +1,6 @@
-//! Logiqx XML DAT files, as published by No-Intro, Redump and friends.
+//! Logiqx XML and clrmamepro DAT files from No-Intro, Redump and libretro.
+
+mod clrmamepro;
 
 use std::{collections::HashMap, path::Path};
 
@@ -46,6 +48,14 @@ impl Dat {
     }
 
     pub fn parse(bytes: &[u8], origin: &Path) -> Result<Self> {
+        if !bytes
+            .iter()
+            .copied()
+            .find(|b| !b.is_ascii_whitespace())
+            .is_some_and(|b| b == b'<')
+        {
+            return clrmamepro::parse(bytes, origin);
+        }
         let fail = |message: String| Error::DatParse {
             path: origin.to_path_buf(),
             message,

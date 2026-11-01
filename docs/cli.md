@@ -69,9 +69,15 @@ pocketeer saves backup --conflicts computer       # explicitly restore computer 
 pocketeer saves backup --conflicts skip           # leave conflicting pairs unchanged
 pocketeer saves versions "Saves/gba/common/Game.sav"
 pocketeer saves restore "Saves/gba/common/Game.sav" --version 12
+pocketeer covers import "Game.gba" /path/to/cover.png [--dry-run]
 pocketeer covers fetch [--platform gba]
 pocketeer covers fetch --platform xyz --libretro-system "Vendor - System"
 ```
+
+Local cover imports copy validated PNG/JPEG/WebP images into the library. The source
+is kept, ROM renames preserve the association, and automatic downloads do not
+overwrite imported covers. In the TUI, select a library game and press `b`;
+enter an image path (Tab completes paths), then confirm the import or replacement.
 
 A newer computer file or different bytes with ambiguous timestamps needs a
 choice. Nonconflicting backups may proceed while conflicts remain untouched.
@@ -100,3 +106,21 @@ Precedence: flag, environment variable, `pocketeer config`, default.
 
 Error codes are stable. With `--dry-run`, `data` is the plan; after a run it
 also carries `result`.
+
+## Automatic ROM identification
+
+`pocketeer library identify [--platform gba]` fetches the platform DAT from
+[libretro-database's No-Intro collection](https://github.com/libretro/libretro-database/tree/master/metadat/no-intro) and matches stored ROM SHA-1 + size.
+`--offline` uses cached catalogs; `--refresh` revalidates them immediately.
+Catalogs normally revalidate after seven days, using ETags. Results are stored
+per ROM: unchecked, matched, no_match, error, ambiguous or unsupported, with
+catalog URL, content revision, check time and any retry error. A no_match is
+cached until the catalog changes; fetch/parse failures remain retryable and
+never erase established results. JSON library listings include these fields.
+
+TUI startup and imports identify automatically in the background; `d` retries.
+Identification keeps filenames and user titles. The matched standard title
+selects cover art; `t` / `library standardize --dry-run` previews explicit
+renames using the DAT's ROM filename. Imported covers remain protected.
+Unsupported platforms and files whose whole-file hash differs (including
+headered or modified ROMs) are not guessed from their names.

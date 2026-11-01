@@ -26,7 +26,6 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|r| {
             if let Some(g) = app.game_row(*r) {
-                let verified = g.game.roms.iter().all(|r| r.verified);
                 let size: u64 = g.game.roms.iter().map(|r| r.size).sum();
                 let where_ = if g.on_card() {
                     Cell::from("lib + card").style(Style::new().fg(GOOD))
@@ -35,11 +34,22 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     Cell::from("lib")
                 };
-                let dat = if verified {
-                    Cell::from("✓").style(Style::new().fg(GOOD))
+                use pocketeer_core::library::identify::Status as DatStatus;
+                let states: Vec<_> = g.game.roms.iter().map(|r| r.dat.status).collect();
+                let (symbol, color) = if states.iter().all(|s| *s == DatStatus::Matched) {
+                    ("✓", GOOD)
+                } else if states.contains(&DatStatus::Error) {
+                    ("!", WARN)
+                } else if states.contains(&DatStatus::Unchecked) {
+                    ("?", MUTED)
+                } else if states.contains(&DatStatus::Ambiguous) {
+                    ("~", WARN)
+                } else if states.contains(&DatStatus::NoMatch) {
+                    ("–", MUTED)
                 } else {
-                    Cell::from("?").style(Style::new().dim())
+                    ("n/a", MUTED)
                 };
+                let dat = Cell::from(symbol).style(Style::new().fg(color));
                 game_row(vec![
                     Cell::from(g.game.platform.clone()).style(Style::new().dim()),
                     Cell::from(format!(
@@ -194,6 +204,7 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
             &game.name,
             "no cover yet",
             &[
+                ("b", "import a cover image"),
                 ("f", "fetch it"),
                 ("F", "fetch the whole platform"),
                 ("C", "fetch everything missing"),
@@ -264,14 +275,13 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             lines.push(kv_text("File", rom.name.clone()));
             lines.push(kv_text("Size", human::bytes(rom.size)));
-            lines.push(kv(
-                "DAT",
-                if rom.verified {
-                    fg("verified", GOOD)
-                } else {
-                    dim("not checked against a DAT")
-                },
-            ));
+            lines.push(kv_text("DAT", rom.dat.status.label().to_string()));
+            if let Some(name) = &rom.dat.game_name {
+                lines.push(kv_text("Standard", name.clone()));
+            }
+            if let Some(error) = &rom.dat.error {
+                lines.push(kv_text("DAT retry", error.clone()));
+            }
             lines.push(kv("crc32", dim(rom.crc32.clone())));
             lines.push(kv_text(
                 "Kept as",
