@@ -46,24 +46,52 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
                 kind,
                 suggestions,
                 highlight,
+                searching,
+                ..
             } => {
                 let mut all = lines.clone();
                 all.push(String::new());
                 all.push(format!("> {value}▌"));
-                let shown = suggestions.len().min(SUGGESTIONS_SHOWN);
-                if shown > 0 {
+                if kind.completes_paths() {
+                    // Fixed rows: results and long paths never move the input.
+                    let rect = path_rect(area);
+                    let columns = rect.width.saturating_sub(4) as usize;
+                    all = lines.iter().take(2).cloned().collect();
+                    all.resize(2, String::new());
                     all.push(String::new());
-                    for (i, s) in suggestions.iter().take(shown).enumerate() {
-                        all.push(format!(
-                            "{} {}{}",
-                            if *highlight == Some(i) { "▸" } else { " " },
-                            s.name,
-                            if s.is_dir { "/" } else { "" }
-                        ));
+                    all.push(format!(
+                        "> {}▌",
+                        path_tail(value, columns.saturating_sub(3))
+                    ));
+                    all.push(String::new());
+                    let slots = rect.height.saturating_sub(11) as usize;
+                    let offset = highlight
+                        .unwrap_or(0)
+                        .saturating_sub(slots.saturating_sub(1));
+                    for i in offset..offset + slots {
+                        all.push(
+                            suggestions
+                                .get(i)
+                                .map(|s| {
+                                    format!(
+                                        "{} {}{}",
+                                        if *highlight == Some(i) { "▸" } else { " " },
+                                        s.name,
+                                        if s.is_dir { "/" } else { "" }
+                                    )
+                                })
+                                .unwrap_or_default(),
+                        );
                     }
-                    if suggestions.len() > shown {
-                        all.push(format!("  … {} more", suggestions.len() - shown));
-                    }
+                    all.push(if *searching {
+                        "Searching…".into()
+                    } else if suggestions.is_empty() {
+                        "No matching entries".into()
+                    } else if suggestions.len() > slots {
+                        format!("… {} more", suggestions.len() - slots)
+                    } else {
+                        String::new()
+                    });
                 }
                 let hint = if kind.completes_paths() {
                     "↓ pick a match · Tab completes · Enter takes it, or submits"
@@ -126,6 +154,7 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
     let is_confirm = matches!(modal, Modal::Confirm { .. });
     let interactive = !matches!(modal, Modal::Info { .. });
 
+    let path_prompt = matches!(modal, Modal::Input { kind, .. } if kind.completes_paths());
     let longest = lines
         .iter()
         .map(|l| l.chars().count())
@@ -133,20 +162,33 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(0)
         .max(title.chars().count() + 2)
         .max(hint.chars().count()) as u16;
-    let width = longest
-        .saturating_add(4)
-        .max(44)
-        .min(area.width.saturating_sub(4).max(1));
+    let width = if path_prompt {
+        path_rect(area).width
+    } else {
+        longest
+            .saturating_add(4)
+            .max(44)
+            .min(area.width.saturating_sub(4).max(1))
+    };
     let text: Vec<Line> = lines.iter().cloned().map(Line::from).collect();
-    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(text);
+    let paragraph = if path_prompt {
+        paragraph
+    } else {
+        paragraph.wrap(Wrap { trim: false })
+    };
     let body_width = width.saturating_sub(4);
     let total_lines = paragraph.line_count(body_width).min(u16::MAX as usize) as u16;
     // body + gap (+ hint) + buttons + borders
     let extra = if hint.is_empty() { 4 } else { 5 };
-    let height = total_lines
-        .saturating_add(extra)
-        .max(6)
-        .min(area.height.saturating_sub(2).max(1));
+    let height = if path_prompt {
+        path_rect(area).height
+    } else {
+        total_lines
+            .saturating_add(extra)
+            .max(6)
+            .min(area.height.saturating_sub(2).max(1))
+    };
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -178,7 +220,9 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::Toggle { cursor, .. } => Some(*cursor),
         _ => None,
     };
-    let scroll = if let Some(selected) = selected_item {
+    let scroll = if path_prompt {
+        0
+    } else if let Some(selected) = selected_item {
         let rows = |line: &String| {
             Paragraph::new(line.as_str())
                 .wrap(Wrap { trim: false })
@@ -252,5 +296,104 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(Paragraph::new(line), r);
         app.hit.buttons.push((r, *primary));
         x += w + 4;
+    }
+}
+
+// Geometry depends only on terminal dimensions, never query/result text.
+fn path_rect(area: Rect) -> Rect {
+    let width = 100.min(area.width.saturating_sub(4).max(1));
+    let height = (SUGGESTIONS_SHOWN as u16 + 11).min(area.height.saturating_sub(2).max(1));
+    Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    )
+}
+
+fn path_tail(value: &str, columns: usize) -> String {
+    let mut used = 0;
+    let mut tail = Vec::new();
+    for ch in value.chars().rev() {
+        used += Line::from(ch.to_string()).width();
+        if used > columns {
+            break;
+        }
+        tail.push(ch);
+    }
+    tail.into_iter().rev().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        cli::Global,
+        tui::app::{InputKind, Suggestion},
+    };
+    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui_image::picker::Picker;
+
+    #[test]
+    fn path_prompt_geometry_and_input_row_stay_fixed_as_results_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            Global {
+                json: false,
+                root: Some(tmp.path().join("no-card")),
+                offline: true,
+                refresh: false,
+                cache_dir: Some(tmp.path().join("cache")),
+                library: Some(tmp.path().join("lib")),
+                config: Some(tmp.path().join("config")),
+                github_token: None,
+            },
+            Picker::halfblocks(),
+        );
+        for (width, height) in [(80, 24), (120, 40), (60, 18)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut positions = Vec::new();
+            for count in [0, 1, 60] {
+                app.modal = Some(Modal::Input {
+                    title: "Import cover".into(),
+                    lines: vec!["Choose an image".into(), "Tab completes".into()],
+                    value: format!("/{}cover.webp", "目录/".repeat(count)),
+                    kind: InputKind::ImportCover { game_id: 1 },
+                    suggestions: (0..count)
+                        .map(|i| Suggestion {
+                            path: format!("/file{i}"),
+                            name: "long filename ".repeat(count + 1),
+                            is_dir: false,
+                        })
+                        .collect(),
+                    highlight: None,
+                    completion: None,
+                    searching: count == 0,
+                    tab_pending: false,
+                });
+                terminal
+                    .draw(|f| draw_modal(f, &mut app, f.area()))
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let position = |symbol: &str| {
+                    (0..height)
+                        .flat_map(|y| (0..width).map(move |x| (x, y)))
+                        .find(|&(x, y)| buffer[(x, y)].symbol() == symbol)
+                        .unwrap()
+                };
+                positions.push((
+                    position("╭"),
+                    position(">"),
+                    position("▌"),
+                    app.hit.buttons[0].0,
+                ));
+            }
+            for other in &positions[1..] {
+                assert_eq!(positions[0].0, other.0);
+                assert_eq!(positions[0].1, other.1);
+                assert_eq!(positions[0].2.1, other.2.1);
+                assert_eq!(positions[0].3, other.3);
+            }
+        }
     }
 }

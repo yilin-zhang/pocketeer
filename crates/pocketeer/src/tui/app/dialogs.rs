@@ -266,12 +266,19 @@ impl App {
             kind,
             suggestions,
             highlight,
+            completion,
+            searching,
+            tab_pending,
             ..
         }) = &mut self.modal
             && kind.completes_paths()
         {
-            *suggestions = path_suggestions(value);
+            suggestions.clear();
             *highlight = None;
+            *completion = None;
+            *tab_pending = false;
+            *searching = true;
+            self.path_worker.request(value.clone());
         }
     }
 
@@ -310,7 +317,7 @@ pub(super) fn expand_home(path: &str) -> String {
 /// few levels deep, capped) whose path contains the typed text, best
 /// matches first: name starts with it, name contains it, path contains it.
 /// Hidden entries only show up once a `.` is typed.
-pub(super) fn path_suggestions(value: &str) -> Vec<Suggestion> {
+pub(super) fn path_suggestions(value: &str, cancelled: impl Fn() -> bool) -> Vec<Suggestion> {
     const MAX_DEPTH: usize = 4;
     const MAX_VISITED: usize = 6000;
     const MAX_RESULTS: usize = 60;
@@ -341,7 +348,7 @@ pub(super) fn path_suggestions(value: &str) -> Vec<Suggestion> {
                 && name != "target"
         });
     for (visited, entry) in walker.filter_map(|e| e.ok()).enumerate() {
-        if visited >= MAX_VISITED {
+        if cancelled() || visited >= MAX_VISITED {
             break;
         }
         let is_dir = entry.file_type().is_dir();
@@ -387,7 +394,7 @@ pub(super) fn path_suggestions(value: &str) -> Vec<Suggestion> {
 
 /// Shell-style Tab completion: extends `value` to the longest common prefix
 /// of the entries it matches; a lone directory match gets a trailing `/`.
-pub(super) fn complete_path(value: &str) -> String {
+pub(super) fn complete_path(value: &str, cancelled: impl Fn() -> bool) -> String {
     let expanded = expand_home(value);
     let (dir, partial) = match expanded.rsplit_once('/') {
         Some((d, p)) => (if d.is_empty() { "/" } else { d }, p),
@@ -397,6 +404,7 @@ pub(super) fn complete_path(value: &str) -> String {
         return value.to_string();
     };
     let mut names: Vec<String> = entries
+        .take_while(|_| !cancelled())
         .filter_map(|e| e.ok())
         .map(|e| {
             let mut n = e.file_name().to_string_lossy().into_owned();
@@ -445,9 +453,9 @@ mod tests {
         std::fs::create_dir(tmp.path().join("roms-gbc")).unwrap();
         std::fs::write(tmp.path().join("notes.txt"), "x").unwrap();
         let p = |s: &str| format!("{}/{s}", tmp.path().display());
-        assert_eq!(complete_path(&p("n")), p("notes.txt"));
-        assert_eq!(complete_path(&p("r")), p("roms-gb"));
-        assert_eq!(complete_path(&p("roms-gba")), p("roms-gba/"));
-        assert_eq!(complete_path(&p("zzz")), p("zzz"));
+        assert_eq!(complete_path(&p("n"), || false), p("notes.txt"));
+        assert_eq!(complete_path(&p("r"), || false), p("roms-gb"));
+        assert_eq!(complete_path(&p("roms-gba"), || false), p("roms-gba/"));
+        assert_eq!(complete_path(&p("zzz"), || false), p("zzz"));
     }
 }

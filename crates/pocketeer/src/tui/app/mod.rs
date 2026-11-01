@@ -33,6 +33,7 @@ mod keys;
 mod library;
 mod model;
 mod pane;
+mod path_worker;
 mod rows;
 
 pub use keys::SUGGESTIONS_SHOWN;
@@ -56,6 +57,7 @@ use crate::{
 pub struct App {
     global: Global,
     worker: Worker,
+    path_worker: path_worker::PathWorker,
     pub pocket: Option<Pocket>,
     pub pocket_error: Option<ErrorInfo>,
     pub snapshot: Option<Snapshot>,
@@ -113,6 +115,7 @@ impl App {
         };
         App {
             worker: Worker::spawn(),
+            path_worker: path_worker::PathWorker::spawn(),
             pocket,
             pocket_error,
             snapshot: None,
@@ -203,6 +206,29 @@ impl App {
 
     /// Handles everything the workers sent since last time.
     pub fn pump(&mut self) {
+        let mut complete_input = false;
+        if let Some(result) = self.path_worker.latest()
+            && let Some(Modal::Input {
+                value,
+                kind,
+                suggestions,
+                completion,
+                searching,
+                tab_pending,
+                ..
+            }) = &mut self.modal
+            && kind.completes_paths()
+            && *value == result.value
+        {
+            *suggestions = result.suggestions;
+            *completion = Some(result.completion);
+            *searching = !result.finished;
+            complete_input = std::mem::take(tab_pending);
+        }
+        if complete_input {
+            self.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+
         while let Some(msg) = self.worker.try_recv() {
             match msg {
                 Msg::Verified {
@@ -530,6 +556,9 @@ impl App {
             value,
             kind,
             suggestions: Vec::new(),
+            completion: None,
+            searching: false,
+            tab_pending: false,
             highlight: None,
         });
         self.refresh_input();

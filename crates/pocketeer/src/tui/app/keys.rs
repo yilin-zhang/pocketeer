@@ -17,6 +17,9 @@ impl App {
         }
         if self.modal.is_some() {
             self.modal_key(key);
+            if self.modal.is_none() {
+                self.path_worker.cancel();
+            }
             return;
         }
         if let Some(pane) = self.pane_mut()
@@ -201,10 +204,12 @@ impl App {
                 kind,
                 suggestions,
                 highlight,
+                completion,
+                tab_pending,
                 ..
             } => {
                 let paths = kind.completes_paths();
-                let shown = suggestions.len().min(SUGGESTIONS_SHOWN);
+                let shown = suggestions.len();
                 // Take a suggestion: folders keep the prompt open for the next level.
                 let accept = |value: &mut String, s: &Suggestion| {
                     *value = s.path.clone();
@@ -233,7 +238,13 @@ impl App {
                         match highlight.and_then(|h| suggestions.get(h)) {
                             Some(s) => accept(value, s),
                             None if suggestions.len() == 1 => accept(value, &suggestions[0]),
-                            None => *value = dialogs::complete_path(value),
+                            None => {
+                                let Some(completed) = completion.as_ref() else {
+                                    *tab_pending = true;
+                                    return;
+                                };
+                                *value = completed.clone();
+                            }
                         }
                         self.refresh_input();
                     }
@@ -323,6 +334,9 @@ impl App {
     /// A dialog button was pressed (keyboard or mouse): the primary one
     /// applies / submits, the other closes the dialog.
     pub fn modal_activate(&mut self, primary: bool) {
+        if matches!(&self.modal, Some(Modal::Input { kind, .. }) if kind.completes_paths()) {
+            self.path_worker.cancel();
+        }
         if !primary {
             self.modal = None;
             return;

@@ -215,6 +215,9 @@ pub enum Modal {
         kind: InputKind,
         /// Entries matching what is typed so far (path prompts only).
         suggestions: Vec<Suggestion>,
+        completion: Option<String>,
+        searching: bool,
+        tab_pending: bool,
         /// Which suggestion ↑/↓ moved to, if any.
         highlight: Option<usize>,
     },
