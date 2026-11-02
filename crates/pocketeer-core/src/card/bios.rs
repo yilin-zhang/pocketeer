@@ -278,7 +278,7 @@ fn slot_dir(core: &InstalledCore, slot: &DataSlot) -> PathBuf {
     let owner = if params.core_specific {
         core.id.as_str()
     } else {
-        "common"
+        crate::card::COMMON
     };
     crate::card::assets_rel(platform, owner)
 }

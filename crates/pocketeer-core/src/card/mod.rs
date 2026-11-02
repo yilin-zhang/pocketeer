@@ -66,7 +66,11 @@ pub const WATCHED_DIRS: [&str; 6] = [
     MEMORY_ROOTS[1],
 ];
 
-/// `Assets/<platform>/<owner>`, where `owner` is `common` or a core id.
+/// The folder under `Assets/<platform>/` and `Saves/<platform>/` shared by
+/// every core of the platform; the others are named after one core.
+pub const COMMON: &str = "common";
+
+/// `Assets/<platform>/<owner>`, where `owner` is [`COMMON`] or a core id.
 pub fn assets_rel(platform: &str, owner: &str) -> PathBuf {
     PathBuf::from(ASSETS_DIR).join(platform).join(owner)
 }
@@ -106,7 +110,7 @@ pub fn rom_dir(platform: &str) -> PathBuf {
     if platform == GB_STUDIO_PLATFORM {
         PathBuf::from(GB_STUDIO_DIR)
     } else {
-        assets_rel(platform, "common")
+        assets_rel(platform, COMMON)
     }
 }
 

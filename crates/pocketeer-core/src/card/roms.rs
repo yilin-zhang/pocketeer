@@ -88,7 +88,7 @@ fn walk(pocket: &Pocket) -> Result<Vec<(String, String, PathBuf)>> {
     let mut platforms: Vec<(String, Vec<(String, PathBuf)>)> = Vec::new();
     for platform in subfolders(&assets)? {
         let mut owners = subfolders(&assets.join(&platform))?;
-        owners.sort_by_key(|o| o != "common");
+        owners.sort_by_key(|o| o != super::COMMON);
         let mut files = Vec::new();
         for owner in owners {
             for path in files_in(pocket, &super::assets_rel(&platform, &owner), true)? {

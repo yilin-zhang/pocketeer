@@ -402,16 +402,16 @@ fn replacement_moves(
             card::assets_rel(new_platform, new_id),
         ),
         (
-            card::assets_rel(old, "common"),
-            card::assets_rel(new_platform, "common"),
+            card::assets_rel(old, card::COMMON),
+            card::assets_rel(new_platform, card::COMMON),
         ),
         (
             card::saves_rel(old, &prev_id),
             card::saves_rel(new_platform, new_id),
         ),
         (
-            card::saves_rel(old, "common"),
-            card::saves_rel(new_platform, "common"),
+            card::saves_rel(old, card::COMMON),
+            card::saves_rel(new_platform, card::COMMON),
         ),
         (card::settings_rel(&prev_id), card::settings_rel(new_id)),
     ]
