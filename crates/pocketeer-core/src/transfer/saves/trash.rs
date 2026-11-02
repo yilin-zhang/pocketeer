@@ -53,7 +53,7 @@ pub struct TrashPlan {
     #[serde(skip)]
     card: Option<(CardIdentity, BTreeMap<PathBuf, SaveInfo>)>,
     #[serde(skip)]
-    library_root: PathBuf,
+    library: crate::library::LibraryIdentity,
 }
 
 impl Plan for TrashPlan {
@@ -91,7 +91,7 @@ pub fn plan_trash(
         files: Vec::new(),
         trash: PathBuf::from(TRASH_DIR).join(timestamp()),
         card: None,
-        library_root: lib.root().to_path_buf(),
+        library: lib.identity()?,
     };
     for rel in saves {
         validate_path(rel)?;
@@ -168,11 +168,7 @@ pub fn apply_trash(
     pocket: Option<&Pocket>,
     plan: &TrashPlan,
 ) -> Result<TrashResult> {
-    if lib.root() != plan.library_root {
-        return Err(Error::Stale {
-            what: "the library".into(),
-        });
-    }
+    lib.check(&plan.library)?;
     let mut result = TrashResult::default();
     if let Some((identity, observed)) = &plan.card {
         let pocket = pocket.ok_or(Error::SdNotFound {

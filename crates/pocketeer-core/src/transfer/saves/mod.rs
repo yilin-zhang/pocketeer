@@ -144,7 +144,7 @@ pub struct SavesPlan {
     #[serde(skip)]
     observed: BTreeMap<PathBuf, Observed>,
     #[serde(skip)]
-    library_root: PathBuf,
+    library: crate::library::LibraryIdentity,
     #[serde(skip)]
     card_identity: crate::card::CardIdentity,
 }
@@ -176,7 +176,7 @@ impl SavesPlan {
                 reason: SaveReason::UserChoice,
             },
             ConflictChoice::Computer => SaveAction::Push {
-                source: self.library_root.join("saves").join(&rel),
+                source: self.library.root().join("saves").join(&rel),
                 rel,
                 identity: computer,
             },
@@ -331,7 +331,7 @@ pub fn plan(
         actions: Vec::new(),
         summary: SavesSummary::default(),
         observed: BTreeMap::new(),
-        library_root: lib.root().to_path_buf(),
+        library: lib.identity()?,
         card_identity: crate::card::CardIdentity::read(pocket)?,
     };
     for (i, rel) in paths.iter().enumerate() {
@@ -483,7 +483,7 @@ pub fn plan_restore(
         }],
         summary: SavesSummary::default(),
         observed: BTreeMap::from([(rel.to_path_buf(), observed)]),
-        library_root: lib.root().to_path_buf(),
+        library: lib.identity()?,
         card_identity: crate::card::CardIdentity::read(pocket)?,
     };
     plan.recount();
@@ -572,11 +572,7 @@ fn copy_one(
     action: &SaveAction,
 ) -> Result<(bool, u64)> {
     let rel = action.path();
-    if lib.root() != plan.library_root {
-        return Err(Error::Stale {
-            what: "the library".into(),
-        });
-    }
+    lib.check(&plan.library)?;
     plan.card_identity.check(pocket)?;
     let observed = plan.observed.get(rel).expect("planned action");
     let on_card = pocket.root().join(rel);

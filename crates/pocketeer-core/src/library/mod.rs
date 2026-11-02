@@ -38,6 +38,20 @@ pub struct Library {
     conn: Connection,
 }
 
+/// Which library a plan was made against: its folder and its database file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LibraryIdentity {
+    root: PathBuf,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl LibraryIdentity {
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
 impl std::fmt::Debug for Library {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Library").field("root", &self.root).finish()
@@ -77,6 +91,34 @@ impl Library {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// What a plan records of the library it was made against.
+    pub(crate) fn identity(&self) -> Result<LibraryIdentity> {
+        let db = self.root.join(DB_FILE);
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&db).map_err(|e| Error::io(&db, e))?.ino()
+        };
+        Ok(LibraryIdentity {
+            root: self.root.clone(),
+            #[cfg(unix)]
+            inode,
+        })
+    }
+
+    /// Fails with [`Error::Stale`] unless this is the library `identity` was
+    /// taken from (not moved, replaced or another one). Every apply step that
+    /// follows a plan made against a library starts with this.
+    pub(crate) fn check(&self, identity: &LibraryIdentity) -> Result<()> {
+        if self.identity()? == *identity {
+            Ok(())
+        } else {
+            Err(Error::Stale {
+                what: "the library".into(),
+            })
+        }
     }
 
     pub(crate) fn conn(&self) -> &Connection {

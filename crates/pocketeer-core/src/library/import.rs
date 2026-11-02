@@ -117,6 +117,8 @@ pub struct ImportPlan {
     /// Display names for the platforms it adds to, recorded on apply.
     #[serde(skip)]
     platform_names: BTreeMap<String, String>,
+    #[serde(skip)]
+    library: super::LibraryIdentity,
 }
 
 impl Plan for ImportPlan {
@@ -221,6 +223,7 @@ pub fn plan_import(
             .filter(|(id, _)| groups.contains_key(*id))
             .map(|(id, name)| (id.clone(), name.clone()))
             .collect(),
+        library: lib.identity()?,
     };
     let mut done = 0;
     for (platform, files) in groups {
@@ -440,6 +443,7 @@ pub fn apply_import(
     plan: &ImportPlan,
     progress: Progress<'_>,
 ) -> Result<ImportResult> {
+    lib.check(&plan.library)?;
     let root = lib.root().to_path_buf();
     let total = plan.changes();
     progress(Event::Status(format!("Importing {total} file(s)")));

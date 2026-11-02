@@ -30,12 +30,14 @@ pub struct RemoveItem {
     pub last_of_game: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RemovePlan {
     pub items: Vec<RemoveItem>,
     pub bytes: u64,
     /// Where files end up, relative to the library root.
     pub trash: PathBuf,
+    #[serde(skip)]
+    library: super::LibraryIdentity,
 }
 
 impl Plan for RemovePlan {
@@ -48,8 +50,10 @@ impl Plan for RemovePlan {
 /// of the game's ROMs.
 pub fn plan(lib: &Library, platform: Option<&str>, specs: &[String]) -> Result<RemovePlan> {
     let mut plan = RemovePlan {
+        items: Vec::new(),
+        bytes: 0,
         trash: PathBuf::from(TRASH_DIR).join(timestamp()),
-        ..Default::default()
+        library: lib.identity()?,
     };
     for spec in specs {
         let hits = super::resolve_game_roms(lib, platform, spec)?;
@@ -91,6 +95,7 @@ impl Applied for RemoveResult {
 }
 
 pub fn apply(lib: &mut Library, plan: &RemovePlan) -> Result<RemoveResult> {
+    lib.check(&plan.library)?;
     let root = lib.root().to_path_buf();
     let trash = root.join(&plan.trash);
     let mut result = RemoveResult::default();
@@ -123,6 +128,19 @@ pub fn apply(lib: &mut Library, plan: &RemovePlan) -> Result<RemoveResult> {
 mod tests {
     use super::*;
     use crate::testutil::library_with;
+
+    #[test]
+    fn a_plan_for_another_library_is_refused() {
+        let (tmp, lib) = library_with(&[("game.fkh", "ROM")]);
+        let plan = plan(&lib, None, &["game.fkh".into()]).unwrap();
+        // Another library now sits where this one was.
+        let root = lib.root().to_path_buf();
+        drop(lib);
+        std::fs::rename(&root, tmp.path().join("old")).unwrap();
+        let mut other = Library::init(&root).unwrap();
+        assert_eq!(apply(&mut other, &plan).unwrap_err().code(), "STALE_PLAN");
+        assert!(tmp.path().join("old/roms/fkh/game.fkh").is_file());
+    }
 
     #[test]
     fn removes_to_trash_and_drops_empty_games() {

@@ -22,6 +22,8 @@ pub struct RenamePlan {
     pub new_game_name: String,
     /// The file move, relative to the library root.
     pub library_file: FileRename,
+    #[serde(skip)]
+    library: super::LibraryIdentity,
 }
 
 impl Plan for RenamePlan {
@@ -89,6 +91,7 @@ pub fn plan(
         old_game_name: game.name,
         new_game_name,
         library_file,
+        library: lib.identity()?,
     })
 }
 
@@ -104,6 +107,7 @@ impl Applied for RenameResult {
 }
 
 pub fn apply(lib: &mut Library, plan: &RenamePlan) -> Result<RenameResult> {
+    lib.check(&plan.library)?;
     let root = lib.root().to_path_buf();
     let tx = lib
         .conn_mut()

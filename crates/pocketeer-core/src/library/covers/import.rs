@@ -26,7 +26,7 @@ pub struct CoverImportPlan {
     pub bytes: usize,
     pub previous: Option<CoverRecord>,
     #[serde(skip)]
-    library_root: PathBuf,
+    library: crate::library::LibraryIdentity,
     // The confirmation applies these exact validated bytes, even if the source moves.
     #[serde(skip)]
     image: Arc<[u8]>,
@@ -85,7 +85,7 @@ pub fn plan(lib: &Library, game_id: i64, source: &Path) -> Result<CoverImportPla
         width: decoded.width(),
         height: decoded.height(),
         bytes: bytes.len(),
-        library_root: lib.root().to_path_buf(),
+        library: lib.identity()?,
         image: bytes.into(),
     })
 }
@@ -104,11 +104,7 @@ impl Applied for CoverImportResult {
 }
 
 pub fn apply(lib: &mut Library, plan: &CoverImportPlan) -> Result<CoverImportResult> {
-    if lib.root() != plan.library_root {
-        return Err(Error::Stale {
-            what: "the library".into(),
-        });
-    }
+    lib.check(&plan.library)?;
     let root = lib.root().to_path_buf();
     let destination = root.join(&plan.destination);
     let tx = lib
