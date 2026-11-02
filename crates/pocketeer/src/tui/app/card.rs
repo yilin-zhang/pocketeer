@@ -3,13 +3,10 @@
 //! Card (junk cleanup).
 
 use crossterm::event::{KeyCode, KeyEvent};
-use pocketeer_core::{
-    Error,
-    card::{
-        bios,
-        cores::{self, SearchFilter},
-        install,
-    },
+use pocketeer_core::card::{
+    bios, clean,
+    cores::{self, SearchFilter},
+    install::{self, PlanOptions},
 };
 
 use super::{
@@ -17,9 +14,12 @@ use super::{
     pane::{Cycle, Pane, PaneOps, matches},
     session::Session,
 };
-use crate::tui::{
-    pending::{Pending, Request},
-    worker::{CardSnapshot, Job},
+use crate::{
+    ops::{Batch, cores as cores_cmd},
+    tui::{
+        pending::{self, Preview},
+        worker::CardSnapshot,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -198,9 +198,9 @@ impl Cores {
     }
 
     fn remove(&self, cx: &mut Cx) {
-        let Some(pocket) = cx.session.require_card() else {
+        if cx.session.require_card().is_none() {
             return;
-        };
+        }
         let Some(row) = self.pane.selected() else {
             return;
         };
@@ -209,18 +209,18 @@ impl Cores {
             return;
         }
         let id = row.id.clone();
-        let list = cx
+        let installed = cx
             .session
             .card()
             .map(CardSnapshot::installed)
             .unwrap_or_default();
-        match install::plan_remove(&pocket, &list, &id, false) {
-            Ok(plan) if plan.actions.is_empty() => cx
-                .session
-                .notice(format!("{id} has no folders on the card.")),
-            Ok(plan) => cx.planned(Pending::Remove(vec![plan])),
-            Err(e) => cx.dialog.error("Can't remove", &e),
-        }
+        cx.session.plan("Planning removal", move |ctx, _| {
+            let plan = install::plan_remove(&ctx.pocket()?, &installed, &id, false)?;
+            if plan.actions.is_empty() {
+                return Ok(Preview::Notice(format!("{id} has no folders on the card.")));
+            }
+            Ok(pending::preview(Batch::planned([(id, Ok(plan))])))
+        });
     }
 }
 
@@ -245,8 +245,8 @@ fn update_all(cx: &mut Cx) {
     prepare(cx, ids);
 }
 
-/// Resolves releases for `specs` on the worker; the plans come back as
-/// `Update::Prepared`.
+/// Resolves releases for `specs` and downloads them on the worker; the
+/// installs come back as one batch to confirm, failures listed.
 fn prepare(cx: &mut Cx, specs: Vec<String>) {
     if cx.session.require_card().is_none() {
         return;
@@ -261,21 +261,10 @@ fn prepare(cx: &mut Cx, specs: Vec<String>) {
         );
         return;
     };
-    cx.session
-        .submit("Preparing", Job::Prepare { inventory, specs });
-}
-
-/// Prepared installs: one plan for all of them, with the failures listed.
-pub fn prepared(cx: &mut Cx, results: Vec<(String, Result<install::Prepared, Error>)>) {
-    let mut preps = Vec::new();
-    let mut errors = Vec::new();
-    for (spec, result) in results {
-        match result {
-            Ok(prep) => preps.push(prep),
-            Err(e) => errors.push(format!("{spec}: error: {e}\n")),
-        }
-    }
-    cx.planned(Pending::Install { preps, errors });
+    cx.session.plan("Preparing", move |ctx, progress| {
+        let plans = cores_cmd::prepare(ctx, &inventory, &specs, PlanOptions::default(), progress)?;
+        Ok(pending::preview(Batch::planned(plans)))
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +354,7 @@ fn place(cx: &mut Cx) {
     };
     let plan = bios::plan_place(&snap.bios);
     if !plan.actions.is_empty() {
-        cx.planned(Pending::Place(plan));
+        cx.planned(plan);
     } else if plan.zipped.is_empty() {
         cx.session
             .notice("No file at the SD card root matches a missing file.");
@@ -390,7 +379,8 @@ fn place(cx: &mut Cx) {
 /// The Card tab's keys: `x` scans for macOS junk, then previews removal.
 pub fn card_key(key: KeyEvent, cx: &mut Cx) {
     if key.code == KeyCode::Char('x') && cx.session.require_card().is_some() {
-        cx.session
-            .submit("Scanning for junk", Job::Plan(Request::Clean));
+        cx.session.plan("Scanning for junk", |ctx, _| {
+            Ok(pending::preview(clean::plan(&ctx.pocket()?, false)?))
+        });
     }
 }

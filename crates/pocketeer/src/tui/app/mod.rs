@@ -48,7 +48,7 @@ use memories::Memories;
 use session::Update;
 
 use super::{
-    pending::{Pending, Preview},
+    pending::{self, Pending, Preview},
     worker::Job,
 };
 use crate::cli::Global;
@@ -105,8 +105,8 @@ struct Cx<'a> {
 
 impl Cx<'_> {
     /// A plan is ready: open the dialog it asks for.
-    fn planned(&mut self, pending: Pending) {
-        self.show(pending.preview());
+    fn planned(&mut self, pending: impl Pending + 'static) {
+        self.show(pending::preview(pending));
     }
 
     fn show(&mut self, preview: Preview) {
@@ -117,10 +117,8 @@ impl Cx<'_> {
                 title,
                 lines,
                 pending,
-            } => self.dialog.confirm(title, lines, *pending),
-            Preview::SaveConflict { plan, games, index } => {
-                saves::ask_conflict(self, plan, games, index)
-            }
+            } => self.dialog.confirm(title, lines, pending),
+            Preview::SaveConflict { backup, index } => saves::ask_conflict(self, backup, index),
             Preview::PickRenames(plans) => rename::offer_standard_names(self, plans),
             Preview::PickImportNames(import) => import::offer_names(self, import),
             Preview::AskPlatform { source, files } => import::ask_platform(self, source, files),
@@ -243,7 +241,6 @@ impl App {
                     self.rebuild_keeping(keep.as_ref());
                 }
                 Update::Planned(preview) => self.cx().show(preview),
-                Update::Prepared(results) => card::prepared(&mut self.cx(), results),
                 Update::Info { title, lines } => self.dialog.info(title, lines),
                 Update::Error { title, error } => self.dialog.error(title, &error),
                 Update::CardRemoved => self.dialog.close(),

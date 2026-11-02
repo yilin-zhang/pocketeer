@@ -7,7 +7,11 @@
 
 use std::{collections::VecDeque, path::PathBuf, sync::atomic::Ordering};
 
-use pocketeer_core::{Error, ErrorInfo, Pocket, card::install, library::identify, plan::Event};
+use pocketeer_core::{
+    Error, ErrorInfo, Pocket,
+    library::identify,
+    plan::{Event, Progress},
+};
 
 use crate::{cli::Global, ops::context::Context, tui::pending::Preview};
 
@@ -38,8 +42,6 @@ pub enum Update {
     Saves,
     /// A plan came back and needs its dialog.
     Planned(Preview),
-    /// Core installs were prepared.
-    Prepared(Vec<(String, Result<install::Prepared, Error>)>),
     Info {
         title: String,
         lines: Vec<String>,
@@ -227,13 +229,22 @@ impl Session {
         if matches!(job, Job::Load | Job::Apply(_)) {
             self.verify.epoch = epoch;
         }
-        if matches!(&job, Job::Apply(p) if p.is_import()) {
+        if matches!(&job, Job::Apply(p) if p.adds_games()) {
             // New games: show each as it lands, check them after the reload.
             self.auto.importing = true;
             self.auto.metadata_done = false;
         }
         self.busy.main = Some(status.to_string());
         self.worker.submit(self.ctx(), job);
+    }
+
+    /// Plans on the worker: `planner` returns the dialog its plan opens.
+    pub fn plan(
+        &mut self,
+        status: &str,
+        planner: impl FnOnce(&Context, Progress<'_>) -> Result<Preview, Error> + Send + 'static,
+    ) {
+        self.submit(status, Job::Plan(Box::new(planner)));
     }
 
     /// Runs a job that doesn't block the UI.
@@ -419,10 +430,6 @@ impl Session {
                     }
                     Err(e) => self.notice(format!("Couldn't read saves: {e}")),
                 },
-                Msg::Prepared(results) => {
-                    self.clear_busy();
-                    updates.push(Update::Prepared(results));
-                }
                 Msg::Planned(result) => {
                     self.clear_busy();
                     updates.push(match result {

@@ -9,14 +9,14 @@ use pocketeer_core::{
     Error, Result,
     card::memories::{self, Memory},
     plan::Event,
-    transfer::saves::{self, ConflictChoice, Scope, TrashTarget},
+    transfer::saves::{self, ConflictChoice, SavesPlan, Scope, TrashPlan, TrashTarget},
 };
 use serde::Serialize;
 
 use super::{
     Mode,
     context::Context,
-    saves::{SyncReport, TrashReport, plan_trash},
+    saves::{SyncReport, TrashReport},
     stage,
 };
 
@@ -143,19 +143,29 @@ pub fn restore(
     mode: Mode,
     progress: &mut dyn FnMut(Event),
 ) -> Result<SyncReport> {
+    stage(ctx, mode, plan_restore(ctx, rel)?, progress)
+}
+
+/// Plans putting the library's copy of the Memory at `rel` (and the files
+/// beside it) back on the card.
+pub fn plan_restore(ctx: &Context, rel: &Path) -> Result<SavesPlan> {
     let rels = library_files(ctx, rel)?;
-    let plan = saves::plan_restore_paths(&ctx.library()?, &ctx.pocket()?, &rels)?;
-    stage(ctx, mode, plan, progress)
+    saves::plan_restore_paths(&ctx.library()?, &ctx.pocket()?, &rels)
 }
 
 /// `memories trash`: from the card (archived first) or from the library.
 pub fn trash(ctx: &Context, rel: &Path, card: bool, mode: Mode) -> Result<TrashReport> {
+    stage(ctx, mode, plan_trash(ctx, rel, card)?, &mut |_| {})
+}
+
+/// Plans throwing away the Memory at `rel`, on the card (`card`) or in the
+/// library, with the files beside it.
+pub fn plan_trash(ctx: &Context, rel: &Path, card: bool) -> Result<TrashPlan> {
     let rels = files(ctx, rel, card)?;
     let target = if card {
         TrashTarget::Card
     } else {
         TrashTarget::Library
     };
-    let plan = plan_trash(ctx, &rels, target)?;
-    stage(ctx, mode, plan, &mut |_| {})
+    super::saves::plan_trash(ctx, &rels, target)
 }

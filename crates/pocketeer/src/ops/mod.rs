@@ -190,6 +190,34 @@ impl<P: Apply> Batch<P> {
         Batch { mode, items }
     }
 
+    /// What the batch would do, applying nothing (a dry run).
+    pub fn planned(plans: impl IntoIterator<Item = (String, Result<P>)>) -> Self {
+        let items = plans
+            .into_iter()
+            .map(|(target, plan)| BatchItem {
+                target,
+                state: match plan {
+                    Ok(plan) => BatchState::Planned { plan },
+                    Err(e) => BatchState::Unplanned { error: e.to_info() },
+                },
+            })
+            .collect();
+        Batch {
+            mode: Mode::DryRun,
+            items,
+        }
+    }
+
+    /// The items that have a plan, to apply them.
+    pub fn into_plans(self) -> impl Iterator<Item = (String, P)> {
+        self.items.into_iter().filter_map(|i| match i.state {
+            BatchState::Unplanned { .. } => None,
+            BatchState::Planned { plan }
+            | BatchState::Applied { plan, .. }
+            | BatchState::Failed { plan, .. } => Some((i.target, plan)),
+        })
+    }
+
     pub fn failed(&self) -> usize {
         self.items.iter().filter(|i| i.is_failed()).count()
     }

@@ -4,14 +4,16 @@
 
 use std::{collections::HashSet, path::PathBuf};
 
+use pocketeer_core::library::import::apply_suggestions;
+
 use super::{
     Cx,
     dialog::{Answer, Step as DialogStep},
     path_input::{expand_home, start_path},
 };
-use crate::tui::{
-    pending::{Import, Request},
-    worker::Job,
+use crate::{
+    ops::library as library_cmd,
+    tui::pending::{self, Import, Preview},
 };
 
 /// The last item of the platform list, for typing another id.
@@ -95,20 +97,36 @@ pub fn answer(cx: &mut Cx, step: Step, answer: Answer) {
                 .filter(|(_, on)| *on)
                 .map(|(k, _)| k)
                 .collect();
-            cx.session.submit(
-                "Applying standard names",
-                Job::Plan(Request::AcceptNames { import, accepted }),
-            );
+            let mut import = import;
+            cx.session.plan("Applying standard names", move |ctx, _| {
+                let lib = ctx.library()?;
+                apply_suggestions(&lib, import.plan_mut(), |platform, name| {
+                    accepted.contains(&(platform.to_string(), name.to_string()))
+                })?;
+                Ok(pending::preview(*import))
+            });
         }
         _ => {}
     }
 }
 
 fn plan(cx: &mut Cx, source: PathBuf, platform: Option<String>) {
-    cx.session.submit(
-        "Reading the folder",
-        Job::Plan(Request::ImportFolder { source, platform }),
-    );
+    cx.session.plan("Reading the folder", move |ctx, progress| {
+        let req = library_cmd::ImportRequest {
+            source: source.clone(),
+            platform,
+            settings: Default::default(),
+        };
+        let plan = library_cmd::plan_import(ctx, &req, progress)?;
+        if plan.actions.is_empty() && !plan.unknown.is_empty() {
+            // None of the files says its platform: ask which.
+            return Ok(Preview::AskPlatform {
+                source,
+                files: plan.unknown.len(),
+            });
+        }
+        Ok(pending::preview(Import::Folder(plan)))
+    });
 }
 
 /// The planned files don't say their platform: pick one.
@@ -140,14 +158,14 @@ fn type_platform(cx: &mut Cx, dir: PathBuf) {
 /// The planned import has files that look like known games: ask which
 /// standard names to take.
 pub fn offer_names(cx: &mut Cx, import: Box<Import>) {
-    let suggestions = import.suggestions();
+    let suggestions: Vec<_> = import.plan().suggestions().collect();
     let items = suggestions
         .iter()
         .map(|(_, old, new)| format!("{old}  →  {new}"))
         .collect();
     let keys = suggestions
-        .into_iter()
-        .map(|(platform, old, _)| (platform, old))
+        .iter()
+        .map(|(platform, old, _)| (platform.to_string(), old.to_string()))
         .collect();
     cx.dialog.toggle(
         "These look like known games. Import under the standard name?",

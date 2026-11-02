@@ -1,28 +1,27 @@
-//! What the TUI asks the worker to do on the user's behalf, and the plan it
-//! gets back: one operation = one `Request` (how to plan it), one `Pending`
-//! variant (how to preview and apply it). Adding an operation means adding
-//! a variant here and a key on the tab that offers it.
+//! Plans the TUI shows before applying them. A flow plans on the worker
+//! (a [`Planner`]) and gets back the dialog to open ([`Preview`]); a plan
+//! confirmed there is applied on the worker too. Each kind of plan says how
+//! it is asked about and applied by implementing [`Pending`] here; the
+//! text in both dialogs is the text the CLI prints (`Reader::Tui`).
 
-use std::{
-    collections::{BTreeMap, HashSet},
-    path::PathBuf,
-};
+use std::{collections::BTreeMap, path::PathBuf};
 
 use pocketeer_core::{
     Result,
-    card::bios::PlacePlan,
-    card::clean::{self, CleanPlan},
-    card::install::{Action, Prepared, UninstallPlan, plan::RemoveReason},
-    library::{
-        covers,
-        import::{ImportPlan, apply_suggestions},
-        remove::RemovePlan as LibraryRemovePlan,
-        rename::RenamePlan,
+    card::{
+        bios::PlacePlan,
+        clean::CleanPlan,
+        install::{Action, Prepared, UninstallPlan, plan::RemoveReason},
+        rename::CardRenamePlan,
     },
-    plan::{Event, Plan},
+    library::{
+        covers::import::ImportPlan as CoverImportPlan, import::ImportPlan,
+        remove::RemovePlan as LibraryRemovePlan, rename::RenamePlan,
+    },
+    plan::{Event, Plan, Progress},
     transfer::{
         from_card::CardImportPlan,
-        saves::{self, SaveAction, SavesOptions, SavesPlan, TrashPlan, TrashTarget},
+        saves::{SaveAction, SavesPlan, TrashPlan, TrashTarget},
         to_card::CopyPlan,
     },
 };
@@ -30,500 +29,31 @@ use pocketeer_core::{
 use super::worker::{Msg, applied, failed};
 use crate::{
     ops::{
-        Apply, Batch, Mode, Staged, apply_actions, card as card_cmd,
-        card::ImportRequest as CardImportRequest,
+        Apply, Batch, Mode, Staged, apply_actions,
         context::Context,
-        library::{self as library_cmd, ImportsRoms},
-        memories as memories_cmd, saves as saves_cmd,
+        library::{Imported, ImportsRoms},
     },
     text::{self, Reader, Text},
 };
 
-/// Something to plan on the worker; the plan comes back as a [`Pending`]
-/// for the user to confirm.
-pub enum Request {
-    ImportCover {
-        game_id: i64,
-        source: PathBuf,
-    },
-    CardRename {
-        path: PathBuf,
-        new_name: String,
-    },
-    Clean,
-    Copy {
-        platform: Option<String>,
-        roms: Vec<String>,
-    },
-    /// Back up saves; `games` names the game each save belongs to.
-    Saves {
-        opts: SavesOptions,
-        games: SaveGames,
-    },
-    /// Put a save (its current backup, or an older version) back on AP.
-    Restore {
-        rel: PathBuf,
-        version: Option<i64>,
-        games: SaveGames,
-    },
-    /// Put a Memory and the files beside it back on AP.
-    RestoreMemory {
-        rel: PathBuf,
-    },
-    /// Throw away copies of a save.
-    Trash {
-        rels: Vec<PathBuf>,
-        target: TrashTarget,
-    },
-    /// Throw away a Memory, on AP (`card`) or in the library.
-    TrashMemory {
-        rel: PathBuf,
-        card: bool,
-    },
-    /// Import a folder (or one ROM / zip) from this computer, each file's
-    /// platform taken from its extension; `platform` takes the rest.
-    ImportFolder {
-        source: PathBuf,
-        platform: Option<String>,
-    },
-    Standardize,
-    Rename {
-        platform: String,
-        spec: String,
-        new_name: String,
-    },
-    CardImport(CardImportRequest),
-    /// Rewrite an import plan with the standard names the user accepted,
-    /// as (platform, ROM name) pairs.
-    AcceptNames {
-        import: Box<Import>,
-        accepted: HashSet<(String, String)>,
-    },
-}
+/// Planning work for the worker: the plan, and the dialog it opens.
+pub type Planner = Box<dyn FnOnce(&Context, Progress<'_>) -> Result<Preview> + Send>;
 
-/// Card path of a save → the name of the game it belongs to.
-pub type SaveGames = BTreeMap<PathBuf, String>;
-
-/// A plan: shown in a dialog, then applied once confirmed.
-pub enum Pending {
-    ImportCover(pocketeer_core::library::covers::import::ImportPlan),
-    CardRename(pocketeer_core::card::rename::CardRenamePlan),
-    /// Cores to install, plus the requested ones that couldn't be prepared.
-    Install {
-        preps: Vec<Prepared>,
-        errors: Vec<String>,
-    },
-    Remove(Vec<UninstallPlan>),
-    Place(PlacePlan),
-    Clean(CleanPlan),
-    /// A ROM only the card has, deleted from it.
-    DeleteCardRom {
-        name: String,
-        path: PathBuf,
-    },
-    Copy(CopyPlan),
-    Saves(Box<SavesPlan>, SaveGames),
-    Trash(Box<TrashPlan>),
-    Rename(Box<RenamePlan>),
-    /// Renames of existing games to standard names.
-    Standardize(Vec<RenamePlan>),
-    LibraryRemove(Box<LibraryRemovePlan>),
-    Import(Box<Import>),
-}
-
-/// ROMs to copy into the library.
-pub enum Import {
-    /// From a folder on this computer.
-    Folder(ImportPlan),
-    /// From the card.
-    Card(CardImportPlan),
-}
-
-impl Import {
-    fn plan(&self) -> &ImportPlan {
-        match self {
-            Import::Folder(p) => p,
-            Import::Card(c) => c.import(),
-        }
-    }
-
-    fn plan_mut(&mut self) -> &mut ImportPlan {
-        match self {
-            Import::Folder(p) => p,
-            Import::Card(c) => c.import_mut(),
-        }
-    }
-
-    /// Every (platform, current name, suggested standard name) in the plan.
-    pub fn suggestions(&self) -> Vec<(String, String, String)> {
-        self.plan()
-            .suggestions()
-            .map(|(p, old, new)| (p.to_string(), old.to_string(), new.to_string()))
-            .collect()
-    }
-}
-
-impl Pending {
+/// A plan the TUI can ask about and then apply.
+pub trait Pending: Send {
+    /// The dialog it opens before it is applied.
+    fn preview(self: Box<Self>) -> Preview;
+    /// Applies it and says what happened.
+    fn apply(self: Box<Self>, ctx: &Context, progress: Progress<'_>) -> Msg;
     /// Imports add games one by one; the Games tab refreshes after each.
-    pub fn is_import(&self) -> bool {
-        matches!(self, Pending::Import(_))
+    fn adds_games(&self) -> bool {
+        false
     }
+}
 
-    /// Runs the planning half of `request` on the worker, and says which
-    /// dialog the plan opens.
-    pub fn plan(
-        ctx: &Context,
-        request: Request,
-        progress: &mut dyn FnMut(Event),
-    ) -> Result<Preview> {
-        Ok(match request {
-            Request::ImportCover { game_id, source } => {
-                Pending::ImportCover(covers::import::plan(&ctx.library()?, game_id, &source)?)
-            }
-            Request::CardRename { path, new_name } => {
-                Pending::CardRename(card_cmd::plan_rename(ctx, &path, &new_name)?)
-            }
-            Request::Clean => {
-                progress(Event::Status("Scanning for junk".into()));
-                Pending::Clean(clean::plan(&ctx.pocket()?, false)?)
-            }
-            Request::Copy { platform, roms } => Pending::Copy(card_cmd::plan_copy(
-                ctx,
-                platform.as_deref(),
-                &roms,
-                progress,
-            )?),
-            Request::Saves { opts, games } => {
-                Pending::Saves(Box::new(saves_cmd::plan_sync(ctx, opts, progress)?), games)
-            }
-            Request::Restore {
-                rel,
-                version,
-                games,
-            } => Pending::Saves(
-                Box::new(saves::plan_restore(
-                    &ctx.library()?,
-                    &ctx.pocket()?,
-                    &rel,
-                    version,
-                )?),
-                games,
-            ),
-            Request::RestoreMemory { rel } => {
-                let rels = memories_cmd::library_files(ctx, &rel)?;
-                let plan = saves::plan_restore_paths(&ctx.library()?, &ctx.pocket()?, &rels)?;
-                Pending::Saves(Box::new(plan), SaveGames::new())
-            }
-            Request::Trash { rels, target } => {
-                Pending::Trash(Box::new(saves_cmd::plan_trash(ctx, &rels, target)?))
-            }
-            Request::TrashMemory { rel, card } => {
-                let rels = memories_cmd::files(ctx, &rel, card)?;
-                let target = if card {
-                    TrashTarget::Card
-                } else {
-                    TrashTarget::Library
-                };
-                Pending::Trash(Box::new(saves_cmd::plan_trash(ctx, &rels, target)?))
-            }
-            Request::ImportFolder { source, platform } => {
-                let req = library_cmd::ImportRequest {
-                    source: source.clone(),
-                    platform,
-                    settings: Default::default(),
-                };
-                let plan = library_cmd::plan_import(ctx, &req, progress)?;
-                if plan.actions.is_empty() && !plan.unknown.is_empty() {
-                    // None of the files says its platform: ask which.
-                    return Ok(Preview::AskPlatform {
-                        source,
-                        files: plan.unknown.len(),
-                    });
-                }
-                Pending::Import(Box::new(Import::Folder(plan)))
-            }
-            Request::Standardize => Pending::Standardize(library_cmd::plan_standardize(ctx, None)?),
-            Request::Rename {
-                platform,
-                spec,
-                new_name,
-            } => Pending::Rename(Box::new(library_cmd::plan_rename(
-                ctx,
-                Some(&platform),
-                &spec,
-                &new_name,
-            )?)),
-            Request::CardImport(args) => {
-                let plan = card_cmd::plan_import(ctx, &args, progress)?;
-                Pending::Import(Box::new(Import::Card(plan)))
-            }
-            Request::AcceptNames {
-                mut import,
-                accepted,
-            } => {
-                let lib = ctx.library()?;
-                apply_suggestions(&lib, import.plan_mut(), |platform, name| {
-                    accepted.contains(&(platform.to_string(), name.to_string()))
-                })?;
-                Pending::Import(import)
-            }
-        }
-        .preview())
-    }
-
-    /// Applies a confirmed plan and renders what happened with the same text
-    /// the CLI prints (`Mode::Interactive`: no CLI flags in it).
-    pub fn apply(self, ctx: &Context, progress: &mut dyn FnMut(Event)) -> Msg {
-        match self {
-            Pending::ImportCover(mut plan) => {
-                let result = plan.apply(ctx, progress);
-                shown(plan, result, |s| s.text(Reader::Tui))
-            }
-            Pending::CardRename(mut plan) => {
-                let result = plan.apply(ctx, progress);
-                shown(plan, result, |s| s.text(Reader::Tui))
-            }
-            Pending::Install { preps, .. } => {
-                let prepared = preps.into_iter().map(|p| (p.plan.core_id.clone(), Ok(p)));
-                let report = Batch::stage(ctx, Mode::Applied, prepared, progress);
-                applied(report.text(Reader::Tui), report.failed())
-            }
-            Pending::Remove(plans) => {
-                let plans = plans.into_iter().map(|p| (p.core_id.clone(), Ok(p)));
-                let report = Batch::stage(ctx, Mode::Applied, plans, progress);
-                applied(report.text(Reader::Tui), report.failed())
-            }
-            Pending::Place(mut plan) => {
-                let result = plan.apply(ctx, progress);
-                shown(plan, result, |s| s.text(Reader::Tui))
-            }
-            Pending::Clean(mut plan) => {
-                let result = plan.apply(ctx, progress);
-                shown(plan, result, |s| s.text(Reader::Tui))
-            }
-            Pending::DeleteCardRom { name, path } => {
-                let label = format!("delete {name}");
-                let actions = [Action::Remove {
-                    path,
-                    reason: RemoveReason::Uninstall,
-                }];
-                progress(Event::Status(label.clone()));
-                match ctx
-                    .pocket()
-                    .and_then(|p| apply_actions(&p, &label, &actions, progress))
-                {
-                    Ok(_) => applied(format!("✓ deleted {name} from the card"), 0),
-                    Err(e) => applied(format!("✗ {label}: {e}"), 1),
-                }
-            }
-            Pending::Copy(mut plan) => {
-                let result = plan.apply(ctx, progress);
-                shown(plan, result, |s| s.text(Reader::Tui))
-            }
-            Pending::Saves(mut plan, games) => {
-                let result = plan.apply(ctx, progress);
-                shown(*plan, result, |s| {
-                    text::saves::saves_sync_by_game(&s, &games, Reader::Tui)
-                })
-            }
-            Pending::Trash(mut plan) => {
-                let result = plan.apply(ctx, progress);
-                shown(*plan, result, |s| s.text(Reader::Tui))
-            }
-            Pending::Rename(mut plan) => {
-                let result = plan.apply(ctx, progress);
-                shown(*plan, result, |s| s.text(Reader::Tui))
-            }
-            Pending::Standardize(renames) => {
-                let plans = renames.into_iter().map(|p| (p.old_name.clone(), Ok(p)));
-                let report = Batch::stage(ctx, Mode::Applied, plans, progress);
-                applied(report.text(Reader::Tui), report.failed())
-            }
-            Pending::LibraryRemove(mut plan) => {
-                let result = plan.apply(ctx, progress);
-                shown(*plan, result, |s| s.text(Reader::Tui))
-            }
-            Pending::Import(import) => match *import {
-                Import::Card(plan) => imported(ctx, plan, progress),
-                Import::Folder(plan) => imported(ctx, plan, progress),
-            },
-        }
-    }
-
-    /// How this plan is shown before it is applied: the dialog to open,
-    /// with its text rendered the same way the CLI prints it. A plan that
-    /// needs a choice first (save conflicts, standard names) opens that
-    /// dialog and comes back here once it is made.
-    pub fn preview(self) -> Preview {
-        use Preview::*;
-        let confirm = |title: String, lines: Vec<String>, pending: Pending| Confirm {
-            title,
-            lines,
-            pending: Box::new(pending),
-        };
-        let info = |title: &str, lines: Vec<String>| Info {
-            title: title.into(),
-            lines,
-        };
-        match self {
-            Pending::ImportCover(plan) => confirm(
-                if plan.previous.as_ref().is_some_and(|p| p.rel_path.is_some()) {
-                    "Replace this game's cover?".into()
-                } else {
-                    "Import this game's cover?".into()
-                },
-                text_lines(&Staged::preview(plan.clone()).text(Reader::Tui)),
-                Pending::ImportCover(plan),
-            ),
-            Pending::CardRename(plan) => confirm(
-                "Rename this AP ROM and its saves?".into(),
-                text_lines(&Staged::preview(plan.clone()).text(Reader::Tui)),
-                Pending::CardRename(plan),
-            ),
-            Pending::Install { preps, errors } => {
-                let mut text: Vec<String> = errors.clone();
-                text.extend(
-                    preps
-                        .iter()
-                        .map(|p| text::cores::install_plan_text(&p.plan)),
-                );
-                let lines = text_lines(&text.join("\n"));
-                match preps.iter().filter(|p| p.plan.changed).count() {
-                    0 => info("Nothing to do", lines),
-                    n => confirm(
-                        format!("Install {n} core(s)?"),
-                        lines,
-                        Pending::Install { preps, errors },
-                    ),
-                }
-            }
-            Pending::Remove(plans) => confirm(
-                format!(
-                    "Remove {}?",
-                    plans
-                        .iter()
-                        .map(|p| p.core_id.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-                text_lines(
-                    &plans
-                        .iter()
-                        .map(text::cores::remove_plan_text)
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                ),
-                Pending::Remove(plans),
-            ),
-            Pending::Place(plan) => confirm(
-                format!("Move {} file(s) into place?", plan.actions.len()),
-                text_lines(&Staged::preview(plan.clone()).text(Reader::Tui)),
-                Pending::Place(plan),
-            ),
-            Pending::Clean(plan) if plan.entries.is_empty() => {
-                Notice("No macOS junk on the card.".into())
-            }
-            Pending::Clean(plan) => confirm(
-                format!(
-                    "Delete {} junk item(s), {}?",
-                    plan.entries.len(),
-                    text::bytes(plan.bytes)
-                ),
-                text_lines(&Staged::preview(plan.clone()).text(Reader::Tui)),
-                Pending::Clean(plan),
-            ),
-            Pending::DeleteCardRom { name, path } => confirm(
-                format!("Delete {name} from the card?"),
-                vec![format!("  - {}", path.display())],
-                Pending::DeleteCardRom { name, path },
-            ),
-            Pending::Copy(plan) => {
-                let lines = text_lines(&Staged::preview(plan.clone()).text(Reader::Tui));
-                match plan.changes() {
-                    0 => info("Already on this card", lines),
-                    n => confirm(
-                        format!("Copy {n} ROM(s) to this card?"),
-                        lines,
-                        Pending::Copy(plan),
-                    ),
-                }
-            }
-            Pending::Saves(plan, games) => {
-                if let Some(index) = plan
-                    .actions
-                    .iter()
-                    .position(|a| matches!(a, SaveAction::Conflict { .. }))
-                {
-                    return SaveConflict { plan, games, index };
-                }
-                let lines = text::saves::saves_dialog(&plan, &games);
-                let s = &plan.summary;
-                let title = match (s.pull, s.push) {
-                    (0, 0) => return Notice("Saves are already backed up.".into()),
-                    (n, 0) => format!("Back up {n} save(s)?"),
-                    (0, n) => format!("Put {n} file(s) back on AP?"),
-                    (a, b) => format!("Back up {a}, put {b} back on AP?"),
-                };
-                confirm(title, lines, Pending::Saves(plan, games))
-            }
-            Pending::Trash(plan) if plan.files.is_empty() => {
-                Notice("Nothing to throw away.".into())
-            }
-            Pending::Trash(plan) => confirm(
-                match plan.target {
-                    TrashTarget::Card => format!("Delete {} file(s) from AP?", plan.files.len()),
-                    _ => format!("Move {} file(s) to the trash?", plan.files.len()),
-                },
-                text::saves::trash_dialog(&plan),
-                Pending::Trash(plan),
-            ),
-            Pending::Rename(plan) => confirm(
-                format!("Rename to {}?", plan.new_name),
-                text_lines(&Staged::preview((*plan).clone()).text(Reader::Tui)),
-                Pending::Rename(plan),
-            ),
-            Pending::Standardize(plans) if plans.is_empty() => info(
-                "Standard names",
-                vec![
-                    "Every game either has a standard name already or matches none.".into(),
-                    "(Games verified against a DAT are never renamed.)".into(),
-                ],
-            ),
-            Pending::Standardize(plans) => PickRenames(plans),
-            Pending::LibraryRemove(plan) => {
-                let games: std::collections::BTreeSet<&str> =
-                    plan.items.iter().map(|i| i.game.as_str()).collect();
-                let title = match (games.len(), games.iter().next()) {
-                    (1, Some(game)) => format!("Remove {game}?"),
-                    _ => format!("Remove {} games?", games.len()),
-                };
-                let mut lines: Vec<String> = if plan.items.len() > 1 {
-                    plan.items
-                        .iter()
-                        .map(|i| format!("{}  {}", i.name, text::bytes(i.size)))
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                lines.push("It goes to .trash/ in the library. Copies on the card stay.".into());
-                confirm(title, lines, Pending::LibraryRemove(plan))
-            }
-            Pending::Import(import) if !import.suggestions().is_empty() => PickImportNames(import),
-            Pending::Import(import) => {
-                let plan = import.plan();
-                let lines = text::library::import_brief(plan);
-                let title = match &*import {
-                    Import::Folder(_) => format!("Import {} ROM(s)?", plan.changes()),
-                    Import::Card(_) => format!("Copy {} ROM(s) into the library?", plan.changes()),
-                };
-                if plan.changes() == 0 {
-                    info("Nothing new to import", lines)
-                } else {
-                    confirm(title, lines, Pending::Import(import))
-                }
-            }
-        }
-    }
+/// The dialog `pending` opens: what planners return.
+pub fn preview(pending: impl Pending + 'static) -> Preview {
+    Box::new(pending).preview()
 }
 
 /// The dialog a plan opens before it is applied.
@@ -536,14 +66,10 @@ pub enum Preview {
     Confirm {
         title: String,
         lines: Vec<String>,
-        pending: Box<Pending>,
+        pending: Box<dyn Pending>,
     },
     /// A save changed on both sides: which copy wins (`index` into the plan).
-    SaveConflict {
-        plan: Box<SavesPlan>,
-        games: SaveGames,
-        index: usize,
-    },
+    SaveConflict { backup: Box<SaveSync>, index: usize },
     /// Standard-name renames to tick.
     PickRenames(Vec<RenamePlan>),
     /// An import whose files match standard names: which names to take.
@@ -556,35 +82,402 @@ pub(super) fn text_lines(text: &str) -> Vec<String> {
     text.lines().map(str::to_owned).collect()
 }
 
-/// Applies an import and says what happened the way `library import` does.
-fn imported<P: ImportsRoms>(ctx: &Context, mut plan: P, progress: &mut dyn FnMut(Event)) -> Msg {
-    let result = plan.apply(ctx, progress);
-    shown(plan, result, |staged| {
-        let imported = library_cmd::Imported {
-            staged,
-            covers: None,
-            warnings: Vec::new(),
-        };
-        imported.text(Reader::Tui)
-    })
+fn confirm(
+    title: impl Into<String>,
+    lines: Vec<String>,
+    pending: impl Pending + 'static,
+) -> Preview {
+    Preview::Confirm {
+        title: title.into(),
+        lines,
+        pending: Box::new(pending),
+    }
 }
 
-/// A plan and what applying it produced, rendered like the CLI would.
-fn shown<P: Apply>(
-    plan: P,
-    result: Result<P::Output>,
-    render: impl FnOnce(Staged<P>) -> String,
-) -> Msg {
-    match result {
-        Ok(r) => {
+fn info(title: &str, lines: Vec<String>) -> Preview {
+    Preview::Info {
+        title: title.into(),
+        lines,
+    }
+}
+
+/// Asks `title` over the plan's own text.
+fn confirm_plan<P: Apply + Pending + 'static>(title: String, plan: P) -> Preview
+where
+    Staged<P>: Text,
+{
+    let staged = Staged::preview(plan);
+    let lines = text_lines(&staged.text(Reader::Tui));
+    confirm(title, lines, staged.plan)
+}
+
+/// Applies `plan` and says what happened the way the CLI does.
+fn apply_plan<P: Apply>(mut plan: P, ctx: &Context, progress: Progress<'_>) -> Msg
+where
+    Staged<P>: Text,
+{
+    match plan.apply(ctx, progress) {
+        Ok(result) => {
             let staged = Staged {
                 mode: Mode::Applied,
                 plan,
-                result: Some(r),
+                result: Some(result),
             };
-            let failed = staged.failed();
-            applied(render(staged), failed)
+            applied(staged.text(Reader::Tui), staged.failed())
         }
         Err(e) => failed(e),
+    }
+}
+
+/// A plan asked about with its own text under a fixed kind of question;
+/// [`Pending`] follows from it.
+trait Ask: Apply + Send + Sized + 'static
+where
+    Staged<Self>: Text,
+{
+    /// The question, or `Err` with what to show when there is nothing to do.
+    fn question(&self) -> std::result::Result<String, Nothing>;
+}
+
+/// What a plan with nothing to do shows instead of a question.
+enum Nothing {
+    /// A line in the status bar.
+    Notice(&'static str),
+    /// Its text, under this title.
+    Info(&'static str),
+}
+
+impl<P: Ask> Pending for P
+where
+    Staged<P>: Text,
+{
+    fn preview(self: Box<Self>) -> Preview {
+        match self.question() {
+            Ok(title) => confirm_plan(title, *self),
+            Err(Nothing::Notice(line)) => Preview::Notice(line.into()),
+            Err(Nothing::Info(title)) => {
+                info(title, text_lines(&Staged::preview(*self).text(Reader::Tui)))
+            }
+        }
+    }
+
+    fn apply(self: Box<Self>, ctx: &Context, progress: Progress<'_>) -> Msg {
+        apply_plan(*self, ctx, progress)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plans asked about with their own text.
+
+impl Ask for CoverImportPlan {
+    fn question(&self) -> std::result::Result<String, Nothing> {
+        Ok(
+            match self.previous.as_ref().is_some_and(|p| p.rel_path.is_some()) {
+                true => "Replace this game's cover?".into(),
+                false => "Import this game's cover?".into(),
+            },
+        )
+    }
+}
+
+impl Ask for CardRenamePlan {
+    fn question(&self) -> std::result::Result<String, Nothing> {
+        Ok("Rename this AP ROM and its saves?".into())
+    }
+}
+
+impl Ask for PlacePlan {
+    fn question(&self) -> std::result::Result<String, Nothing> {
+        Ok(format!("Move {} file(s) into place?", self.actions.len()))
+    }
+}
+
+impl Ask for CleanPlan {
+    fn question(&self) -> std::result::Result<String, Nothing> {
+        if self.entries.is_empty() {
+            return Err(Nothing::Notice("No macOS junk on the card."));
+        }
+        Ok(format!(
+            "Delete {} junk item(s), {}?",
+            self.entries.len(),
+            text::bytes(self.bytes)
+        ))
+    }
+}
+
+impl Ask for CopyPlan {
+    fn question(&self) -> std::result::Result<String, Nothing> {
+        match self.changes() {
+            0 => Err(Nothing::Info("Already on this card")),
+            n => Ok(format!("Copy {n} ROM(s) to this card?")),
+        }
+    }
+}
+
+impl Ask for RenamePlan {
+    fn question(&self) -> std::result::Result<String, Nothing> {
+        Ok(format!("Rename to {}?", self.new_name))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plans with a dialog of their own.
+
+impl Pending for LibraryRemovePlan {
+    fn preview(self: Box<Self>) -> Preview {
+        let games: std::collections::BTreeSet<&str> =
+            self.items.iter().map(|i| i.game.as_str()).collect();
+        let title = match (games.len(), games.iter().next()) {
+            (1, Some(game)) => format!("Remove {game}?"),
+            _ => format!("Remove {} games?", games.len()),
+        };
+        let mut lines: Vec<String> = if self.items.len() > 1 {
+            self.items
+                .iter()
+                .map(|i| format!("{}  {}", i.name, text::bytes(i.size)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        lines.push("It goes to .trash/ in the library. Copies on the card stay.".into());
+        confirm(title, lines, *self)
+    }
+
+    fn apply(self: Box<Self>, ctx: &Context, progress: Progress<'_>) -> Msg {
+        apply_plan(*self, ctx, progress)
+    }
+}
+
+impl Pending for TrashPlan {
+    fn preview(self: Box<Self>) -> Preview {
+        if self.files.is_empty() {
+            return Preview::Notice("Nothing to throw away.".into());
+        }
+        let title = match self.target {
+            TrashTarget::Card => format!("Delete {} file(s) from AP?", self.files.len()),
+            _ => format!("Move {} file(s) to the trash?", self.files.len()),
+        };
+        let lines = text::saves::trash_dialog(&self);
+        confirm(title, lines, *self)
+    }
+
+    fn apply(self: Box<Self>, ctx: &Context, progress: Progress<'_>) -> Msg {
+        apply_plan(*self, ctx, progress)
+    }
+}
+
+/// Card path of a save → the name of the game it belongs to.
+pub type SaveGames = BTreeMap<PathBuf, String>;
+
+/// Saves to back up or restore, listed under the games they belong to.
+pub struct SaveSync {
+    pub plan: SavesPlan,
+    pub games: SaveGames,
+}
+
+impl Pending for SaveSync {
+    /// A conflict is settled first, one at a time.
+    fn preview(self: Box<Self>) -> Preview {
+        let conflict = self
+            .plan
+            .actions
+            .iter()
+            .position(|a| matches!(a, SaveAction::Conflict { .. }));
+        if let Some(index) = conflict {
+            return Preview::SaveConflict {
+                backup: self,
+                index,
+            };
+        }
+        let s = &self.plan.summary;
+        let title = match (s.pull, s.push) {
+            (0, 0) => return Preview::Notice("Saves are already backed up.".into()),
+            (n, 0) => format!("Back up {n} save(s)?"),
+            (0, n) => format!("Put {n} file(s) back on AP?"),
+            (a, b) => format!("Back up {a}, put {b} back on AP?"),
+        };
+        let lines = text::saves::saves_dialog(&self.plan, &self.games);
+        confirm(title, lines, *self)
+    }
+
+    fn apply(self: Box<Self>, ctx: &Context, progress: Progress<'_>) -> Msg {
+        let SaveSync { mut plan, games } = *self;
+        match plan.apply(ctx, progress) {
+            Ok(result) => {
+                let staged = Staged {
+                    mode: Mode::Applied,
+                    plan,
+                    result: Some(result),
+                };
+                let text = text::saves::saves_sync_by_game(&staged, &games, Reader::Tui);
+                applied(text, staged.failed())
+            }
+            Err(e) => failed(e),
+        }
+    }
+}
+
+/// ROMs to copy into the library. A closed pair: the standard-names step
+/// works on either.
+pub enum Import {
+    /// From a folder on this computer.
+    Folder(ImportPlan),
+    /// From the card.
+    Card(CardImportPlan),
+}
+
+impl Import {
+    pub fn plan(&self) -> &ImportPlan {
+        match self {
+            Import::Folder(p) => p,
+            Import::Card(c) => c.import(),
+        }
+    }
+
+    pub fn plan_mut(&mut self) -> &mut ImportPlan {
+        match self {
+            Import::Folder(p) => p,
+            Import::Card(c) => c.import_mut(),
+        }
+    }
+}
+
+impl Pending for Import {
+    /// Standard names are offered first, if any match.
+    fn preview(self: Box<Self>) -> Preview {
+        let plan = self.plan();
+        if plan.suggestions().next().is_some() {
+            return Preview::PickImportNames(self);
+        }
+        let lines = text::library::import_brief(plan);
+        let n = plan.changes();
+        let title = match &*self {
+            Import::Folder(_) => format!("Import {n} ROM(s)?"),
+            Import::Card(_) => format!("Copy {n} ROM(s) into the library?"),
+        };
+        match n {
+            0 => info("Nothing new to import", lines),
+            _ => confirm(title, lines, *self),
+        }
+    }
+
+    fn apply(self: Box<Self>, ctx: &Context, progress: Progress<'_>) -> Msg {
+        match *self {
+            Import::Folder(plan) => apply_import(plan, ctx, progress),
+            Import::Card(plan) => apply_import(plan, ctx, progress),
+        }
+    }
+
+    fn adds_games(&self) -> bool {
+        true
+    }
+}
+
+/// An import reads like `library import`, without the follow-ups (the TUI
+/// identifies and fetches covers on its own afterwards).
+fn apply_import<P: ImportsRoms>(mut plan: P, ctx: &Context, progress: Progress<'_>) -> Msg {
+    match plan.apply(ctx, progress) {
+        Ok(result) => {
+            let imported = Imported {
+                staged: Staged {
+                    mode: Mode::Applied,
+                    plan,
+                    result: Some(result),
+                },
+                covers: None,
+                warnings: Vec::new(),
+            };
+            applied(imported.text(Reader::Tui), imported.staged.failed())
+        }
+        Err(e) => failed(e),
+    }
+}
+
+impl Pending for Batch<Prepared> {
+    fn preview(self: Box<Self>) -> Preview {
+        let lines = text_lines(&self.text(Reader::Tui));
+        let n = self
+            .items
+            .iter()
+            .filter_map(|i| i.plan())
+            .filter(|p| p.changes() > 0)
+            .count();
+        match n {
+            0 => info("Nothing to do", lines),
+            n => confirm(format!("Install {n} core(s)?"), lines, *self),
+        }
+    }
+
+    fn apply(self: Box<Self>, ctx: &Context, progress: Progress<'_>) -> Msg {
+        apply_batch(*self, ctx, progress)
+    }
+}
+
+impl Pending for Batch<UninstallPlan> {
+    fn preview(self: Box<Self>) -> Preview {
+        let ids: Vec<&str> = self.items.iter().map(|i| i.target.as_str()).collect();
+        let title = format!("Remove {}?", ids.join(", "));
+        let lines = text_lines(&self.text(Reader::Tui));
+        confirm(title, lines, *self)
+    }
+
+    fn apply(self: Box<Self>, ctx: &Context, progress: Progress<'_>) -> Msg {
+        apply_batch(*self, ctx, progress)
+    }
+}
+
+/// The standard names the user ticked.
+impl Pending for Batch<RenamePlan> {
+    fn preview(self: Box<Self>) -> Preview {
+        let title = format!("Rename {} game(s) to standard names?", self.items.len());
+        let lines = text_lines(&self.text(Reader::Tui));
+        confirm(title, lines, *self)
+    }
+
+    fn apply(self: Box<Self>, ctx: &Context, progress: Progress<'_>) -> Msg {
+        apply_batch(*self, ctx, progress)
+    }
+}
+
+/// Applies every planned item of a previewed batch.
+fn apply_batch<P: Apply + Send + 'static>(
+    batch: Batch<P>,
+    ctx: &Context,
+    progress: Progress<'_>,
+) -> Msg
+where
+    Batch<P>: Text,
+{
+    let plans = batch.into_plans().map(|(target, plan)| (target, Ok(plan)));
+    let report = Batch::stage(ctx, Mode::Applied, plans, progress);
+    applied(report.text(Reader::Tui), report.failed())
+}
+
+/// A ROM only the card has, deleted from it.
+pub struct CardDelete {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+impl Pending for CardDelete {
+    fn preview(self: Box<Self>) -> Preview {
+        let lines = vec![format!("  - {}", self.path.display())];
+        confirm(format!("Delete {} from the card?", self.name), lines, *self)
+    }
+
+    fn apply(self: Box<Self>, ctx: &Context, progress: Progress<'_>) -> Msg {
+        let label = format!("delete {}", self.name);
+        let actions = [Action::Remove {
+            path: self.path,
+            reason: RemoveReason::Uninstall,
+        }];
+        progress(Event::Status(label.clone()));
+        match ctx
+            .pocket()
+            .and_then(|p| apply_actions(&p, &label, &actions, progress))
+        {
+            Ok(_) => applied(format!("✓ deleted {} from the card", self.name), 0),
+            Err(e) => applied(format!("✗ {label}: {e}"), 1),
+        }
     }
 }

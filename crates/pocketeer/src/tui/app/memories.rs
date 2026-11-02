@@ -14,11 +14,11 @@ use super::{
     session::Session,
 };
 use crate::{
-    ops::memories::{MemoryEntry, Place},
-    tui::{
-        pending::{Request, SaveGames},
-        worker::Job,
+    ops::{
+        memories::{self as memories_cmd, MemoryEntry, Place},
+        saves as saves_cmd,
     },
+    tui::pending::{self, SaveGames, SaveSync},
 };
 
 /// Which Memories to list.
@@ -138,10 +138,13 @@ impl Memories {
         }
         let rel = m.memory.rel_path.clone();
         if cx.session.require_card().is_some() && cx.session.require_library().is_some() {
-            cx.session.submit(
-                "Planning restore",
-                Job::Plan(Request::RestoreMemory { rel }),
-            );
+            cx.session.plan("Planning restore", move |ctx, _| {
+                let plan = memories_cmd::plan_restore(ctx, &rel)?;
+                Ok(pending::preview(SaveSync {
+                    plan,
+                    games: SaveGames::new(),
+                }))
+            });
         }
     }
 
@@ -175,13 +178,13 @@ fn back_up(cx: &mut Cx, only: Option<Vec<PathBuf>>) {
         scope: Scope::Memories,
         only,
     };
-    cx.session.submit(
-        "Comparing Memories",
-        Job::Plan(Request::Saves {
-            opts,
+    cx.session.plan("Comparing Memories", move |ctx, progress| {
+        let plan = saves_cmd::plan_sync(ctx, opts, progress)?;
+        Ok(pending::preview(SaveSync {
+            plan,
             games: SaveGames::new(),
-        }),
-    );
+        }))
+    });
 }
 
 fn trash(cx: &mut Cx, rel: PathBuf, card: bool) {
@@ -189,8 +192,9 @@ fn trash(cx: &mut Cx, rel: PathBuf, card: bool) {
         return;
     }
     if cx.session.require_library().is_some() {
-        cx.session
-            .submit("Planning", Job::Plan(Request::TrashMemory { rel, card }));
+        cx.session.plan("Planning", move |ctx, _| {
+            Ok(pending::preview(memories_cmd::plan_trash(ctx, &rel, card)?))
+        });
     }
 }
 

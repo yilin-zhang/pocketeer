@@ -12,8 +12,8 @@ use std::{
 use pocketeer_core::transfer::{
     Presence,
     saves::{
-        self, ConflictChoice, SaveAction, SaveReason, SaveSkip, SavesOptions, SavesPlan, Scope,
-        TrashTarget, expected_saves,
+        self, ConflictChoice, SaveAction, SaveReason, SaveSkip, SavesOptions, Scope, TrashTarget,
+        expected_saves,
     },
 };
 
@@ -24,10 +24,11 @@ use super::{
     session::Session,
 };
 use crate::{
+    ops::saves as saves_cmd,
     text,
     tui::{
-        pending::{Pending, Request, SaveGames},
-        worker::{Job, SavesView},
+        pending::{self, SaveGames, SaveSync},
+        worker::SavesView,
     },
 };
 
@@ -207,8 +208,10 @@ pub fn back_up(cx: &mut Cx, only: Option<Vec<PathBuf>>, games: SaveGames) {
         scope: Scope::Saves,
         only,
     };
-    cx.session
-        .submit("Comparing saves", Job::Plan(Request::Saves { opts, games }));
+    cx.session.plan("Comparing saves", move |ctx, progress| {
+        let plan = saves_cmd::plan_sync(ctx, opts, progress)?;
+        Ok(pending::preview(SaveSync { plan, games }))
+    });
 }
 
 /// Put a backup or an older version back on AP.
@@ -239,14 +242,11 @@ pub fn restore(cx: &mut Cx, line: &SaveLine, games: SaveGames) {
     if cx.session.require_card().is_none() || cx.session.require_library().is_none() {
         return;
     }
-    cx.session.submit(
-        "Planning restore",
-        Job::Plan(Request::Restore {
-            rel: line.rel().to_path_buf(),
-            version,
-            games,
-        }),
-    );
+    let rel = line.rel().to_path_buf();
+    cx.session.plan("Planning restore", move |ctx, _| {
+        let plan = saves::plan_restore(&ctx.library()?, &ctx.pocket()?, &rel, version)?;
+        Ok(pending::preview(SaveSync { plan, games }))
+    });
 }
 
 /// Throw away one copy (a file heading means everything the library has of it).
@@ -266,8 +266,9 @@ pub fn trash(cx: &mut Cx, line: &SaveLine) {
         return;
     }
     let rels = vec![line.rel().to_path_buf()];
-    cx.session
-        .submit("Planning", Job::Plan(Request::Trash { rels, target }));
+    cx.session.plan("Planning", move |ctx, _| {
+        Ok(pending::preview(saves_cmd::plan_trash(ctx, &rels, target)?))
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -275,26 +276,22 @@ pub fn trash(cx: &mut Cx, line: &SaveLine) {
 
 /// Where a backup with conflicts is: which conflict is being asked about.
 pub enum Step {
-    Conflict {
-        plan: Box<SavesPlan>,
-        games: SaveGames,
-        index: usize,
-    },
+    Conflict { backup: Box<SaveSync>, index: usize },
 }
 
 /// The first conflict in `plan`: which copy wins. The answer re-plans the rest.
-pub fn ask_conflict(cx: &mut Cx, plan: Box<SavesPlan>, games: SaveGames, index: usize) {
+pub fn ask_conflict(cx: &mut Cx, backup: Box<SaveSync>, index: usize) {
     let SaveAction::Conflict {
         rel,
         card,
         computer,
         ..
-    } = &plan.actions[index]
+    } = &backup.plan.actions[index]
     else {
         return;
     };
     let file = rel.file_name().unwrap_or_default().to_string_lossy();
-    let what = match games.get(rel) {
+    let what = match backup.games.get(rel) {
         Some(game) if !file.starts_with(game.as_str()) => format!("{game}: {file}"),
         Some(_) => file.into_owned(),
         None => rel.display().to_string(),
@@ -316,23 +313,15 @@ pub fn ask_conflict(cx: &mut Cx, plan: Box<SavesPlan>, games: SaveGames, index: 
         format!("Save conflict: {what}"),
         items,
         2,
-        DialogStep::Saves(Step::Conflict { plan, games, index }),
+        DialogStep::Saves(Step::Conflict { backup, index }),
     );
 }
 
 pub fn answer(cx: &mut Cx, step: Step, answer: Answer) {
-    let (
-        Step::Conflict {
-            mut plan,
-            games,
-            index,
-        },
-        Answer::Choice(choice),
-    ) = (step, answer)
-    else {
+    let (Step::Conflict { mut backup, index }, Answer::Choice(choice)) = (step, answer) else {
         return;
     };
-    plan.resolve(
+    backup.plan.resolve(
         index,
         match choice {
             0 => ConflictChoice::Card,
@@ -340,5 +329,5 @@ pub fn answer(cx: &mut Cx, step: Step, answer: Answer) {
             _ => ConflictChoice::Skip,
         },
     );
-    cx.planned(Pending::Saves(plan, games));
+    cx.planned(*backup);
 }

@@ -12,9 +12,9 @@ use super::{
     dialog::{Answer, Step as DialogStep},
     games::GameRef,
 };
-use crate::tui::{
-    pending::{Pending, Request},
-    worker::Job,
+use crate::{
+    ops::{Batch, card as card_cmd, library as library_cmd},
+    tui::pending::{self, Preview},
 };
 
 /// Where a rename is.
@@ -183,26 +183,42 @@ fn choose(cx: &mut Cx, choice: Choice) {
             platform,
             spec,
             new_name,
-        } => cx.session.submit(
-            "Planning local rename",
-            Job::Plan(Request::Rename {
-                platform,
-                spec,
-                new_name,
-            }),
-        ),
-        Choice::AdoptLibraryName { path, new_name } => cx.session.submit(
-            "Planning AP rename",
-            Job::Plan(Request::CardRename { path, new_name }),
-        ),
+        } => rename_in_library(cx, platform, spec, new_name),
+        Choice::AdoptLibraryName { path, new_name } => rename_on_card(cx, path, new_name),
     }
+}
+
+fn rename_in_library(cx: &mut Cx, platform: String, spec: String, new_name: String) {
+    cx.session.plan("Planning rename", move |ctx, _| {
+        let plan = library_cmd::plan_rename(ctx, Some(&platform), &spec, &new_name)?;
+        Ok(pending::preview(plan))
+    });
+}
+
+fn rename_on_card(cx: &mut Cx, path: PathBuf, new_name: String) {
+    cx.session.plan("Planning AP rename", move |ctx, _| {
+        Ok(pending::preview(card_cmd::plan_rename(
+            ctx, &path, &new_name,
+        )?))
+    });
 }
 
 /// `t`: offer standard (No-Intro) names for games whose file names aren't.
 pub fn standardize(cx: &mut Cx) {
     if cx.session.require_library().is_some() {
-        cx.session
-            .submit("Matching standard names", Job::Plan(Request::Standardize));
+        cx.session.plan("Matching standard names", |ctx, _| {
+            let plans = library_cmd::plan_standardize(ctx, None)?;
+            Ok(match plans.is_empty() {
+                true => Preview::Info {
+                    title: "Standard names".into(),
+                    lines: vec![
+                        "Every game either has a standard name already or matches none.".into(),
+                        "(Games verified against a DAT are never renamed.)".into(),
+                    ],
+                },
+                false => Preview::PickRenames(plans),
+            })
+        });
     }
 }
 
@@ -233,20 +249,10 @@ pub fn answer(cx: &mut Cx, step: Step, answer: Answer) {
         }
         (Step::LibraryName { platform, spec }, Answer::Text(new_name)) => {
             if !new_name.trim().is_empty() {
-                cx.session.submit(
-                    "Planning rename",
-                    Job::Plan(Request::Rename {
-                        platform,
-                        spec,
-                        new_name,
-                    }),
-                );
+                rename_in_library(cx, platform, spec, new_name);
             }
         }
-        (Step::CardName { path }, Answer::Text(new_name)) => cx.session.submit(
-            "Planning AP rename",
-            Job::Plan(Request::CardRename { path, new_name }),
-        ),
+        (Step::CardName { path }, Answer::Text(new_name)) => rename_on_card(cx, path, new_name),
         (Step::Standardize { plans }, Answer::Checked(on)) => {
             let chosen: Vec<RenamePlan> = plans
                 .into_iter()
@@ -257,15 +263,8 @@ pub fn answer(cx: &mut Cx, step: Step, answer: Answer) {
             if chosen.is_empty() {
                 return;
             }
-            let lines = chosen
-                .iter()
-                .map(|p| format!("  [{}] {}  →  {}", p.platform, p.old_name, p.new_name))
-                .collect();
-            cx.dialog.confirm(
-                format!("Rename {} game(s) to standard names?", chosen.len()),
-                lines,
-                Pending::Standardize(chosen),
-            );
+            let named = chosen.into_iter().map(|p| (p.old_name.clone(), Ok(p)));
+            cx.planned(Batch::planned(named));
         }
         _ => {}
     }

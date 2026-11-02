@@ -205,20 +205,6 @@ impl Text for RemoveReport {
     }
 }
 
-/// Plan renderings as standalone strings for the TUI's confirm dialogs
-/// (`Reader::Tui`: no CLI flags in the text).
-pub fn install_plan_text(plan: &InstallPlan) -> String {
-    let mut s = String::new();
-    install_plan(&mut s, plan, Reader::Tui);
-    s
-}
-
-pub fn remove_plan_text(plan: &UninstallPlan) -> String {
-    let mut s = String::new();
-    remove_plan(&mut s, plan);
-    s
-}
-
 fn inventory_footer(out: &mut String, status: &InventoryStatus) {
     match status {
         InventoryStatus::Loaded { source: src } => {
@@ -326,7 +312,8 @@ mod tests {
         let mut cli = String::new();
         install_plan(&mut cli, &plan, Reader::Cli);
         assert!(cli.contains("--force"), "{cli}");
-        let tui = install_plan_text(&plan);
+        let mut tui = String::new();
+        install_plan(&mut tui, &plan, Reader::Tui);
         assert!(!tui.contains("--"), "{tui}");
         assert!(tui.contains("nothing to do"), "{tui}");
     }

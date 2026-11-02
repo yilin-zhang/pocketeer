@@ -21,7 +21,6 @@ use pocketeer_core::{
     card::Status,
     card::bios::{self, BiosReport},
     card::cores::{self, CoreList, CoreListReport},
-    card::install::{PlanOptions, Prepared},
     card::memories::Header,
     card::roms::{CardRom, Index},
     catalog::inventory::{Inventory, InventoryLoad},
@@ -33,11 +32,11 @@ use pocketeer_core::{
     },
 };
 
-use super::pending::{Pending, Preview, Request, text_lines};
+use super::pending::{Pending, Planner, Preview, text_lines};
 use crate::{
     ops::{
         context::Context,
-        cores as cores_cmd, library as library_cmd,
+        library as library_cmd,
         memories::{self as memories_cmd, MemoryEntry},
     },
     text::{self, Reader, Text},
@@ -152,19 +151,15 @@ pub enum Job {
         token: Arc<AtomicU64>,
     },
     Load,
-    Plan(Request),
-    Apply(Pending),
+    /// Plan on the worker; the plan comes back as the dialog it opens.
+    Plan(Planner),
+    Apply(Box<dyn Pending>),
     FetchCovers {
         platform: Option<String>,
         /// libretro system name for platforms without a built-in mapping.
         system: Option<String>,
         /// Automatic run: nothing to report when there was nothing to do.
         quiet: bool,
-    },
-    /// Resolve cores against the inventory and download what an install needs.
-    Prepare {
-        inventory: Arc<Inventory>,
-        specs: Vec<String>,
     },
     /// Side worker: cheap change detection (stat only) for auto-refresh.
     Fingerprint,
@@ -186,7 +181,6 @@ pub enum Msg {
     Loaded(Result<Box<Snapshot>>),
     Planned(Result<Preview>),
     Progress(Event),
-    Prepared(Vec<(String, Result<Prepared>)>),
     /// A main-worker job finished.
     Applied(Outcome),
     /// Progress of the side worker (covers); doesn't block anything.
@@ -309,17 +303,13 @@ fn run(ctx: &Context, job: Job, progress: &mut dyn FnMut(Event)) -> Msg {
             }
         }
         Job::Load => Msg::Loaded(load(ctx, progress).map(Box::new)),
-        Job::Plan(request) => Msg::Planned(Pending::plan(ctx, request, progress)),
+        Job::Plan(planner) => Msg::Planned(planner(ctx, progress)),
         Job::Apply(pending) => pending.apply(ctx, progress),
         Job::FetchCovers {
             platform,
             system,
             quiet,
         } => fetch_covers(ctx, platform, system, quiet, progress),
-        Job::Prepare { inventory, specs } => Msg::Prepared(
-            cores_cmd::prepare(ctx, &inventory, &specs, PlanOptions::default(), progress)
-                .unwrap_or_else(|e| vec![(String::new(), Err(e))]),
-        ),
         Job::Fingerprint => Msg::Fingerprint(pocketeer_core::transfer::fingerprint(
             ctx.pocket_opt().as_ref(),
             ctx.library_path().ok().as_deref(),

@@ -5,7 +5,13 @@
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent};
-use pocketeer_core::{card::roms::CardRom, catalog, library::Library, names, transfer::Presence};
+use pocketeer_core::{
+    card::roms::CardRom,
+    catalog,
+    library::{Library, covers},
+    names,
+    transfer::Presence,
+};
 use ratatui::layout::Size;
 use ratatui_image::picker::Picker;
 
@@ -21,10 +27,13 @@ use super::{
     session::Session,
 };
 use crate::{
-    ops::{card::ImportRequest, library as library_ops},
+    ops::{
+        card::{self as card_cmd, ImportRequest},
+        library as library_ops,
+    },
     tui::{
-        pending::{Pending, Request},
-        worker::{GameRow, Job},
+        pending::{self, CardDelete, Import},
+        worker::GameRow,
     },
 };
 
@@ -369,9 +378,11 @@ impl Games {
             return;
         };
         let platform = Some(game.game.platform.clone());
-        let roms = game.game.roms.iter().map(|r| r.id.to_string()).collect();
-        cx.session
-            .submit("Planning copy", Job::Plan(Request::Copy { platform, roms }));
+        let roms: Vec<String> = game.game.roms.iter().map(|r| r.id.to_string()).collect();
+        cx.session.plan("Planning copy", move |ctx, progress| {
+            let plan = card_cmd::plan_copy(ctx, platform.as_deref(), &roms, progress)?;
+            Ok(pending::preview(plan))
+        });
     }
 
     /// `i` / `I`: copy the selected card-only ROM (or all of them) into the library.
@@ -401,8 +412,10 @@ impl Games {
                 }
             }
         };
-        cx.session
-            .submit("Planning import", Job::Plan(Request::CardImport(request)));
+        cx.session.plan("Planning import", move |ctx, progress| {
+            let plan = card_cmd::plan_import(ctx, &request, progress)?;
+            Ok(pending::preview(Import::Card(plan)))
+        });
     }
 
     /// `x`: a library game goes to the library's trash; a card-only ROM is
@@ -412,10 +425,10 @@ impl Games {
             cx.dialog.confirm(
                 format!("Delete {} from the card?", o.name),
                 vec!["The library has no copy; i copies it there first.".into()],
-                Pending::DeleteCardRom {
+                Box::new(CardDelete {
                     name: o.name,
                     path: o.rel_path,
-                },
+                }),
             );
             return;
         }
@@ -426,7 +439,7 @@ impl Games {
         let specs: Vec<String> = game.game.roms.iter().map(|r| r.id.to_string()).collect();
         match library_ops::plan_remove(&cx.session.ctx(), Some(&platform), &specs) {
             Err(e) => cx.dialog.error("Can't remove", &e),
-            Ok(plan) => cx.planned(Pending::LibraryRemove(Box::new(plan))),
+            Ok(plan) => cx.planned(plan),
         }
     }
 
@@ -525,13 +538,13 @@ pub fn answer(cx: &mut Cx, step: CoverStep, answer: Answer) {
         return;
     }
     match step {
-        CoverStep::Image { game_id } => cx.session.submit(
-            "Checking cover image",
-            Job::Plan(Request::ImportCover {
-                game_id,
-                source: PathBuf::from(expand_home(value)),
-            }),
-        ),
+        CoverStep::Image { game_id } => {
+            let source = PathBuf::from(expand_home(value));
+            cx.session.plan("Checking cover image", move |ctx, _| {
+                let plan = covers::import::plan(&ctx.library()?, game_id, &source)?;
+                Ok(pending::preview(plan))
+            })
+        }
         CoverStep::System { platform } => cx
             .session
             .fetch_covers(Some(platform), Some(value.to_string())),
