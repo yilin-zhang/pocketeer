@@ -9,8 +9,8 @@ use serde::Serialize;
 
 use crate::{ops, output::SCHEMA_VERSION};
 
-/// Manage cores, ROMs and saves for an Analogue Pocket: a local library, the
-/// cards it syncs to, and the SD card itself.
+/// Manage cores, ROMs and saves for an Analogue Pocket: a ROM library on
+/// this computer, and the SD card you copy ROMs to and back up saves from.
 ///
 /// Run without a subcommand to open the TUI.
 /// With --json, every command prints exactly one JSON object to stdout:
@@ -99,7 +99,7 @@ pub enum Command {
     /// BIOS and other files cores need.
     #[command(subcommand)]
     Bios(BiosCommand),
-    /// The local library: the source of truth your cards are synced from.
+    /// The ROM library on this computer: import, identify, rename, remove.
     #[command(subcommand)]
     Library(LibraryCommand),
     /// Inspect and manage the mounted card by content identity.
