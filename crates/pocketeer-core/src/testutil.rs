@@ -80,14 +80,12 @@ pub(crate) fn library_on(platform: &str, files: &[(&str, &str)]) -> (tempfile::T
     for (name, body) in files {
         write(&src, name, body);
     }
-    let opts = ImportOptions {
-        platform: platform.into(),
-        platform_name: None,
-        dat_only: false,
-    };
-    let plan = import::plan_import(
+    let opts = ImportOptions::default();
+    let plan = import::plan_folder(
         &lib,
         &src,
+        Some(platform),
+        &[],
         &opts,
         None,
         &mut HashCache::in_memory(),

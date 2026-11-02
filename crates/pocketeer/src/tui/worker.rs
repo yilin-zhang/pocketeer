@@ -376,7 +376,7 @@ fn fetch_covers(
 ) -> Msg {
     let report = match library_cmd::covers_fetch(
         ctx,
-        platform.as_deref(),
+        platform.as_ref().map(std::slice::from_ref),
         false,
         system.as_deref(),
         progress,

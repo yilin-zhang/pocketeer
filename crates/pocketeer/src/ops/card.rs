@@ -13,13 +13,13 @@ use pocketeer_core::{
         roms::{CardRom, Index},
     },
     catalog::inventory::{Inventory, Platforms},
-    library::{covers::FetchReport, import::ImportOptions},
+    library::import::{ImportPlan, ImportResult},
     names::RenameKind,
     net::{Policy, Source},
     plan::{Event, Progress},
     transfer::{
         self, Comparison,
-        from_card::{self, CardImportPlan, PlatformImport},
+        from_card::{self, CardImportPlan},
         to_card,
     },
 };
@@ -28,8 +28,8 @@ use serde::Serialize;
 use super::{
     Apply, Mode, Staged, apply_actions,
     context::Context,
-    library::{ImportSettings, metadata_after_import, suggest_standard_names},
-    load_dat, stage, stage_if, verdict,
+    library::{ImportSettings, Imported, ImportsRoms, suggest_standard_names},
+    load_dat, stage,
 };
 use crate::output::Outcome;
 
@@ -232,27 +232,8 @@ pub struct ImportRequest {
     pub settings: ImportSettings,
 }
 
-#[derive(Serialize)]
-pub struct ImportReport {
-    #[serde(flatten)]
-    pub staged: Staged<CardImportPlan>,
-    /// Names asked for that aren't orphans on the card.
-    pub not_found: Vec<PathBuf>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub covers: Option<FetchReport>,
-    /// Problems identifying or fetching covers for the new games.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
-}
-
-impl Outcome for ImportReport {
-    fn error(&self) -> Option<Error> {
-        verdict(
-            self.staged.changes(),
-            self.staged.failed() + self.not_found.len(),
-        )
-    }
-}
+/// `not_found` is in the plan: names asked for that aren't card-only ROMs.
+pub type ImportReport = Imported<CardImportPlan>;
 
 /// Plans copying card-only ROMs into the library, plus the names asked for
 /// that aren't orphans on the card.
@@ -260,7 +241,7 @@ pub fn plan_import(
     ctx: &Context,
     req: &ImportRequest,
     progress: &mut dyn FnMut(Event),
-) -> Result<(CardImportPlan, Vec<PathBuf>)> {
+) -> Result<CardImportPlan> {
     let lib = ctx.library()?;
     let pocket = ctx.pocket()?;
     let dat = load_dat(req.settings.dat.as_deref())?;
@@ -285,26 +266,35 @@ pub fn plan_import(
         &lib,
         &pocket,
         &roms,
+        not_found,
         dat.as_ref(),
-        &|id| ImportOptions {
-            platform: id.into(),
-            platform_name: ctx.platform_name(id),
-            dat_only: req.settings.dat_only,
-        },
+        &req.settings.options(ctx),
         &mut ctx.hash_cache(),
         progress,
     )?;
-    for part in &mut plan.parts {
-        suggest_standard_names(ctx, &lib, part, req.settings.standard_names)?;
-    }
-    Ok((plan, not_found))
+    suggest_standard_names(ctx, &lib, &mut plan.plan, req.settings.standard_names)?;
+    Ok(plan)
 }
 
 /// Copies the planned ROMs into the library. The card itself is not changed.
 impl Apply for CardImportPlan {
-    type Output = Vec<PlatformImport>;
+    type Output = ImportResult;
     fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<Self::Output> {
         from_card::apply_import(&mut ctx.library()?, &ctx.pocket()?, self, progress)
+    }
+}
+
+impl ImportsRoms for CardImportPlan {
+    fn import(&self) -> &ImportPlan {
+        &self.plan
+    }
+
+    fn import_mut(&mut self) -> &mut ImportPlan {
+        &mut self.plan
+    }
+
+    fn not_found(&self) -> &[PathBuf] {
+        &self.not_found
     }
 }
 
@@ -314,18 +304,6 @@ pub fn import(
     mode: Mode,
     progress: &mut dyn FnMut(Event),
 ) -> Result<ImportReport> {
-    let (plan, not_found) = plan_import(ctx, req, progress)?;
-    let staged = stage_if(ctx, mode, not_found.is_empty(), plan, progress)?;
-    let added = staged
-        .result
-        .as_ref()
-        .map_or(0, |r| r.iter().map(|p| p.result.added).sum());
-    let metadata = metadata_after_import(ctx, None, (added, req.settings.covers), progress)
-        .unwrap_or_default();
-    Ok(ImportReport {
-        staged,
-        not_found,
-        warnings: metadata.problems().map(str::to_owned).collect(),
-        covers: metadata.covers,
-    })
+    let plan = plan_import(ctx, req, progress)?;
+    Imported::stage(ctx, mode, plan, req.settings.covers, progress)
 }

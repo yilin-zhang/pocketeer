@@ -1,13 +1,13 @@
 //! Text for `ops::library`.
 
-use std::fmt::Write;
+use std::{collections::BTreeMap, fmt::Write};
 
 use pocketeer_core::{
     library::{
         Status as LibraryStatus,
         covers::{CoverStatus, FetchReport},
         identify,
-        import::{ImportAction, ImportPlan, ImportResult, ImportSkip},
+        import::{ImportAction, ImportPlan, ImportSkip},
     },
     plan::Plan,
 };
@@ -19,8 +19,8 @@ use super::{
 use crate::ops::{
     Mode,
     library::{
-        CoverImportReport, CoversStatusReport, ImportReport, InitReport, ListReport,
-        MetadataReport, RemoveReport, RenameReport, SortedImportReport, StandardizeReport,
+        CoverImportReport, CoversStatusReport, Imported, ImportsRoms, InitReport, ListReport,
+        MetadataReport, RemoveReport, RenameReport, StandardizeReport,
     },
 };
 
@@ -168,30 +168,70 @@ pub fn library_status(s: &LibraryStatus) -> String {
     out
 }
 
-pub fn library_import(r: &ImportReport) -> String {
+/// `library import` and `card import`: what each platform gets, what is left
+/// out, then what applying did.
+pub fn import_report<P: ImportsRoms>(r: &Imported<P>) -> String {
     let mut out = String::new();
-    let p = &r.staged.plan;
-    let _ = writeln!(out, "{}  →  library/{} (copy)", p.dir.display(), p.platform);
-    let skipped = import_actions(&mut out, p.actions.iter());
-    let s = &p.summary;
+    let p = r.staged.plan.import();
+    let not_found = r.staged.plan.not_found();
     let _ = writeln!(
         out,
-        "{} to add ({} verified, {} unverified, {}){}",
-        s.add,
-        s.verified,
-        s.unverified,
-        bytes(s.bytes),
-        skipped_summary(&skipped)
+        "{}  →  library (copies; the source stays)",
+        p.dir.display()
     );
+    let mut skipped = BTreeMap::new();
+    for platform in p.platforms() {
+        let actions = p.actions.iter().filter(|a| a.platform() == platform);
+        // Platforms with nothing new show up only in the skipped count.
+        if actions
+            .clone()
+            .any(|a| matches!(a, ImportAction::Add { .. }))
+        {
+            let _ = writeln!(out, "[{platform}]");
+        }
+        for (reason, n) in import_actions(&mut out, actions) {
+            *skipped.entry(reason).or_default() += n;
+        }
+    }
+    let s = &p.summary;
+    if s.add + s.skip > 0 {
+        let _ = writeln!(
+            out,
+            "{} to add ({} verified, {} unverified, {}){}",
+            s.add,
+            s.verified,
+            s.unverified,
+            bytes(s.bytes),
+            skipped_summary(&skipped)
+        );
+    }
+    for n in not_found {
+        let _ = writeln!(out, "✗ {}: not an unmatched ROM on this card", n.display());
+    }
+    if !p.unknown.is_empty() {
+        let _ = writeln!(
+            out,
+            "Left out, type unknown ({}){}:",
+            p.unknown.len(),
+            if r.staged.mode == Mode::Interactive {
+                ""
+            } else {
+                "; import them with --platform"
+            }
+        );
+        plan_lines(&mut out, p.unknown.iter().map(|u| format!("  {u}")));
+    }
     if r.staged.result.is_none() && p.changes() > 0 {
         suggestion_footer(&mut out, r.staged.mode, p.actions.iter());
     }
+    // Nothing is applied while a name is missing, so no footer then either.
+    let changes = if not_found.is_empty() { p.changes() } else { 0 };
     staged_footer(
         &mut out,
         r.staged.mode,
         r.staged.result.as_ref(),
-        p.changes(),
-        "Nothing to do.",
+        changes,
+        "Nothing to import.",
         |out, res| {
             let _ = writeln!(
                 out,
@@ -210,6 +250,7 @@ pub fn library_import(r: &ImportReport) -> String {
             for f in &res.failed {
                 let _ = writeln!(out, "✗ {}: {}", f.source.display(), f.error.message);
             }
+            warning_lines(out, &res.warnings);
             covers_summary(out, r.covers.as_ref(), r.staged.mode);
             warning_lines(out, &r.warnings);
         },
@@ -451,13 +492,13 @@ pub fn cover_import(staged: &CoverImportReport) -> String {
 /// A folder import in a few lines, for the TUI's dialog: per platform how
 /// many files are new (and their names), what is already there, and the
 /// files left out because their type isn't known.
-pub fn import_brief(parts: &[ImportPlan], unknown: &[String]) -> Vec<String> {
+pub fn import_brief(plan: &ImportPlan) -> Vec<String> {
     const NAMES: usize = 6;
     let mut lines = Vec::new();
-    for plan in parts {
+    for platform in plan.platforms() {
         let mut new = Vec::new();
         let (mut there, mut other) = (0, 0);
-        for a in &plan.actions {
+        for a in plan.actions.iter().filter(|a| a.platform() == platform) {
             match a {
                 ImportAction::Add { rom, .. } => new.push(rom.as_str()),
                 ImportAction::Skip {
@@ -476,7 +517,7 @@ pub fn import_brief(parts: &[ImportPlan], unknown: &[String]) -> Vec<String> {
         }
         lines.push(format!(
             "{:<8}{}",
-            plan.platform.to_uppercase(),
+            platform.to_uppercase(),
             counts.join(", ")
         ));
         for name in new.iter().take(NAMES) {
@@ -486,6 +527,7 @@ pub fn import_brief(parts: &[ImportPlan], unknown: &[String]) -> Vec<String> {
             lines.push(format!("        … and {} more", new.len() - NAMES));
         }
     }
+    let unknown = &plan.unknown;
     if !unknown.is_empty() {
         let names: Vec<&str> = unknown
             .iter()
@@ -503,39 +545,4 @@ pub fn import_brief(parts: &[ImportPlan], unknown: &[String]) -> Vec<String> {
         ));
     }
     lines
-}
-
-/// One platform of a finished TUI import, in a line.
-pub fn import_done(platform: &str, r: &ImportResult) -> String {
-    let mut line = format!("✓ {}: added {}", platform.to_uppercase(), r.added);
-    if !r.duplicates.is_empty() {
-        let _ = write!(line, ", {} already there", r.duplicates.len());
-    }
-    for f in &r.failed {
-        let _ = write!(line, "\n✗ {}: {}", f.source.display(), f.error.message);
-    }
-    line
-}
-
-/// `library import` without `--platform`: each platform's report in turn.
-pub fn library_import_sorted(r: &SortedImportReport) -> String {
-    let mut out = String::new();
-    if r.parts.is_empty() && r.unknown.is_empty() {
-        let _ = writeln!(out, "No ROM files found.");
-    }
-    for part in &r.parts {
-        out.push_str(&library_import(part));
-        out.push('\n');
-    }
-    if !r.unknown.is_empty() {
-        let _ = writeln!(
-            out,
-            "Left out, type unknown ({}); import them with --platform:",
-            r.unknown.len()
-        );
-        for u in &r.unknown {
-            let _ = writeln!(out, "  {u}");
-        }
-    }
-    out
 }

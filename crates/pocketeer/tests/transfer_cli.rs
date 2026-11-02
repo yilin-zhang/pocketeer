@@ -62,7 +62,7 @@ fn import_selects_an_exact_nested_path() {
         "--dry-run",
     ]);
     assert_eq!(code, 0, "{preview}");
-    assert_eq!(preview["data"]["parts"][0]["summary"]["add"], 1);
+    assert_eq!(preview["data"]["summary"]["add"], 1);
     let (result, code) = env.json(&["card", "import", "Assets/fkh/common/two/game.fkh"]);
     assert_eq!(code, 0, "{result}");
     assert_eq!(

@@ -8,7 +8,7 @@ use pocketeer_core::{
     library::{
         self, Game, Library,
         covers::{self, CoverStats, FetchOptions, FetchReport},
-        import::{self, ImportOptions, ImportPlan, ImportResult},
+        import::{self, ImportAction, ImportOptions, ImportPlan, ImportResult},
         remove::{self, RemovePlan, RemoveResult},
         rename::{self, RenamePlan, RenameResult},
     },
@@ -16,7 +16,7 @@ use pocketeer_core::{
 };
 use serde::Serialize;
 
-use super::{Apply, Batch, Mode, Staged, context::Context, load_dat, stage};
+use super::{Apply, Batch, Mode, Staged, context::Context, load_dat, stage, stage_if};
 use crate::output::Outcome;
 
 #[derive(Debug, Serialize)]
@@ -38,11 +38,35 @@ pub fn status(ctx: &Context) -> Result<library::Status> {
     ctx.library()?.status()
 }
 
+/// What an import did: the plan (and its result), then the identification
+/// and cover fetch that follow when games were added. The same for a folder
+/// import and a card import.
+/// A plan that copies ROMs into the library: from a folder on this
+/// computer ([`ImportPlan`]) or from the card (`CardImportPlan`).
+pub trait ImportsRoms: Apply<Output = ImportResult> {
+    fn import(&self) -> &ImportPlan;
+    fn import_mut(&mut self) -> &mut ImportPlan;
+    /// Card paths asked for that aren't there; nothing runs while any are.
+    fn not_found(&self) -> &[PathBuf] {
+        &[]
+    }
+}
+
+impl ImportsRoms for ImportPlan {
+    fn import(&self) -> &ImportPlan {
+        self
+    }
+
+    fn import_mut(&mut self) -> &mut ImportPlan {
+        self
+    }
+}
+
 #[derive(Serialize)]
-pub struct ImportReport {
+pub struct Imported<P: Apply> {
     #[serde(flatten)]
-    pub staged: Staged<ImportPlan>,
-    /// Covers fetched for the imported platform afterwards (online only).
+    pub staged: Staged<P>,
+    /// Covers fetched for the new games afterwards (online only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub covers: Option<FetchReport>,
     /// Problems identifying or fetching covers for the new games; the
@@ -51,11 +75,45 @@ pub struct ImportReport {
     pub warnings: Vec<String>,
 }
 
-impl Outcome for ImportReport {
+impl<P: ImportsRoms> Imported<P> {
+    /// Stages `plan`, then identifies and fetches covers for what it added.
+    pub fn stage(
+        ctx: &Context,
+        mode: Mode,
+        plan: P,
+        covers: bool,
+        progress: Progress<'_>,
+    ) -> Result<Self> {
+        let allowed = plan.not_found().is_empty();
+        // Only the platforms that get games need identifying afterwards.
+        let platforms: Vec<String> = plan
+            .import()
+            .actions
+            .iter()
+            .filter(|a| matches!(a, ImportAction::Add { .. }))
+            .map(|a| a.platform().to_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let staged = stage_if(ctx, mode, allowed, plan, progress)?;
+        let added = staged.result.as_ref().map_or(0, |r| r.added);
+        let metadata =
+            metadata_after_import(ctx, &platforms, (added, covers), progress).unwrap_or_default();
+        Ok(Imported {
+            staged,
+            warnings: metadata.problems().map(str::to_owned).collect(),
+            covers: metadata.covers,
+        })
+    }
+}
+
+impl<P: Apply> Outcome for Imported<P> {
     fn error(&self) -> Option<Error> {
         self.staged.error()
     }
 }
+
+pub type ImportReport = Imported<ImportPlan>;
 
 /// How an import treats its files, wherever they come from (a folder or
 /// the card).
@@ -82,13 +140,23 @@ impl Default for ImportSettings {
     }
 }
 
-/// What `library import --platform` was asked to do.
+/// What `library import` was asked to do.
 #[derive(Debug, Clone)]
 pub struct ImportRequest {
     /// A folder of ROMs (scanned recursively) or one ROM / zip.
     pub source: PathBuf,
-    pub platform: String,
+    /// Every file is this platform's; without it each file's extension says.
+    pub platform: Option<String>,
     pub settings: ImportSettings,
+}
+
+impl ImportSettings {
+    pub(super) fn options(&self, ctx: &Context) -> ImportOptions {
+        ImportOptions {
+            dat_only: self.dat_only,
+            platform_names: ctx.platform_names(),
+        }
+    }
 }
 
 /// What re-checking the library's metadata did: DAT identification, then
@@ -124,21 +192,21 @@ impl MetadataReport {
     }
 }
 
-/// Identifies `platform`'s ROMs (all platforms when `None`) against DATs,
-/// then fetches missing covers if `covers` is set and we're online.
+/// Identifies the ROMs of `platforms` (all when `None`) against DATs, then
+/// fetches missing covers if `covers` is set and we're online.
 pub fn refresh_metadata(
     ctx: &Context,
-    platform: Option<&str>,
+    platforms: Option<&[String]>,
     covers: bool,
     progress: &mut dyn FnMut(Event),
 ) -> MetadataReport {
     let mut report = MetadataReport::default();
-    match identify(ctx, platform, progress) {
+    match identify(ctx, platforms, progress) {
         Ok(r) => report.identify = Some(r),
         Err(e) => report.errors.push(format!("DAT check: {e}")),
     }
     if covers && !ctx.offline() {
-        match covers_fetch(ctx, platform, false, None, progress) {
+        match covers_fetch(ctx, platforms, false, None, progress) {
             Ok(c) => report.covers = Some(c),
             Err(e) => report.errors.push(format!("Covers: {e}")),
         }
@@ -150,11 +218,11 @@ pub fn refresh_metadata(
 /// Nothing happens when the import added none.
 pub fn metadata_after_import(
     ctx: &Context,
-    platform: Option<&str>,
+    platforms: &[String],
     (added, covers): (usize, bool),
     progress: &mut dyn FnMut(Event),
 ) -> Option<MetadataReport> {
-    (added > 0).then(|| refresh_metadata(ctx, platform, covers, progress))
+    (added > 0).then(|| refresh_metadata(ctx, Some(platforms), covers, progress))
 }
 
 /// Standard-name list for a platform (online only; `None` means no suggestions).
@@ -179,13 +247,36 @@ pub fn suggest_standard_names(
     plan: &mut ImportPlan,
     take: bool,
 ) -> Result<()> {
-    if let Some(names) = names_for(ctx, &plan.platform)
-        && import::suggest_names(plan, &names) > 0
-        && take
-    {
-        import::apply_suggestions(lib, plan, |_| true)?;
+    let platforms: Vec<String> = plan.platforms().into_iter().map(str::to_owned).collect();
+    let mut suggested = 0;
+    for platform in platforms {
+        if let Some(names) = names_for(ctx, &platform) {
+            suggested += import::suggest_names(plan, &platform, &names);
+        }
+    }
+    if suggested > 0 && take {
+        import::apply_suggestions(lib, plan, |_, _| true)?;
     }
     Ok(())
+}
+
+/// Platform ids the library holds, plus those the card's cores run: what a
+/// file extension may name.
+pub fn known_platforms(ctx: &Context) -> Result<Vec<String>> {
+    let mut ids: Vec<String> = ctx
+        .library()?
+        .platform_stats()?
+        .into_iter()
+        .map(|p| p.platform)
+        .collect();
+    if let Ok(pocket) = ctx.pocket() {
+        for core in pocketeer_core::card::cores::list_installed(&pocket)?.cores {
+            ids.extend(core.platform_ids);
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
 }
 
 /// Plans an import: what would be added, skipped, and (when online) which
@@ -193,78 +284,22 @@ pub fn suggest_standard_names(
 pub fn plan_import(
     ctx: &Context,
     req: &ImportRequest,
-    progress: &mut dyn FnMut(Event),
+    progress: Progress<'_>,
 ) -> Result<ImportPlan> {
     let lib = ctx.library()?;
     let dat = load_dat(req.settings.dat.as_deref())?;
-    let opts = ImportOptions {
-        platform: req.platform.clone(),
-        platform_name: ctx.platform_name(&req.platform),
-        dat_only: req.settings.dat_only,
-    };
-    let mut plan = import::plan_import(
+    let mut plan = import::plan_folder(
         &lib,
         &req.source,
-        &opts,
+        req.platform.as_deref(),
+        &known_platforms(ctx)?,
+        &req.settings.options(ctx),
         dat.as_ref(),
         &mut ctx.hash_cache(),
         progress,
     )?;
     suggest_standard_names(ctx, &lib, &mut plan, req.settings.standard_names)?;
     Ok(plan)
-}
-
-/// What a folder holds, sorted by platform: one import plan per platform
-/// the file extensions name, and the files whose platform they don't.
-pub struct SortedImport {
-    pub parts: Vec<ImportPlan>,
-    /// Files no extension rule recognised, relative to the folder.
-    pub unknown: Vec<String>,
-}
-
-/// Plans importing `source` with each file's platform taken from its
-/// extension (`known`: platform ids the library or card already use).
-/// Files it can't place go to `fallback` when given, else into `unknown`.
-pub fn plan_import_sorted(
-    ctx: &Context,
-    source: &Path,
-    known: &[String],
-    fallback: Option<&str>,
-    standard_names: bool,
-    progress: &mut dyn FnMut(Event),
-) -> Result<SortedImport> {
-    let lib = ctx.library()?;
-    let (dir, candidates) = pocketeer_core::library::import::scan_source(source)?;
-    let mut groups: std::collections::BTreeMap<String, Vec<_>> = Default::default();
-    let mut unknown = Vec::new();
-    for c in candidates {
-        let platform = pocketeer_core::catalog::platform_of(&c.file.display_name(), known)
-            .or_else(|| fallback.map(str::to_owned));
-        match platform {
-            Some(p) => groups.entry(p).or_default().push(c),
-            None => unknown.push(c.file.location()),
-        }
-    }
-    let mut parts = Vec::new();
-    for (platform, files) in groups {
-        let opts = ImportOptions {
-            platform_name: ctx.platform_name(&platform),
-            platform: platform.clone(),
-            dat_only: false,
-        };
-        let mut plan = import::plan_import_candidates(
-            &lib,
-            &dir,
-            &files,
-            &opts,
-            None,
-            &mut ctx.hash_cache(),
-            progress,
-        )?;
-        suggest_standard_names(ctx, &lib, &mut plan, standard_names)?;
-        parts.push(plan);
-    }
-    Ok(SortedImport { parts, unknown })
 }
 
 impl Apply for ImportPlan {
@@ -278,74 +313,10 @@ pub fn import(
     ctx: &Context,
     req: &ImportRequest,
     mode: Mode,
-    progress: &mut dyn FnMut(Event),
+    progress: Progress<'_>,
 ) -> Result<ImportReport> {
     let plan = plan_import(ctx, req, progress)?;
-    let staged = stage(ctx, mode, plan, progress)?;
-    let added = staged.result.as_ref().map_or(0, |r| r.added);
-    let metadata = metadata_after_import(
-        ctx,
-        Some(&req.platform),
-        (added, req.settings.covers),
-        progress,
-    )
-    .unwrap_or_default();
-    Ok(ImportReport {
-        staged,
-        warnings: metadata.problems().map(str::to_owned).collect(),
-        covers: metadata.covers,
-    })
-}
-
-/// `library import` without `--platform`: one report per platform the
-/// file extensions name, and the files they don't.
-#[derive(Serialize)]
-pub struct SortedImportReport {
-    pub parts: Vec<ImportReport>,
-    /// Files whose platform couldn't be told; give `--platform` for them.
-    pub unknown: Vec<String>,
-}
-
-impl Outcome for SortedImportReport {
-    fn error(&self) -> Option<Error> {
-        self.parts.iter().find_map(|p| p.error())
-    }
-}
-
-/// `library import` without `--platform`: each file's platform comes from
-/// its extension.
-pub fn import_sorted(
-    ctx: &Context,
-    source: &Path,
-    standard_names: bool,
-    covers: bool,
-    mode: Mode,
-    progress: &mut dyn FnMut(Event),
-) -> Result<SortedImportReport> {
-    let known: Vec<String> = ctx
-        .library()?
-        .platform_stats()?
-        .into_iter()
-        .map(|p| p.platform)
-        .collect();
-    let sorted = plan_import_sorted(ctx, source, &known, None, standard_names, progress)?;
-    let mut parts = Vec::new();
-    for plan in sorted.parts {
-        let platform = plan.platform.clone();
-        let staged = stage(ctx, mode, plan, progress)?;
-        let added = staged.result.as_ref().map_or(0, |r| r.added);
-        let metadata = metadata_after_import(ctx, Some(&platform), (added, covers), progress)
-            .unwrap_or_default();
-        parts.push(ImportReport {
-            staged,
-            warnings: metadata.problems().map(str::to_owned).collect(),
-            covers: metadata.covers,
-        });
-    }
-    Ok(SortedImportReport {
-        parts,
-        unknown: sorted.unknown,
-    })
+    Imported::stage(ctx, mode, plan, req.settings.covers, progress)
 }
 
 #[derive(Debug, Serialize)]
@@ -474,7 +445,7 @@ impl Outcome for library::identify::Report {
 
 pub fn identify(
     ctx: &Context,
-    platform: Option<&str>,
+    platforms: Option<&[String]>,
     progress: &mut dyn FnMut(Event),
 ) -> Result<library::identify::Report> {
     let policy = match ctx.policy() {
@@ -490,7 +461,7 @@ pub fn identify(
         library::identify::Options {
             policy,
             base: ctx.dat_base(),
-            platform,
+            platforms,
         },
         progress,
     )
@@ -498,7 +469,7 @@ pub fn identify(
 
 pub fn covers_fetch(
     ctx: &Context,
-    platform: Option<&str>,
+    platforms: Option<&[String]>,
     retry: bool,
     system: Option<&str>,
     progress: &mut dyn FnMut(Event),
@@ -506,7 +477,7 @@ pub fn covers_fetch(
     let lib = ctx.library()?;
     let http = ctx.http()?;
     let opts = FetchOptions {
-        platform: platform.map(str::to_owned),
+        platforms: platforms.map(<[String]>::to_vec),
         retry_missing: retry,
         system: system.map(str::to_owned),
     };

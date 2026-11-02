@@ -101,7 +101,8 @@ pub struct FetchReport {
 
 #[derive(Debug, Clone, Default)]
 pub struct FetchOptions {
-    pub platform: Option<String>,
+    /// Only these platforms (all when `None`).
+    pub platforms: Option<Vec<String>>,
     /// Retry games previously marked `none`.
     pub retry_missing: bool,
     /// Override the libretro system name (for platforms not in [`crate::catalog::SYSTEMS`]).
@@ -137,7 +138,14 @@ pub fn fetch(
     base: &str,
     progress: Progress<'_>,
 ) -> Result<FetchReport> {
-    let games = db::list_games(lib.conn(), opts.platform.as_deref(), None)?;
+    let games: Vec<_> = db::list_games(lib.conn(), None, None)?
+        .into_iter()
+        .filter(|g| {
+            opts.platforms
+                .as_ref()
+                .is_none_or(|ps| ps.contains(&g.platform))
+        })
+        .collect();
     let mut report = FetchReport::default();
     let todo: Vec<_> = games
         .iter()
@@ -374,7 +382,7 @@ mod tests {
         // Point the fetcher at the mock by overriding the system *and* base.
         let http = Http::new(None).unwrap();
         let opts = FetchOptions {
-            platform: Some("gba".into()),
+            platforms: Some(vec!["gba".into()]),
             retry_missing: false,
             system: Some("Sys".into()),
         };

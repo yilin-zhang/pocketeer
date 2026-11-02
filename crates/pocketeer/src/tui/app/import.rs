@@ -105,14 +105,9 @@ pub fn answer(cx: &mut Cx, step: Step, answer: Answer) {
 }
 
 fn plan(cx: &mut Cx, source: PathBuf, platform: Option<String>) {
-    let known = cx.session.known_platforms();
     cx.session.submit(
         "Reading the folder",
-        Job::Plan(Request::ImportFolder {
-            source,
-            platform,
-            known,
-        }),
+        Job::Plan(Request::ImportFolder { source, platform }),
     );
 }
 

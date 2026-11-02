@@ -147,34 +147,20 @@ fn run_library(
 ) -> ExitCode {
     match cmd {
         LibraryCommand::Identify { platform } => out.emit_outcome(
-            library::identify(ctx, platform.as_deref(), progress),
+            library::identify(ctx, platform.as_ref().map(std::slice::from_ref), progress),
             text::library::identify_text,
         ),
         LibraryCommand::Init => out.emit(library::init(ctx), text::library::library_init),
         LibraryCommand::Status => out.emit(library::status(ctx), text::library::library_status),
         LibraryCommand::Import(args) => {
-            let mode = args.apply.into();
-            let Some(platform) = args.platform else {
-                return out.emit_outcome(
-                    library::import_sorted(
-                        ctx,
-                        &args.dir,
-                        args.flags.standard_names,
-                        !args.flags.no_covers,
-                        mode,
-                        progress,
-                    ),
-                    text::library::library_import_sorted,
-                );
-            };
             let req = library::ImportRequest {
                 source: args.dir,
-                platform,
+                platform: args.platform,
                 settings: args.flags.into(),
             };
             out.emit_outcome(
-                library::import(ctx, &req, mode, progress),
-                text::library::library_import,
+                library::import(ctx, &req, args.apply.into(), progress),
+                text::library::import_report,
             )
         }
         LibraryCommand::List { platform, query } => out.emit(
@@ -228,7 +214,7 @@ fn run_covers(
         } => out.emit(
             library::covers_fetch(
                 ctx,
-                platform.as_deref(),
+                platform.as_ref().map(std::slice::from_ref),
                 retry,
                 libretro_system.as_deref(),
                 progress,
@@ -271,7 +257,7 @@ fn run_card(
             let mode = args.apply.into();
             out.emit_outcome(
                 card::import(ctx, &args.into(), mode, progress),
-                text::card::import_report,
+                text::library::import_report,
             )
         }
         CardCommand::List => {

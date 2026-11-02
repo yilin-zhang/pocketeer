@@ -8,7 +8,10 @@
 //! "different file, same name"), and everything else is hashed while it is
 //! copied. Content duplicates found that late are dropped again.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
 
 use serde::Serialize;
 
@@ -30,19 +33,20 @@ use super::{
 
 pub use crate::fsutil::scan::scan_source;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// How an import is planned.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ImportOptions {
-    pub platform: String,
-    /// Display name for the platform, if known (from the inventory).
-    pub platform_name: Option<String>,
     /// With a DAT: skip files it doesn't know instead of importing them unverified.
     pub dat_only: bool,
+    /// Display names of platforms, where known (from the inventory).
+    pub platform_names: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ImportAction {
     Add {
+        platform: String,
         source: PathBuf,
         #[serde(skip_serializing_if = "Option::is_none")]
         inner: Option<String>,
@@ -64,6 +68,7 @@ pub enum ImportAction {
         suggested: Option<String>,
     },
     Skip {
+        platform: String,
         source: String,
         reason: ImportSkip,
     },
@@ -103,12 +108,15 @@ pub struct ImportSummary {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ImportPlan {
     pub dir: PathBuf,
-    pub platform: String,
-    /// Display name for the platform, if known (from the inventory).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub platform_name: Option<String>,
+    /// Every file's action, grouped by platform.
     pub actions: Vec<ImportAction>,
     pub summary: ImportSummary,
+    /// Files whose platform their extension doesn't say, left out.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unknown: Vec<String>,
+    /// Display names for the platforms it adds to, recorded on apply.
+    #[serde(skip)]
+    platform_names: BTreeMap<String, String>,
 }
 
 impl Plan for ImportPlan {
@@ -118,16 +126,31 @@ impl Plan for ImportPlan {
 }
 
 impl ImportPlan {
-    /// Every (current name, suggested standard name) among the planned adds.
-    pub fn suggestions(&self) -> impl Iterator<Item = (&str, &str)> {
+    /// The platforms the plan has files for, in order.
+    pub fn platforms(&self) -> BTreeSet<&str> {
+        self.actions.iter().map(ImportAction::platform).collect()
+    }
+
+    /// Every (platform, current name, suggested standard name) among the
+    /// planned adds.
+    pub fn suggestions(&self) -> impl Iterator<Item = (&str, &str, &str)> {
         self.actions.iter().filter_map(|a| match a {
             ImportAction::Add {
+                platform,
                 rom,
                 suggested: Some(s),
                 ..
-            } => Some((rom.as_str(), s.as_str())),
+            } => Some((platform.as_str(), rom.as_str(), s.as_str())),
             _ => None,
         })
+    }
+}
+
+impl ImportAction {
+    pub fn platform(&self) -> &str {
+        match self {
+            ImportAction::Add { platform, .. } | ImportAction::Skip { platform, .. } => platform,
+        }
     }
 }
 
@@ -136,33 +159,52 @@ pub fn fallback_game_name(rom_name: &str) -> String {
     crate::fsutil::names::stem(rom_name).to_string()
 }
 
-/// Plans importing every ROM-ish file under `dir` (recursively, zips included).
-/// `source` is a folder of ROMs (scanned recursively) or one ROM / zip.
-pub fn plan_import(
+/// Plans importing a folder of ROMs (scanned recursively) or one ROM / zip.
+/// With `platform` every file is that platform's; otherwise each file's
+/// extension says (`known`: platform ids the library or card already use),
+/// and the files it can't place are listed as unknown.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_folder(
     lib: &Library,
     source: &Path,
+    platform: Option<&str>,
+    known: &[String],
     opts: &ImportOptions,
     dat: Option<&Dat>,
     cache: &mut HashCache,
     progress: Progress<'_>,
 ) -> Result<ImportPlan> {
     let (dir, candidates) = scan_source(source)?;
-    plan_import_candidates(lib, &dir, &candidates, opts, dat, cache, progress)
+    let mut groups: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
+    let mut unknown = Vec::new();
+    for c in candidates {
+        let found = match platform {
+            Some(p) => Some(p.to_string()),
+            None => crate::catalog::platform_of(&c.file.display_name(), known),
+        };
+        match found {
+            Some(p) => groups.entry(p).or_default().push(c),
+            None => unknown.push(c.file.location()),
+        }
+    }
+    let mut plan = plan_import(lib, &dir, &groups, opts, dat, cache, progress)?;
+    plan.unknown = unknown;
+    Ok(plan)
 }
 
-/// Plans importing specific files, given relative to `dir` (the card's root
-/// when importing from a device). `opts` only shapes the plan: applying it
-/// needs nothing else.
-pub fn plan_import_candidates(
+/// Plans importing files given relative to `dir` (the card's root when
+/// importing from it), grouped by platform. `opts` only shapes the plan:
+/// applying it needs nothing else.
+pub fn plan_import(
     lib: &Library,
     dir: &Path,
-    candidates: &[Candidate],
+    groups: &BTreeMap<String, Vec<Candidate>>,
     opts: &ImportOptions,
     dat: Option<&Dat>,
     cache: &mut HashCache,
     progress: Progress<'_>,
 ) -> Result<ImportPlan> {
-    let total = candidates.len();
+    let total = groups.values().map(Vec::len).sum();
     progress(Event::Status(format!(
         "{} {total} file(s)",
         if dat.is_some() { "Hashing" } else { "Planning" }
@@ -170,101 +212,111 @@ pub fn plan_import_candidates(
 
     let mut plan = ImportPlan {
         dir: dir.to_path_buf(),
-        platform: opts.platform.clone(),
-        platform_name: opts.platform_name.clone(),
         actions: Vec::new(),
         summary: ImportSummary::default(),
+        unknown: Vec::new(),
+        platform_names: opts
+            .platform_names
+            .iter()
+            .filter(|(id, _)| groups.contains_key(*id))
+            .map(|(id, name)| (id.clone(), name.clone()))
+            .collect(),
     };
-    let mut claimed: Vec<(String, PathBuf)> = Vec::new();
+    let mut done = 0;
+    for (platform, files) in groups {
+        let mut claimed: Vec<(String, PathBuf)> = Vec::new();
+        for c in files {
+            done += 1;
+            progress(Event::Step { done, total });
+            let skip = |plan: &mut ImportPlan, reason: ImportSkip| {
+                plan.summary.skip += 1;
+                plan.actions.push(ImportAction::Skip {
+                    platform: platform.clone(),
+                    source: c.file.location(),
+                    reason,
+                });
+            };
 
-    for (i, c) in candidates.iter().enumerate() {
-        progress(Event::Step { done: i + 1, total });
-        let skip = |plan: &mut ImportPlan, reason: ImportSkip| {
-            plan.summary.skip += 1;
-            plan.actions.push(ImportAction::Skip {
-                source: c.file.location(),
-                reason,
-            });
-        };
+            // Read the file now only when its contents decide something here.
+            let same_name = db::find_rom_by_name(lib.conn(), platform, &c.file.display_name())?;
+            let needs_hash = dat.is_some() || same_name.as_ref().is_some_and(|r| r.size == c.size);
+            let hashes = if needs_hash {
+                match hash_candidate(dir, c, cache) {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        skip(&mut plan, ImportSkip::Unreadable { error: e.to_info() });
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
 
-        // Read the file now only when its contents decide something here.
-        let same_name = db::find_rom_by_name(lib.conn(), &opts.platform, &c.file.display_name())?;
-        let needs_hash = dat.is_some() || same_name.as_ref().is_some_and(|r| r.size == c.size);
-        let hashes = if needs_hash {
-            match hash_candidate(dir, c, cache) {
-                Ok(h) => Some(h),
-                Err(e) => {
-                    skip(&mut plan, ImportSkip::Unreadable { error: e.to_info() });
+            // Name it: DAT first, file name otherwise.
+            let dat_hit = match (dat, &hashes) {
+                (Some(d), Some(h)) => d.find(h).map(|k| d.get(k)),
+                _ => None,
+            };
+            let (game, rom, verified) = match dat_hit {
+                Some((g, r)) => (g.name.clone(), r.name.clone(), true),
+                None if opts.dat_only => {
+                    skip(&mut plan, ImportSkip::NotInDat);
                     continue;
                 }
-            }
-        } else {
-            None
-        };
+                None => {
+                    let name = c.file.display_name();
+                    (fallback_game_name(&name), name, false)
+                }
+            };
 
-        // Name it: DAT first, file name otherwise.
-        let dat_hit = match (dat, &hashes) {
-            (Some(d), Some(h)) => d.find(h).map(|k| d.get(k)),
-            _ => None,
-        };
-        let (game, rom, verified) = match dat_hit {
-            Some((g, r)) => (g.name.clone(), r.name.clone(), true),
-            None if opts.dat_only => {
-                skip(&mut plan, ImportSkip::NotInDat);
+            if let Some(h) = &hashes
+                && let Some(existing) = db::find_rom_by_sha1(lib.conn(), platform, &h.sha1)?
+            {
+                skip(
+                    &mut plan,
+                    ImportSkip::AlreadyInLibrary { rom: existing.name },
+                );
                 continue;
             }
-            None => {
-                let name = c.file.display_name();
-                (fallback_game_name(&name), name, false)
+            if let Some(existing) = db::find_rom_by_name(lib.conn(), platform, &rom)? {
+                skip(
+                    &mut plan,
+                    ImportSkip::NameConflict {
+                        existing: existing.name,
+                    },
+                );
+                continue;
             }
-        };
+            if let Some((_, prev)) = claimed.iter().find(|(n, _)| *n == rom) {
+                skip(&mut plan, ImportSkip::Duplicate { of: prev.clone() });
+                continue;
+            }
+            claimed.push((rom.clone(), c.file.path.clone()));
 
-        if let Some(h) = &hashes
-            && let Some(existing) = db::find_rom_by_sha1(lib.conn(), &opts.platform, &h.sha1)?
-        {
-            skip(
-                &mut plan,
-                ImportSkip::AlreadyInLibrary { rom: existing.name },
-            );
-            continue;
-        }
-        if let Some(existing) = db::find_rom_by_name(lib.conn(), &opts.platform, &rom)? {
-            skip(
-                &mut plan,
-                ImportSkip::NameConflict {
-                    existing: existing.name,
-                },
-            );
-            continue;
-        }
-        if let Some((_, prev)) = claimed.iter().find(|(n, _)| *n == rom) {
-            skip(&mut plan, ImportSkip::Duplicate { of: prev.clone() });
-            continue;
-        }
-        claimed.push((rom.clone(), c.file.path.clone()));
+            let dest = Library::rom_rel_path(platform, &rom);
 
-        let dest = Library::rom_rel_path(&opts.platform, &rom);
-
-        let size = hashes.as_ref().map(|h| h.size).unwrap_or(c.size);
-        plan.summary.add += 1;
-        plan.summary.bytes += size;
-        if verified {
-            plan.summary.verified += 1;
-        } else {
-            plan.summary.unverified += 1;
+            let size = hashes.as_ref().map(|h| h.size).unwrap_or(c.size);
+            plan.summary.add += 1;
+            plan.summary.bytes += size;
+            if verified {
+                plan.summary.verified += 1;
+            } else {
+                plan.summary.unverified += 1;
+            }
+            plan.actions.push(ImportAction::Add {
+                platform: platform.clone(),
+                source: dir.join(&c.file.path),
+                inner: c.file.inner.clone(),
+                game,
+                rom,
+                dest,
+                size,
+                crc32: hashes.as_ref().map(Hashes::crc32_hex),
+                sha1: hashes.map(|h| h.sha1),
+                verified,
+                suggested: None,
+            });
         }
-        plan.actions.push(ImportAction::Add {
-            source: dir.join(&c.file.path),
-            inner: c.file.inner.clone(),
-            game,
-            rom,
-            dest,
-            size,
-            crc32: hashes.as_ref().map(Hashes::crc32_hex),
-            sha1: hashes.map(|h| h.sha1),
-            verified,
-            suggested: None,
-        });
     }
     cache.save_best_effort();
     Ok(plan)
@@ -272,15 +324,18 @@ pub fn plan_import_candidates(
 
 /// Fills `suggested` on every unverified add whose name matches a standard
 /// name in `standard` (see [`crate::catalog::libretro::suggest`]). Returns how many.
-pub fn suggest_names(plan: &mut ImportPlan, standard: &[String]) -> usize {
+/// Only `platform`'s files: the names are per platform.
+pub fn suggest_names(plan: &mut ImportPlan, platform: &str, standard: &[String]) -> usize {
     let mut n = 0;
     for a in &mut plan.actions {
         if let ImportAction::Add {
+            platform: p,
             rom,
             verified: false,
             suggested,
             ..
         } = a
+            && p == platform
             && let Some(s) = crate::catalog::libretro::suggest(rom, standard)
         {
             *suggested = Some(format!("{s}{}", crate::fsutil::names::extension(rom)));
@@ -290,27 +345,27 @@ pub fn suggest_names(plan: &mut ImportPlan, standard: &[String]) -> usize {
     n
 }
 
-/// Renames planned adds to their suggestion where `accept(current name)`
+/// Renames planned adds to their suggestion where `accept(platform, current name)`
 /// says so: ROM name, game name and managed destination move together. A
 /// suggestion that would collide with another planned or library name is left
 /// alone.
 pub fn apply_suggestions(
     lib: &Library,
     plan: &mut ImportPlan,
-    accept: impl Fn(&str) -> bool,
+    accept: impl Fn(&str, &str) -> bool,
 ) -> Result<usize> {
-    let planned: Vec<String> = plan
+    let planned: Vec<(String, String)> = plan
         .actions
         .iter()
         .filter_map(|a| match a {
-            ImportAction::Add { rom, .. } => Some(rom.clone()),
+            ImportAction::Add { platform, rom, .. } => Some((platform.clone(), rom.clone())),
             _ => None,
         })
         .collect();
-    let platform = plan.platform.clone();
     let mut n = 0;
     for a in &mut plan.actions {
         let ImportAction::Add {
+            platform,
             rom,
             game,
             dest,
@@ -320,14 +375,14 @@ pub fn apply_suggestions(
         else {
             continue;
         };
-        if !accept(rom) || planned.contains(new) {
+        if !accept(platform, rom) || planned.contains(&(platform.clone(), new.clone())) {
             continue;
         }
-        if db::find_rom_by_name(lib.conn(), &platform, new)?.is_some() {
+        if db::find_rom_by_name(lib.conn(), platform, new)?.is_some() {
             continue;
         }
         *game = fallback_game_name(new);
-        *dest = Library::rom_rel_path(&platform, new);
+        *dest = Library::rom_rel_path(platform, new);
         *rom = new.clone();
         n += 1;
     }
@@ -347,6 +402,10 @@ pub struct ImportResult {
     /// already had under another name; nothing was kept.
     pub duplicates: Vec<ImportDuplicate>,
     pub failed: Vec<ImportFailure>,
+    /// Things that went wrong around the import without failing it (a card
+    /// cache that couldn't be updated, say).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     #[serde(skip)]
     pub(crate) verified_sources: Vec<VerifiedSource>,
 }
@@ -392,10 +451,14 @@ pub fn apply_import(
     progress(Event::Status(format!("Importing {total} file(s)")));
     let mut result = ImportResult::default();
 
-    db::ensure_platform(lib.conn(), &plan.platform, plan.platform_name.as_deref())?;
+    for platform in plan.platforms() {
+        let name = plan.platform_names.get(platform).map(String::as_str);
+        db::ensure_platform(lib.conn(), platform, name)?;
+    }
     let mut done = 0;
     for action in &plan.actions {
         let ImportAction::Add {
+            platform,
             source,
             inner,
             game,
@@ -433,10 +496,10 @@ pub fn apply_import(
                 .conn_mut()
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(|e| Error::db(e, "begin import"))?;
-            if let Some(existing) = db::find_rom_by_sha1(&tx, &plan.platform, &hashes.sha1)? {
+            if let Some(existing) = db::find_rom_by_sha1(&tx, platform, &hashes.sha1)? {
                 return Ok(Indexed::Duplicate(existing.name));
             }
-            let game_id = db::upsert_game(&tx, &plan.platform, game)?;
+            let game_id = db::upsert_game(&tx, platform, game)?;
             db::insert_rom(
                 &tx,
                 &NewRom {
@@ -550,9 +613,8 @@ mod tests {
 
     fn opts(dat_only: bool) -> ImportOptions {
         ImportOptions {
-            platform: "fkh".into(),
-            platform_name: Some("Fake Handheld".into()),
             dat_only,
+            platform_names: [("fkh".into(), "Fake Handheld".into())].into(),
         }
     }
 
@@ -568,7 +630,7 @@ mod tests {
                 } => {
                     format!("add {rom} [{game}] v={verified} copy")
                 }
-                ImportAction::Skip { source, reason } => format!("skip {source} {reason:?}"),
+                ImportAction::Skip { source, reason, .. } => format!("skip {source} {reason:?}"),
             })
             .collect()
     }
@@ -581,7 +643,17 @@ mod tests {
         let dat = dat();
         let o = opts(false);
         let mut cache = HashCache::in_memory();
-        let plan = plan_import(&lib, src.path(), &o, Some(&dat), &mut cache, &mut |_| {}).unwrap();
+        let plan = plan_folder(
+            &lib,
+            src.path(),
+            Some("fkh"),
+            &[],
+            &o,
+            Some(&dat),
+            &mut cache,
+            &mut |_| {},
+        )
+        .unwrap();
         assert_eq!(
             kinds(&plan),
             [
@@ -608,7 +680,17 @@ mod tests {
         assert_eq!(st.platforms[0].verified, 3);
 
         // Importing again: everything already there.
-        let plan2 = plan_import(&lib, src.path(), &o, Some(&dat), &mut cache, &mut |_| {}).unwrap();
+        let plan2 = plan_folder(
+            &lib,
+            src.path(),
+            Some("fkh"),
+            &[],
+            &o,
+            Some(&dat),
+            &mut cache,
+            &mut |_| {},
+        )
+        .unwrap();
         assert_eq!(plan2.changes(), 0);
         assert!(plan2.actions.iter().all(|a| matches!(
             a,
@@ -622,9 +704,11 @@ mod tests {
         // cache: the rewrite keeps the size and lands in the same second, so
         // the (size, mtime) stamp can't tell the files apart.
         fs::write(src.path().join("Hello World (USA).fkh"), "HELLO WORLD").unwrap();
-        let plan3 = plan_import(
+        let plan3 = plan_folder(
             &lib,
             src.path(),
+            Some("fkh"),
+            &[],
             &o,
             None,
             &mut HashCache::in_memory(),
@@ -641,9 +725,11 @@ mod tests {
         let src = library_dir();
         let dat = dat();
         let o = opts(true);
-        let plan = plan_import(
+        let plan = plan_folder(
             &lib,
             src.path(),
+            Some("fkh"),
+            &[],
             &o,
             Some(&dat),
             &mut HashCache::in_memory(),
@@ -686,9 +772,11 @@ mod tests {
         fs::write(src.path().join("a.fkh"), "same bytes").unwrap();
         fs::write(src.path().join("b.fkh"), "same bytes").unwrap();
         let o = opts(false);
-        let plan = plan_import(
+        let plan = plan_folder(
             &lib,
             src.path(),
+            Some("fkh"),
+            &[],
             &o,
             None,
             &mut HashCache::in_memory(),
@@ -721,9 +809,11 @@ mod tests {
         let mut lib = Library::init(&tmp.path().join("lib")).unwrap();
         let src = library_dir();
         let o = opts(false);
-        let plan = plan_import(
+        let plan = plan_folder(
             &lib,
             src.path(),
+            Some("fkh"),
+            &[],
             &o,
             None,
             &mut HashCache::in_memory(),
@@ -750,16 +840,14 @@ mod tests {
             build_zip(&[("inner.gba", b"IN")]),
         )
         .unwrap();
-        let opts = ImportOptions {
-            platform: "gba".into(),
-            platform_name: None,
-            dat_only: false,
-        };
+        let opts = ImportOptions::default();
         let mut cache = HashCache::open(None);
         for (file, expected) in [("game.gba", "game.gba"), ("pack.zip", "inner.gba")] {
-            let plan = plan_import(
+            let plan = plan_folder(
                 &lib,
                 &src.path().join("Downloads").join(file),
+                Some("gba"),
+                &[],
                 &opts,
                 None,
                 &mut cache,
@@ -778,9 +866,11 @@ mod tests {
         let source = tmp.path().join("source");
         write(&source, "a.fkh", "new bytes");
         let options = opts(false);
-        let plan = plan_import(
+        let plan = plan_folder(
             &lib,
             &source,
+            Some("fkh"),
+            &[],
             &options,
             None,
             &mut HashCache::in_memory(),
@@ -811,9 +901,11 @@ mod tests {
         let source = tmp.path().join("source");
         write(&source, "Hello World (USA).fkh", "hello world");
         let options = opts(true);
-        let plan = plan_import(
+        let plan = plan_folder(
             &lib,
             &source,
+            Some("fkh"),
+            &[],
             &options,
             Some(&dat()),
             &mut HashCache::in_memory(),

@@ -26,7 +26,8 @@ pub struct Report {
 pub struct Options<'a> {
     pub policy: Policy,
     pub base: &'a str,
-    pub platform: Option<&'a str>,
+    /// Only these platforms (all when `None`).
+    pub platforms: Option<&'a [String]>,
 }
 
 impl Report {
@@ -51,7 +52,12 @@ pub fn run(
     progress: Progress<'_>,
 ) -> Result<Report> {
     let mut platforms = BTreeMap::<String, Vec<db::Rom>>::new();
-    for game in lib.list_games(opts.platform, None)? {
+    let wanted = |p: &str| opts.platforms.is_none_or(|ps| ps.iter().any(|w| w == p));
+    for game in lib
+        .list_games(None, None)?
+        .into_iter()
+        .filter(|g| wanted(&g.platform))
+    {
         platforms
             .entry(game.platform)
             .or_default()
@@ -272,7 +278,7 @@ mod tests {
             Options {
                 policy: Policy::Offline,
                 base: libretro::DAT_BASE,
-                platform: None,
+                platforms: None,
             },
             &mut |_| {},
         )
@@ -336,7 +342,7 @@ mod tests {
             Options {
                 policy: Policy::Refresh,
                 base: &server.url(),
-                platform: None,
+                platforms: None,
             },
             &mut |_| {},
         )
@@ -360,7 +366,7 @@ mod tests {
             Options {
                 policy: Policy::Refresh,
                 base: &server.url(),
-                platform: None,
+                platforms: None,
             },
             &mut |_| {},
         )

@@ -31,7 +31,9 @@ use super::worker::{Msg, applied, failed};
 use crate::{
     ops::{
         Apply, Batch, Mode, Staged, apply_actions, card as card_cmd,
-        card::ImportRequest as CardImportRequest, context::Context, library as library_cmd,
+        card::ImportRequest as CardImportRequest,
+        context::Context,
+        library::{self as library_cmd, ImportsRoms},
         memories as memories_cmd, saves as saves_cmd,
     },
     text,
@@ -83,7 +85,6 @@ pub enum Request {
     ImportFolder {
         source: PathBuf,
         platform: Option<String>,
-        known: Vec<String>,
     },
     Standardize,
     Rename {
@@ -130,43 +131,34 @@ pub enum Pending {
     Import(Box<Import>),
 }
 
-/// ROMs to copy into the library: one plan per platform.
+/// ROMs to copy into the library.
 pub enum Import {
-    /// From a folder on this computer, with the files whose platform the
-    /// extensions don't say.
-    Folder(library_cmd::SortedImport),
+    /// From a folder on this computer.
+    Folder(ImportPlan),
     /// From the card.
     Card(CardImportPlan),
 }
 
 impl Import {
-    fn parts(&self) -> &[ImportPlan] {
+    fn plan(&self) -> &ImportPlan {
         match self {
-            Import::Folder(f) => &f.parts,
-            Import::Card(c) => &c.parts,
+            Import::Folder(p) => p,
+            Import::Card(c) => c.import(),
         }
     }
 
-    fn parts_mut(&mut self) -> &mut [ImportPlan] {
+    fn plan_mut(&mut self) -> &mut ImportPlan {
         match self {
-            Import::Folder(f) => &mut f.parts,
-            Import::Card(c) => &mut c.parts,
+            Import::Folder(p) => p,
+            Import::Card(c) => c.import_mut(),
         }
     }
 
-    /// ROMs the plans add.
-    fn changes(&self) -> usize {
-        self.parts().iter().map(Plan::changes).sum()
-    }
-
-    /// Every (platform, current name, suggested standard name) in the plans.
+    /// Every (platform, current name, suggested standard name) in the plan.
     pub fn suggestions(&self) -> Vec<(String, String, String)> {
-        self.parts()
-            .iter()
-            .flat_map(|p| {
-                p.suggestions()
-                    .map(|(old, new)| (p.platform.clone(), old.to_string(), new.to_string()))
-            })
+        self.plan()
+            .suggestions()
+            .map(|(p, old, new)| (p.to_string(), old.to_string(), new.to_string()))
             .collect()
     }
 }
@@ -234,27 +226,21 @@ impl Pending {
                 };
                 Pending::Trash(Box::new(saves_cmd::plan_trash(ctx, &rels, target)?))
             }
-            Request::ImportFolder {
-                source,
-                platform,
-                known,
-            } => {
-                let sorted = library_cmd::plan_import_sorted(
-                    ctx,
-                    &source,
-                    &known,
-                    platform.as_deref(),
-                    false,
-                    progress,
-                )?;
-                if sorted.parts.is_empty() && !sorted.unknown.is_empty() {
+            Request::ImportFolder { source, platform } => {
+                let req = library_cmd::ImportRequest {
+                    source: source.clone(),
+                    platform,
+                    settings: Default::default(),
+                };
+                let plan = library_cmd::plan_import(ctx, &req, progress)?;
+                if plan.actions.is_empty() && !plan.unknown.is_empty() {
                     // None of the files says its platform: ask which.
                     return Ok(Preview::AskPlatform {
                         source,
-                        files: sorted.unknown.len(),
+                        files: plan.unknown.len(),
                     });
                 }
-                Pending::Import(Box::new(Import::Folder(sorted)))
+                Pending::Import(Box::new(Import::Folder(plan)))
             }
             Request::Standardize => Pending::Standardize(library_cmd::plan_standardize(ctx, None)?),
             Request::Rename {
@@ -268,7 +254,7 @@ impl Pending {
                 &new_name,
             )?)),
             Request::CardImport(args) => {
-                let (plan, _not_found) = card_cmd::plan_import(ctx, &args, progress)?;
+                let plan = card_cmd::plan_import(ctx, &args, progress)?;
                 Pending::Import(Box::new(Import::Card(plan)))
             }
             Request::AcceptNames {
@@ -276,12 +262,9 @@ impl Pending {
                 accepted,
             } => {
                 let lib = ctx.library()?;
-                for plan in import.parts_mut() {
-                    let platform = plan.platform.clone();
-                    apply_suggestions(&lib, plan, |name| {
-                        accepted.contains(&(platform.clone(), name.to_string()))
-                    })?;
-                }
+                apply_suggestions(&lib, import.plan_mut(), |platform, name| {
+                    accepted.contains(&(platform.to_string(), name.to_string()))
+                })?;
                 Pending::Import(import)
             }
         }
@@ -361,34 +344,8 @@ impl Pending {
                 shown(*plan, result, |s| text::library::library_remove(&s))
             }
             Pending::Import(import) => match *import {
-                Import::Card(mut plan) => {
-                    let result = plan.apply(ctx, progress);
-                    shown(plan, result, |staged| {
-                        text::card::import_report(&card_cmd::ImportReport {
-                            staged,
-                            not_found: Vec::new(),
-                            covers: None,
-                            warnings: Vec::new(),
-                        })
-                    })
-                }
-                Import::Folder(mut folder) => {
-                    let mut lines = Vec::new();
-                    let mut failed = 0;
-                    for plan in folder.parts.iter_mut().filter(|p| p.changes() > 0) {
-                        match plan.apply(ctx, progress) {
-                            Ok(r) => {
-                                failed += r.failed.len();
-                                lines.push(text::library::import_done(&plan.platform, &r));
-                            }
-                            Err(e) => {
-                                failed += 1;
-                                lines.push(format!("✗ {}: {e}", plan.platform.to_uppercase()));
-                            }
-                        }
-                    }
-                    applied(lines.join("\n"), failed)
-                }
+                Import::Card(plan) => imported(ctx, plan, progress),
+                Import::Folder(plan) => imported(ctx, plan, progress),
             },
         }
     }
@@ -555,17 +512,13 @@ impl Pending {
             }
             Pending::Import(import) if !import.suggestions().is_empty() => PickImportNames(import),
             Pending::Import(import) => {
-                let (lines, title) = match &*import {
-                    Import::Folder(f) => (
-                        text::library::import_brief(&f.parts, &f.unknown),
-                        format!("Import {} ROM(s)?", import.changes()),
-                    ),
-                    Import::Card(c) => (
-                        text::library::import_brief(&c.parts, &[]),
-                        format!("Copy {} ROM(s) into the library?", import.changes()),
-                    ),
+                let plan = import.plan();
+                let lines = text::library::import_brief(plan);
+                let title = match &*import {
+                    Import::Folder(_) => format!("Import {} ROM(s)?", plan.changes()),
+                    Import::Card(_) => format!("Copy {} ROM(s) into the library?", plan.changes()),
                 };
-                if import.changes() == 0 {
+                if plan.changes() == 0 {
                     info("Nothing new to import", lines)
                 } else {
                     confirm(title, lines, Pending::Import(import))
@@ -606,6 +559,18 @@ pub(super) fn text_lines(text: &str) -> Vec<String> {
 }
 
 /// A plan and what applying it produced, rendered like the CLI would.
+/// Applies an import and says what happened the way `library import` does.
+fn imported<P: ImportsRoms>(ctx: &Context, mut plan: P, progress: &mut dyn FnMut(Event)) -> Msg {
+    let result = plan.apply(ctx, progress);
+    shown(plan, result, |staged| {
+        text::library::import_report(&library_cmd::Imported {
+            staged,
+            covers: None,
+            warnings: Vec::new(),
+        })
+    })
+}
+
 fn shown<P: Apply>(
     plan: P,
     result: Result<P::Output>,

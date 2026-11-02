@@ -3,6 +3,7 @@
 //! built-in default (flags and env are merged by clap already).
 
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     sync::{Arc, OnceLock},
 };
@@ -178,12 +179,15 @@ impl Context {
 
     /// A platform's display name ("Game Boy Advance" for `gba`) from the
     /// cached inventory, if we have one.
-    pub fn platform_name(&self, id: &str) -> Option<String> {
+    /// Platform display names by id, from the cached inventory (empty
+    /// without one).
+    pub fn platform_names(&self) -> BTreeMap<String, String> {
         self.platforms_cached
             .get_or_init(|| self.platforms(Policy::Offline).ok())
-            .as_ref()
-            .and_then(|p| p.name(id))
-            .map(str::to_owned)
+            .iter()
+            .flat_map(|p| &p.platforms)
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect()
     }
 
     /// Where the library lives: flag/env, config, or `~/Pocketeer Library`.

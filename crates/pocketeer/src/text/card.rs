@@ -7,16 +7,10 @@ use pocketeer_core::{
     plan::Plan,
 };
 
-use super::{
-    actions, bytes, covers_summary, import_actions, skipped_summary, source, staged_footer,
-    suggestion_footer, warning_lines,
-};
+use super::{actions, bytes, source, staged_footer};
 use crate::ops::{
     Mode,
-    card::{
-        CleanReport, CopyReport, ImportReport as CardImportReport, PlaceReport, RefreshReport,
-        RenameReport, RomsReport,
-    },
+    card::{CleanReport, CopyReport, PlaceReport, RefreshReport, RenameReport, RomsReport},
 };
 
 pub fn status_text(s: &Status) -> String {
@@ -322,74 +316,4 @@ pub fn rename_report(report: &RenameReport) -> String {
         },
     );
     text
-}
-
-pub fn import_report(r: &CardImportReport) -> String {
-    let mut out = String::new();
-    let p = &r.staged.plan;
-    for part in &p.parts {
-        let _ = writeln!(out, "[{}]", part.platform);
-        let skipped = import_actions(&mut out, part.actions.iter());
-        if !skipped.is_empty() {
-            let _ = writeln!(
-                out,
-                "  {}",
-                skipped_summary(&skipped).trim_start_matches("; ")
-            );
-        }
-    }
-    for n in &r.not_found {
-        let _ = writeln!(out, "✗ {}: not an unmatched ROM on this card", n.display());
-    }
-    let _ = writeln!(
-        out,
-        "{} ROM(s) to copy into the library (the card is not changed)",
-        p.changes()
-    );
-    if r.staged.result.is_none() && p.changes() > 0 {
-        suggestion_footer(
-            &mut out,
-            r.staged.mode,
-            p.parts.iter().flat_map(|p| p.actions.iter()),
-        );
-    }
-    // Nothing is applied while a name is missing, so no footer then either.
-    let changes = if r.not_found.is_empty() {
-        p.changes()
-    } else {
-        0
-    };
-    staged_footer(
-        &mut out,
-        r.staged.mode,
-        r.staged.result.as_ref(),
-        changes,
-        "Nothing to import.",
-        |out, res| {
-            for pi in res {
-                let ir = &pi.result;
-                let _ = writeln!(
-                    out,
-                    "✓ [{}] added {} ROM(s), {}{}",
-                    pi.platform,
-                    ir.added,
-                    bytes(ir.bytes),
-                    if ir.duplicates.is_empty() {
-                        String::new()
-                    } else {
-                        format!("; {} already in the library, dropped", ir.duplicates.len())
-                    }
-                );
-                for warning in &pi.warnings {
-                    let _ = writeln!(out, "! {warning}");
-                }
-                for f in &ir.failed {
-                    let _ = writeln!(out, "✗ {}: {}", f.source.display(), f.error.message);
-                }
-            }
-            covers_summary(out, r.covers.as_ref(), r.staged.mode);
-            warning_lines(out, &r.warnings);
-        },
-    );
-    out
 }
