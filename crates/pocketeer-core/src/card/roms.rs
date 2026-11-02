@@ -123,7 +123,9 @@ fn walk(pocket: &Pocket) -> Result<Vec<(String, String, PathBuf)>> {
 // Index
 
 const VERSION: u8 = 1;
-const CACHE_PATH: &str = ".pocketeer/rom-index.msgpack";
+/// Inside the card's `.pocketeer/` folder.
+const CACHE_FILE: &str = "rom-index.msgpack";
+const LOCK_FILE: &str = "rom-index.lock";
 const SAMPLE_BYTES: u64 = 16 * 1024;
 
 /// What is known about a card ROM's contents. pocketeer reads card files
@@ -200,7 +202,7 @@ impl Index {
     /// Reuses declarations already read for a BIOS report in the same load.
     pub fn scan_with_protected(pocket: &Pocket, declared: &BTreeSet<PathBuf>) -> Result<Self> {
         let identity = CardIdentity::read(pocket)?;
-        let cache_path = pocket.root().join(CACHE_PATH);
+        let cache_path = pocket.pocketeer_dir().join(CACHE_FILE);
         let (mut entries, warning) = match fs::read(&cache_path) {
             Ok(bytes) => match rmp_serde::from_slice::<Store>(&bytes) {
                 Ok(store) if store.version == VERSION => (store.entries, None),
@@ -385,9 +387,9 @@ impl Index {
             return Ok(());
         }
         self.identity.check(pocket)?;
-        let path = pocket.root().join(CACHE_PATH);
+        let path = pocket.pocketeer_dir().join(CACHE_FILE);
         fs::create_dir_all(path.parent().expect("parent")).map_err(|e| Error::io(&path, e))?;
-        let lock_path = pocket.root().join(".pocketeer/rom-index.lock");
+        let lock_path = pocket.pocketeer_dir().join(LOCK_FILE);
         let lock = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -532,7 +534,8 @@ mod index_tests {
         assert_eq!(index.roms[0].identity.sha1(), index.roms[1].identity.sha1());
         index.save(&pocket).unwrap();
         let store: Store =
-            rmp_serde::from_slice(&fs::read(tmp.path().join(CACHE_PATH)).unwrap()).unwrap();
+            rmp_serde::from_slice(&fs::read(pocket.pocketeer_dir().join(CACHE_FILE)).unwrap())
+                .unwrap();
         assert_eq!(store.entries.len(), 2);
         assert!(
             !store
@@ -588,7 +591,7 @@ mod index_tests {
     #[test]
     fn corrupt_cache_cancellation_and_missing_file_are_recoverable() {
         let (tmp, pocket) = sd();
-        write(tmp.path(), CACHE_PATH, "broken");
+        write(&pocket.pocketeer_dir(), CACHE_FILE, "broken");
         write(tmp.path(), "Assets/gb/common/test.gb", "rom");
         let mut index = Index::scan(&pocket).unwrap();
         assert!(index.warning.is_some());

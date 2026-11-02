@@ -321,7 +321,7 @@ fn index_root_files(root: &Path) -> HashMap<String, RootFile> {
         let rel = PathBuf::from(name);
         if fsutil::is_hidden(&entry.file_name())
             || !path.is_file()
-            || name == "Analogue_Pocket.json"
+            || name == crate::card::POCKET_JSON
         {
             continue;
         }

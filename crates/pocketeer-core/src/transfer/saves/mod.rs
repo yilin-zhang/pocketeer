@@ -5,6 +5,7 @@ use crate::library::{Library, db};
 pub use crate::library::db::SaveVersion;
 use crate::{
     Error, Pocket, Result,
+    card::SAVE_ROOTS,
     fsutil::hash::{copy_and_hash, hash_file},
     fsutil::{self, mtime_secs, set_mtime},
     plan::{Applied, Event, Failure, Plan, Progress},
@@ -15,7 +16,6 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-const ROOTS: [&str; 4] = crate::card::SAVE_ROOTS;
 const MTIME_TOLERANCE: i64 = 2;
 mod owners;
 mod trash;
@@ -245,7 +245,7 @@ impl SavesPlan {
 
 fn validate_path(rel: &Path) -> Result<()> {
     if rel.components().any(|c| !matches!(c, Component::Normal(_)))
-        || !ROOTS
+        || !SAVE_ROOTS
             .iter()
             .any(|r| rel.starts_with(r) && rel != Path::new(r))
     {
@@ -280,7 +280,7 @@ fn is_pocket_save(rel: &Path) -> bool {
 
 fn files(root: &Path, scope: Scope) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
-    for folder in ROOTS {
+    for folder in SAVE_ROOTS {
         if !scope.covers(Path::new(folder)) {
             continue;
         }

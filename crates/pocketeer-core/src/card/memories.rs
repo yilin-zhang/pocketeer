@@ -11,9 +11,6 @@ use crate::{Error, Result, fsutil};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-/// Folders that hold Memories, relative to the card root.
-const ROOTS: [&str; 2] = ["Memories/Save States", "Memories/Beta"];
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Memory {
     /// The `.sta` file, relative to the card root.
@@ -100,7 +97,7 @@ fn read_header(bytes: &[u8], cartridge: bool) -> Header {
 /// The Memories under `root` (a card, or the library's backup folder).
 pub fn scan(root: &Path) -> Result<Vec<Memory>> {
     let mut found = Vec::new();
-    for folder in ROOTS {
+    for folder in crate::card::MEMORY_ROOTS {
         let dir = root.join(folder);
         if !dir.is_dir() {
             continue;

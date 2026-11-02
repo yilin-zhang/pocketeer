@@ -31,8 +31,12 @@ pub const PLATFORMS_DIR: &str = "Platforms";
 const SETTINGS_DIR: &str = "Settings";
 const PRESETS_DIR: &str = "Presets";
 pub const MEMORIES_DIR: &str = "Memories";
+/// The two folders Memories are written to.
+pub const MEMORY_ROOTS: [&str; 2] = ["Memories/Save States", "Memories/Beta"];
 /// GB Studio games live at the root, not under `Assets/`.
 pub const GB_STUDIO_DIR: &str = "GB Studio";
+/// And their saves beside them, not under `Saves/`.
+const GB_STUDIO_SAVES_DIR: &str = "GB Studio/Saves";
 /// The platform id pocketeer gives GB Studio `.pocket` files.
 pub const GB_STUDIO_PLATFORM: &str = "gbstudio";
 pub const POCKET_JSON: &str = "Analogue_Pocket.json";
@@ -46,9 +50,9 @@ pub const POCKETEER_DIR: &str = ".pocketeer";
 /// Where save files and save states live.
 pub const SAVE_ROOTS: [&str; 4] = [
     SAVES_DIR,
-    "GB Studio/Saves",
-    "Memories/Save States",
-    "Memories/Beta",
+    GB_STUDIO_SAVES_DIR,
+    MEMORY_ROOTS[0],
+    MEMORY_ROOTS[1],
 ];
 
 /// Folders whose metadata changes when a ROM, core or save is added,
@@ -58,8 +62,8 @@ pub const WATCHED_DIRS: [&str; 6] = [
     CORES_DIR,
     SAVES_DIR,
     GB_STUDIO_DIR,
-    "Memories/Beta",
-    "Memories/Save States",
+    MEMORY_ROOTS[0],
+    MEMORY_ROOTS[1],
 ];
 
 /// `Assets/<platform>/<owner>`, where `owner` is `common` or a core id.
@@ -113,7 +117,7 @@ pub fn save_dir_for(rom_rel: &Path) -> Option<PathBuf> {
     if let Ok(relative) = rom_rel.strip_prefix(ASSETS_DIR) {
         Some(PathBuf::from(SAVES_DIR).join(relative.parent()?))
     } else if rom_rel.parent() == Some(Path::new(GB_STUDIO_DIR)) {
-        Some(PathBuf::from(GB_STUDIO_DIR).join(SAVES_DIR))
+        Some(PathBuf::from(GB_STUDIO_SAVES_DIR))
     } else {
         None
     }
