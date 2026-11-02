@@ -116,15 +116,19 @@ pub struct InstallPlan {
     /// Older cores this install supersedes and removes.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub replaces: Vec<String>,
-    /// `false` means "already at this version; nothing to do".
-    pub changed: bool,
     pub summary: Summary,
     pub actions: Vec<Action>,
 }
 
+/// One change: the core, installed or updated. Zero when it is already at
+/// this version (the plan then has no actions).
 impl Plan for InstallPlan {
     fn changes(&self) -> usize {
-        self.changed as usize
+        usize::from(
+            self.actions
+                .iter()
+                .any(|a| !matches!(a, Action::Skip { .. })),
+        )
     }
 }
 
@@ -188,7 +192,6 @@ pub fn plan_install(
         requires_license: opts.requires_license,
         also_installs,
         replaces: Vec::new(),
-        changed: true,
         summary: Summary::default(),
         actions: Vec::new(),
     };
@@ -197,7 +200,6 @@ pub fn plan_install(
         && let Some(cur) = &installed_version
         && same_version(cur, &version)
     {
-        plan.changed = false;
         return Ok(plan);
     }
 
@@ -427,7 +429,7 @@ mod tests {
         let p = plan(&pocket, &mut gba_zip(&[]), &PlanOptions::default());
         assert_eq!(p.core_id, "spiritualized.GBA");
         assert_eq!(p.version, "1.3.0");
-        assert!(p.changed);
+        assert_eq!(p.changes(), 1);
         assert_eq!(p.installed_version, None);
         assert_eq!(p.summary.install, 4);
         assert_eq!(p.summary.overwrite, 0);
@@ -445,7 +447,7 @@ mod tests {
         let (tmp, pocket) = sd();
         write(tmp.path(), "Cores/spiritualized.GBA/core.json", CORE_JSON);
         let p = plan(&pocket, &mut gba_zip(&[]), &PlanOptions::default());
-        assert!(!p.changed);
+        assert_eq!(p.changes(), 0);
         assert!(p.actions.is_empty());
         assert_eq!(p.installed_version.as_deref(), Some("1.3.0"));
 
@@ -457,7 +459,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(p.changed);
+        assert_eq!(p.changes(), 1);
         assert_eq!(p.summary.overwrite, 1);
     }
 
@@ -475,7 +477,7 @@ mod tests {
         write(tmp.path(), "Cores/other.Core/gba.rev", "theirs");
 
         let p = plan(&pocket, &mut gba_zip(&[]), &PlanOptions::default());
-        assert!(p.changed);
+        assert_eq!(p.changes(), 1);
         assert_eq!(p.installed_version.as_deref(), Some("1.2.0"));
         let removes: Vec<&Action> = p
             .actions

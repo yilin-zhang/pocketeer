@@ -23,7 +23,7 @@
   files explicitly deleted. Names asked for that don't exist
   are listed under `not_found` and count as failures (`SOME_FAILED`).
 - `SOME_FAILED.details` has `failed` and `total` (failed plus planned changes).
-- Operations are idempotent: installing an installed version reports `changed: false`.
+- Operations are idempotent: installing an installed version plans no actions and changes nothing.
 
 ### Library and card
 

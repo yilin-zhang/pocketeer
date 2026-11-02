@@ -60,7 +60,7 @@ fn install_from_file_preview_then_apply() {
     assert_eq!(plan["core_id"], "spiritualized.GBA");
     assert_eq!(plan["installed_version"], "1.2.0");
     assert_eq!(plan["version"], "1.3.0");
-    assert_eq!(plan["changed"], true);
+    assert!(!plan["actions"].as_array().unwrap().is_empty());
     assert_eq!(
         plan_actions(plan),
         [
@@ -109,7 +109,9 @@ fn install_from_file_preview_then_apply() {
     // Idempotent: again → nothing to do, exit 0.
     let (v, code) = env.json(&["cores", "install", "--from", zip]);
     assert_eq!(code, 0);
-    assert_eq!(v["data"]["items"][0]["plan"]["changed"], false);
+    // Already at this version: a plan with nothing in it.
+    let plan = &v["data"]["items"][0]["plan"];
+    assert!(plan["actions"].as_array().unwrap().is_empty());
     assert!(v["data"]["items"][0]["result"].is_null());
 }
 

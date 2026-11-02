@@ -7,6 +7,7 @@ use pocketeer_core::card::{
     install::{InstallPlan, UninstallPlan},
 };
 use pocketeer_core::catalog::inventory::InventoryStatus;
+use pocketeer_core::plan::Plan;
 
 use super::{Reader, Text, actions, batch_report, bytes, source, table};
 use crate::ops::cores::{InstallReport, RemoveReport, SearchReport};
@@ -220,12 +221,12 @@ fn inventory_footer(out: &mut String, status: &InventoryStatus) {
 
 fn install_plan(out: &mut String, plan: &InstallPlan, reader: Reader) {
     let transition = match &plan.installed_version {
-        Some(cur) if !plan.changed => format!("{cur} (already installed)"),
+        Some(cur) if plan.changes() == 0 => format!("{cur} (already installed)"),
         Some(cur) => format!("{cur} → {}", plan.version),
         None => format!("install {}", plan.version),
     };
     let _ = writeln!(out, "{}: {transition}", plan.core_id);
-    if !plan.changed {
+    if plan.changes() == 0 {
         let _ = writeln!(
             out,
             "  nothing to do{}",
@@ -299,7 +300,6 @@ mod tests {
             requires_license: false,
             also_installs: vec![],
             replaces: vec![],
-            changed: false,
             summary: Summary::default(),
             actions: vec![],
         }
