@@ -4,26 +4,31 @@ use std::{collections::BTreeMap, fmt::Write, path::PathBuf};
 
 use pocketeer_core::{
     plan::Plan,
-    transfer::saves::{SaveAction, SaveReason, SaveSkip, TrashTarget},
+    transfer::saves::{ConflictReason, PullReason, SaveAction, SaveSkip, TrashTarget},
 };
 
 use super::{Reader, Text, bytes, failure_lines, plan_lines, staged_footer, table, time_ago};
 use crate::ops::saves::{ListReport, SyncReport, TrashReport, VersionsReport};
 
-fn save_reason(reason: SaveReason) -> &'static str {
+fn pull_reason(reason: PullReason) -> &'static str {
     match reason {
-        SaveReason::OnlyOnCard => "new on AP",
-        SaveReason::CardNewer => "AP is newer",
-        SaveReason::ComputerNewer => "computer is newer",
-        SaveReason::DifferentContent => "similar timestamps, different bytes",
-        SaveReason::UserChoice => "explicit choice",
+        PullReason::OnlyOnCard => "new on AP",
+        PullReason::CardNewer => "AP is newer",
+        PullReason::UserChoice => "explicit choice",
+    }
+}
+
+fn conflict_reason(reason: ConflictReason) -> &'static str {
+    match reason {
+        ConflictReason::ComputerNewer => "computer is newer",
+        ConflictReason::DifferentContent => "similar timestamps, different bytes",
     }
 }
 
 /// One line of a backup plan; `shown` is how the save is named.
 fn action_line(action: &SaveAction, shown: &str) -> Option<String> {
     Some(match action {
-        SaveAction::Pull { reason, .. } => format!("← backup {shown} ({})", save_reason(*reason)),
+        SaveAction::Pull { reason, .. } => format!("← backup {shown} ({})", pull_reason(*reason)),
         SaveAction::Push { source, .. } => {
             format!("→ restore AP {shown} from {}", source.display())
         }
@@ -34,7 +39,7 @@ fn action_line(action: &SaveAction, shown: &str) -> Option<String> {
             ..
         } => format!(
             "? {shown}: {}; AP {}, computer {} — unchanged until chosen",
-            save_reason(*reason),
+            conflict_reason(*reason),
             time_ago(card.mtime),
             time_ago(computer.mtime)
         ),
@@ -248,7 +253,7 @@ pub fn saves_dialog(
     for a in plan.actions() {
         let what = match a {
             SaveAction::Pull {
-                reason: SaveReason::OnlyOnCard,
+                reason: PullReason::OnlyOnCard,
                 ..
             } => "← back up, new on AP".to_string(),
             SaveAction::Pull { .. } => "← back up, AP is newer".to_string(),

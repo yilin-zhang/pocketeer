@@ -12,7 +12,7 @@ use std::{
 use pocketeer_core::transfer::{
     Presence,
     saves::{
-        self, ConflictChoice, SaveAction, SaveReason, SaveSkip, SavesOptions, Scope, TrashTarget,
+        self, ConflictChoice, PullReason, SaveAction, SaveSkip, SavesOptions, Scope, TrashTarget,
         expected_saves,
     },
 };
@@ -183,7 +183,7 @@ impl SaveIndex {
 pub fn status(action: &SaveAction) -> &'static str {
     match action {
         SaveAction::Pull {
-            reason: SaveReason::OnlyOnCard,
+            reason: PullReason::OnlyOnCard,
             ..
         } => "only on AP, not backed up",
         SaveAction::Pull { .. } => "AP is newer than the backup",

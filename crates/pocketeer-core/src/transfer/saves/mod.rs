@@ -73,7 +73,7 @@ pub enum SaveAction {
     Pull {
         rel: PathBuf,
         size: u64,
-        reason: SaveReason,
+        reason: PullReason,
     },
     Push {
         rel: PathBuf,
@@ -84,7 +84,7 @@ pub enum SaveAction {
         rel: PathBuf,
         card: SaveInfo,
         computer: SaveInfo,
-        reason: SaveReason,
+        reason: ConflictReason,
     },
     Skip {
         rel: PathBuf,
@@ -103,14 +103,25 @@ impl SaveAction {
     }
 }
 
+/// Why a backup copies the card's save into the library.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum SaveReason {
+pub enum PullReason {
     OnlyOnCard,
     CardNewer,
-    ComputerNewer,
-    DifferentContent,
+    /// The user settled a conflict in the card's favour.
     UserChoice,
+}
+
+/// Why a backup won't pick a side by itself.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictReason {
+    /// The library's copy is newer: the card may have been restored from
+    /// an old copy, or the library edited by hand.
+    ComputerNewer,
+    /// Written within the mtime tolerance of each other, with different bytes.
+    DifferentContent,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
@@ -206,7 +217,7 @@ impl SavesPlan {
             ConflictChoice::Card => SaveAction::Pull {
                 rel,
                 size: card.size,
-                reason: SaveReason::UserChoice,
+                reason: PullReason::UserChoice,
             },
             ConflictChoice::Computer => SaveAction::Push {
                 source: self.library.root().join("saves").join(&rel),
@@ -392,7 +403,7 @@ fn decide(rel: &Path, card: &Option<SaveInfo>, computer: &Option<SaveInfo>) -> O
         (Some(c), None) => SaveAction::Pull {
             rel: rel.to_path_buf(),
             size: c.size,
-            reason: SaveReason::OnlyOnCard,
+            reason: PullReason::OnlyOnCard,
         },
         (None, Some(_)) => SaveAction::Skip {
             rel: rel.to_path_buf(),
@@ -406,7 +417,7 @@ fn decide(rel: &Path, card: &Option<SaveInfo>, computer: &Option<SaveInfo>) -> O
             SaveAction::Pull {
                 rel: rel.to_path_buf(),
                 size: c.size,
-                reason: SaveReason::CardNewer,
+                reason: PullReason::CardNewer,
             }
         }
         (Some(c), Some(l)) => SaveAction::Conflict {
@@ -414,9 +425,9 @@ fn decide(rel: &Path, card: &Option<SaveInfo>, computer: &Option<SaveInfo>) -> O
             card: c.clone(),
             computer: l.clone(),
             reason: if l.mtime > c.mtime.saturating_add(MTIME_TOLERANCE) {
-                SaveReason::ComputerNewer
+                ConflictReason::ComputerNewer
             } else {
-                SaveReason::DifferentContent
+                ConflictReason::DifferentContent
             },
         },
         (None, None) => return None,
@@ -946,7 +957,7 @@ mod tests {
         assert!(matches!(
             newer.action,
             SaveAction::Pull {
-                reason: SaveReason::CardNewer,
+                reason: PullReason::CardNewer,
                 ..
             }
         ));
