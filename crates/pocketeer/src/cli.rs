@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
+use pocketeer_core::config::ConfigKey;
 use pocketeer_core::{Error, Result, error::CODES, transfer::saves::ConflictChoice};
 use serde::Serialize;
 
@@ -361,25 +362,32 @@ pub enum ConfigCommand {
     Path,
     /// Show all settings, or one.
     Get {
-        /// One of: library, cache-dir, root, github-token (default: all).
-        #[arg(value_name = "KEY")]
-        key: Option<String>,
+        /// The setting (default: all).
+        #[arg(value_name = "KEY", value_parser = config_key())]
+        key: Option<ConfigKey>,
     },
-    /// Set a value. Keys: library, cache-dir, root, github-token (stored in plain text).
+    /// Set a value (the GitHub token is stored in plain text).
     Set {
-        /// Setting to change: library, cache-dir, root or github-token.
-        #[arg(value_name = "KEY")]
-        key: String,
+        /// The setting to change.
+        #[arg(value_name = "KEY", value_parser = config_key())]
+        key: ConfigKey,
         /// New value (a path for library, cache-dir and root).
         #[arg(value_name = "VALUE")]
         value: String,
     },
     /// Remove a value.
     Unset {
-        /// Setting to clear: library, cache-dir, root or github-token.
-        #[arg(value_name = "KEY")]
-        key: String,
+        /// The setting to clear.
+        #[arg(value_name = "KEY", value_parser = config_key())]
+        key: ConfigKey,
     },
+}
+
+/// Config keys by name; `--help` lists them.
+fn config_key() -> impl clap::builder::TypedValueParser<Value = ConfigKey> {
+    use clap::builder::TypedValueParser;
+    clap::builder::PossibleValuesParser::new(ConfigKey::ALL.map(ConfigKey::name))
+        .map(|name| ConfigKey::from_name(&name).expect("one of the listed names"))
 }
 
 #[derive(Debug, Args, Clone, Default)]
@@ -604,9 +612,9 @@ pub fn docs(path: &[String]) -> Result<DocsReport> {
     for name in path {
         target = target
             .find_subcommand_mut(name)
-            .ok_or_else(|| Error::ConfigKey {
-                key: path.join(" "),
-                known: vec!["run `pocketeer docs` for the full list".into()],
+            .ok_or_else(|| Error::Usage {
+                message: format!("no command `{}`", path.join(" ")),
+                hint: Some("run `pocketeer docs` for the full list".into()),
             })?;
         prefix.push(name.clone());
     }

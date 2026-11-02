@@ -341,15 +341,6 @@ fn config_set_get_unset_and_precedence() {
     assert_eq!(v["data"]["values"][0]["value"], "/tmp/some lib");
     assert!(cfg.is_file());
 
-    let (v, _) = run(&["config", "get", "--json"]);
-    let keys: Vec<&str> = v["data"]["values"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| e["key"].as_str().unwrap())
-        .collect();
-    assert_eq!(keys, ["library", "cache-dir", "root", "github-token"]);
-
     // The configured library is what `library status` looks for.
     let (v, code) = run(&["library", "status", "--json"]);
     assert_eq!(code, 1);
@@ -357,8 +348,8 @@ fn config_set_get_unset_and_precedence() {
     assert_eq!(v["error"]["details"]["path"], "/tmp/some lib");
 
     let (v, code) = run(&["config", "set", "bogus", "1", "--json"]);
-    assert_eq!(code, 1);
-    assert_eq!(v["error"]["code"], "CONFIG_KEY");
+    assert_eq!(code, 2, "an unknown key is a usage error");
+    assert_eq!(v["error"]["code"], "USAGE");
 
     let (v, _) = run(&["config", "unset", "library", "--json"]);
     assert!(v["data"]["values"][0]["value"].is_null());

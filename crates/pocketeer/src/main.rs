@@ -321,9 +321,9 @@ fn run_config(ctx: &Context, out: &Output, cmd: ConfigCommand) -> ExitCode {
     use ops::context::{config_get, config_path, config_set};
     match cmd {
         ConfigCommand::Path => out.emit(config_path(ctx)),
-        ConfigCommand::Get { key } => out.emit(config_get(ctx, key.as_deref())),
-        ConfigCommand::Set { key, value } => out.emit(config_set(ctx, &key, Some(&value))),
-        ConfigCommand::Unset { key } => out.emit(config_set(ctx, &key, None)),
+        ConfigCommand::Get { key } => out.emit(config_get(ctx, key)),
+        ConfigCommand::Set { key, value } => out.emit(config_set(ctx, key, Some(&value))),
+        ConfigCommand::Unset { key } => out.emit(config_set(ctx, key, None)),
     }
 }
 

@@ -144,9 +144,6 @@ pub enum Error {
     #[error("failed to parse config {}: {message}", path.display())]
     ConfigParse { path: PathBuf, message: String },
 
-    #[error("unknown config key {key} (known: {})", known.join(", "))]
-    ConfigKey { key: String, known: Vec<String> },
-
     #[error("can't determine your home directory")]
     NoHomeDir,
 
@@ -289,7 +286,6 @@ pub const CODES: &[(&str, &str)] = &[
     ),
     ("DB_ERROR", "library database error (details.context)"),
     ("CONFIG_PARSE_ERROR", "config.toml is malformed"),
-    ("CONFIG_KEY", "unknown config key"),
     ("NO_HOME_DIR", "home directory unknown; pass explicit paths"),
     (
         "SAVE_VERSION_NOT_FOUND",
@@ -447,9 +443,6 @@ impl Error {
                 "CONFIG_PARSE_ERROR",
                 Some(json!({ "path": path, "message": message })),
             ),
-            Error::ConfigKey { key, known } => {
-                ("CONFIG_KEY", Some(json!({ "key": key, "known": known })))
-            }
             Error::NoHomeDir => ("NO_HOME_DIR", None),
             Error::SaveVersionNotFound { id } => {
                 ("SAVE_VERSION_NOT_FOUND", Some(json!({ "id": id })))
@@ -628,7 +621,6 @@ mod tests {
                 | Error::LibraryTooNew { .. }
                 | Error::Db { .. }
                 | Error::ConfigParse { .. }
-                | Error::ConfigKey { .. }
                 | Error::NoHomeDir
                 | Error::SaveVersionNotFound { .. }
                 | Error::RomNotFound { .. }
@@ -725,10 +717,6 @@ mod tests {
             Error::ConfigParse {
                 path: p.clone(),
                 message: s.clone(),
-            },
-            Error::ConfigKey {
-                key: s.clone(),
-                known: vec![],
             },
             Error::NoHomeDir,
             Error::SaveVersionNotFound { id: 1 },

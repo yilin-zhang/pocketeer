@@ -20,7 +20,7 @@ use pocketeer_core::{
 };
 
 use crate::cli::Global;
-use pocketeer_core::config::KEYS;
+use pocketeer_core::config::ConfigKey;
 
 /// Cheap to clone: clones share the loaded config and platform names, so
 /// the TUI can hand one to every job without re-reading the config file.
@@ -274,38 +274,38 @@ pub struct ConfigEntry {
     pub value: Option<String>,
 }
 
-fn show(config: &Config, path: PathBuf, only: Option<&str>) -> Result<ConfigShowReport> {
-    let keys: Vec<&str> = match only {
-        Some(k) => vec![k],
-        None => KEYS.to_vec(),
-    };
-    let mut values = Vec::new();
-    for key in keys {
-        let mut value = config.get(key)?;
-        if key == "github-token"
-            && let Some(v) = &value
-        {
-            value = Some(format!("{}…", &v[..v.len().min(4)]));
-        }
-        values.push(ConfigEntry {
-            key: key.to_string(),
-            value,
-        });
-    }
-    Ok(ConfigShowReport { path, values })
+fn show(config: &Config, path: PathBuf, only: Option<ConfigKey>) -> ConfigShowReport {
+    let keys = only.map_or(ConfigKey::ALL.to_vec(), |k| vec![k]);
+    let values = keys
+        .into_iter()
+        .map(|key| {
+            let mut value = config.get(key);
+            // A token is shown only far enough to recognise it.
+            if key == ConfigKey::GithubToken
+                && let Some(v) = &value
+            {
+                value = Some(format!("{}…", &v[..v.len().min(4)]));
+            }
+            ConfigEntry {
+                key: key.name().to_string(),
+                value,
+            }
+        })
+        .collect();
+    ConfigShowReport { path, values }
 }
 
-pub fn config_get(ctx: &Context, key: Option<&str>) -> Result<ConfigShowReport> {
-    show(ctx.config()?, ctx.config_path()?, key)
+pub fn config_get(ctx: &Context, key: Option<ConfigKey>) -> Result<ConfigShowReport> {
+    Ok(show(ctx.config()?, ctx.config_path()?, key))
 }
 
 /// `value: None` unsets the key.
-pub fn config_set(ctx: &Context, key: &str, value: Option<&str>) -> Result<ConfigShowReport> {
+pub fn config_set(ctx: &Context, key: ConfigKey, value: Option<&str>) -> Result<ConfigShowReport> {
     let path = ctx.config_path()?;
     let mut config = ctx.config()?.clone();
-    config.set(key, value)?;
+    config.set(key, value);
     config.save(&path)?;
-    show(&config, path, Some(key))
+    Ok(show(&config, path, Some(key)))
 }
 
 #[cfg(test)]

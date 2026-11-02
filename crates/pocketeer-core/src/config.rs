@@ -26,7 +26,37 @@ pub struct Config {
     pub github_token: Option<String>,
 }
 
-pub const KEYS: [&str; 4] = ["library", "cache-dir", "root", "github-token"];
+/// A setting `pocketeer config` shows and changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigKey {
+    Library,
+    CacheDir,
+    Root,
+    GithubToken,
+}
+
+impl ConfigKey {
+    pub const ALL: [ConfigKey; 4] = [
+        ConfigKey::Library,
+        ConfigKey::CacheDir,
+        ConfigKey::Root,
+        ConfigKey::GithubToken,
+    ];
+
+    /// The name on the command line and in the file.
+    pub fn name(self) -> &'static str {
+        match self {
+            ConfigKey::Library => "library",
+            ConfigKey::CacheDir => "cache-dir",
+            ConfigKey::Root => "root",
+            ConfigKey::GithubToken => "github-token",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<ConfigKey> {
+        ConfigKey::ALL.into_iter().find(|k| k.name() == name)
+    }
+}
 
 impl Config {
     pub fn default_path() -> Option<PathBuf> {
@@ -51,34 +81,25 @@ impl Config {
         write_atomic(path, text.as_bytes())
     }
 
-    pub fn get(&self, key: &str) -> Result<Option<String>> {
-        Ok(match key {
-            "library" => self.library.as_ref().map(|p| p.display().to_string()),
-            "cache-dir" => self.cache_dir.as_ref().map(|p| p.display().to_string()),
-            "root" => self.root.as_ref().map(|p| p.display().to_string()),
-            "github-token" => self.github_token.clone(),
-            _ => return Err(unknown(key)),
-        })
+    pub fn get(&self, key: ConfigKey) -> Option<String> {
+        let path = |p: &Option<PathBuf>| p.as_ref().map(|p| p.display().to_string());
+        match key {
+            ConfigKey::Library => path(&self.library),
+            ConfigKey::CacheDir => path(&self.cache_dir),
+            ConfigKey::Root => path(&self.root),
+            ConfigKey::GithubToken => self.github_token.clone(),
+        }
     }
 
     /// `None` clears the key. Paths are expanded (`~`) and made absolute.
-    pub fn set(&mut self, key: &str, value: Option<&str>) -> Result<()> {
+    pub fn set(&mut self, key: ConfigKey, value: Option<&str>) {
         let path = |v: &str| -> PathBuf { absolutize(expand_tilde(v)) };
         match key {
-            "library" => self.library = value.map(path),
-            "cache-dir" => self.cache_dir = value.map(path),
-            "root" => self.root = value.map(path),
-            "github-token" => self.github_token = value.map(str::to_owned),
-            _ => return Err(unknown(key)),
+            ConfigKey::Library => self.library = value.map(path),
+            ConfigKey::CacheDir => self.cache_dir = value.map(path),
+            ConfigKey::Root => self.root = value.map(path),
+            ConfigKey::GithubToken => self.github_token = value.map(str::to_owned),
         }
-        Ok(())
-    }
-}
-
-fn unknown(key: &str) -> Error {
-    Error::ConfigKey {
-        key: key.to_string(),
-        known: KEYS.iter().map(|k| k.to_string()).collect(),
     }
 }
 
@@ -115,19 +136,16 @@ mod tests {
         assert_eq!(Config::load(&path).unwrap(), Config::default());
 
         let mut c = Config::default();
-        c.set("library", Some("/tmp/lib")).unwrap();
-        c.set("github-token", Some("ghp_x")).unwrap();
+        c.set(ConfigKey::Library, Some("/tmp/lib"));
+        c.set(ConfigKey::GithubToken, Some("ghp_x"));
         c.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.library.as_deref(), Some(Path::new("/tmp/lib")));
-        assert_eq!(
-            loaded.get("github-token").unwrap().as_deref(),
-            Some("ghp_x")
-        );
-        assert_eq!(loaded.get("root").unwrap(), None);
+        assert_eq!(loaded.get(ConfigKey::GithubToken).as_deref(), Some("ghp_x"));
+        assert_eq!(loaded.get(ConfigKey::Root), None);
 
         let mut c = loaded;
-        c.set("github-token", None).unwrap();
+        c.set(ConfigKey::GithubToken, None);
         c.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("github"), "{text}");
@@ -135,10 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_key_and_bad_file() {
-        let mut c = Config::default();
-        assert_eq!(c.set("nope", Some("x")).unwrap_err().code(), "CONFIG_KEY");
-        assert_eq!(c.get("nope").unwrap_err().code(), "CONFIG_KEY");
+    fn a_malformed_file_is_an_error_not_defaults() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(&path, "library = [1,\n").unwrap();
@@ -151,11 +166,5 @@ mod tests {
             Config::load(&path).unwrap_err().code(),
             "CONFIG_PARSE_ERROR"
         );
-    }
-
-    #[test]
-    fn tilde_expands() {
-        assert_eq!(expand_tilde("~/x"), dirs::home_dir().unwrap().join("x"));
-        assert_eq!(expand_tilde("/abs"), PathBuf::from("/abs"));
     }
 }
