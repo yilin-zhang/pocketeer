@@ -6,9 +6,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{
+    Connection, OptionalExtension, params,
+    types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef},
+};
 use serde::Serialize;
 
+use super::{
+    PlatformStats,
+    covers::{CoverRecord, CoverStatus},
+    identify::{DatStatus, Identification},
+};
 use crate::{Error, Result, fsutil};
 
 const MIGRATIONS: &[&str] = &[
@@ -82,6 +90,43 @@ UPDATE roms SET dat_status='matched',dat_game_name=(SELECT name FROM games WHERE
 ALTER TABLE roms DROP COLUMN source_path;
 ALTER TABLE roms DROP COLUMN mode;",
 ];
+
+/// Stores an enum as one TEXT value per variant. A value no variant spells
+/// is a read error, never a quiet default.
+macro_rules! text_column {
+    ($ty:ty { $($variant:ident => $text:literal),* $(,)? }) => {
+        impl ToSql for $ty {
+            fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+                Ok(match self { $(Self::$variant => $text),* }.into())
+            }
+        }
+        impl FromSql for $ty {
+            fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+                match value.as_str()? {
+                    $($text => Ok(Self::$variant),)*
+                    other => Err(FromSqlError::Other(
+                        format!("unknown {} {other:?}", stringify!($ty)).into(),
+                    )),
+                }
+            }
+        }
+    };
+}
+
+text_column!(DatStatus {
+    Unchecked => "unchecked",
+    Matched => "matched",
+    NoMatch => "no_match",
+    Error => "error",
+    Unsupported => "unsupported",
+    Ambiguous => "ambiguous",
+});
+
+text_column!(CoverStatus {
+    Ok => "ok",
+    NotFound => "none",
+    Error => "error",
+});
 
 /// Brings the schema to the current version, one migration per
 /// transaction. A database from a newer pocketeer is refused rather than
@@ -228,7 +273,7 @@ fn rom_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Rom> {
         crc32: r.get("crc32")?,
         sha1: r.get("sha1")?,
         dat: Identification {
-            status: DatStatus::parse(&r.get::<_, String>("dat_status")?)?,
+            status: r.get("dat_status")?,
             game_name: r.get("dat_game_name")?,
             rom_name: r.get("dat_rom_name")?,
             revision: r.get("dat_revision")?,
@@ -423,36 +468,36 @@ pub fn delete_rom(conn: &Connection, rom_id: i64, game_id: i64) -> Result<bool> 
     Ok(left == 0)
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct PlatformStats {
-    pub platform: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub games: usize,
-    pub roms: usize,
-    pub verified: usize,
-    pub bytes: u64,
-}
-
 pub fn platform_stats(conn: &Connection) -> Result<Vec<PlatformStats>> {
     query_rows(
         conn,
         "SELECT p.id, p.name,
-                (SELECT COUNT(*) FROM games g WHERE g.platform = p.id),
-                (SELECT COUNT(*) FROM roms r JOIN games g ON g.id = r.game_id WHERE g.platform = p.id),
-                (SELECT COUNT(*) FROM roms r JOIN games g ON g.id = r.game_id WHERE g.platform = p.id AND r.dat_status = 'matched'),
-                (SELECT COALESCE(SUM(r.size), 0) FROM roms r JOIN games g ON g.id = r.game_id WHERE g.platform = p.id)
-         FROM platforms p ORDER BY p.id",
+                COUNT(DISTINCT g.id),
+                COUNT(r.id),
+                COUNT(CASE WHEN r.dat_status = 'matched' THEN 1 END),
+                COALESCE(SUM(r.size), 0),
+                (SELECT COUNT(*) FROM covers c JOIN games cg ON cg.id = c.game_id
+                  WHERE cg.platform = p.id AND c.status = 'ok'),
+                (SELECT COUNT(*) FROM covers c JOIN games cg ON cg.id = c.game_id
+                  WHERE cg.platform = p.id AND c.status = 'none')
+         FROM platforms p
+         LEFT JOIN games g ON g.platform = p.id
+         LEFT JOIN roms r ON r.game_id = g.id
+         GROUP BY p.id ORDER BY p.id",
         [],
-        "platform_stats",
+        "platform stats",
         |r| {
+            let platform: String = r.get(0)?;
             Ok(PlatformStats {
-                platform: r.get(0)?,
+                covers_mapped: crate::catalog::thumbnail_system(&platform).is_some(),
+                platform,
                 name: r.get(1)?,
                 games: get_usize(r, 2)?,
                 roms: get_usize(r, 3)?,
                 verified: get_usize(r, 4)?,
                 bytes: get_u64(r, 5)?,
+                covers: get_usize(r, 6)?,
+                covers_not_found: get_usize(r, 7)?,
             })
         },
     )
@@ -518,62 +563,7 @@ const MIGRATION_RENAMES: &str = "
 ";
 
 // ---------------------------------------------------------------------------
-// Identification (DAT results per ROM)
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DatStatus {
-    #[default]
-    Unchecked,
-    Matched,
-    NoMatch,
-    Error,
-    Unsupported,
-    Ambiguous,
-}
-impl DatStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Unchecked => "unchecked",
-            Self::Matched => "matched",
-            Self::NoMatch => "no_match",
-            Self::Error => "error",
-            Self::Unsupported => "unsupported",
-            Self::Ambiguous => "ambiguous",
-        }
-    }
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Unchecked => "not checked",
-            Self::Matched => "matched",
-            Self::NoMatch => "no match in DAT",
-            Self::Error => "failed; will retry",
-            Self::Unsupported => "no automatic DAT source",
-            Self::Ambiguous => "multiple DAT matches",
-        }
-    }
-    pub(crate) fn parse(value: &str) -> rusqlite::Result<Self> {
-        match value {
-            "unchecked" => Ok(Self::Unchecked),
-            "matched" => Ok(Self::Matched),
-            "no_match" => Ok(Self::NoMatch),
-            "error" => Ok(Self::Error),
-            "unsupported" => Ok(Self::Unsupported),
-            "ambiguous" => Ok(Self::Ambiguous),
-            _ => Err(rusqlite::Error::InvalidQuery),
-        }
-    }
-}
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-pub struct Identification {
-    pub status: DatStatus,
-    pub game_name: Option<String>,
-    pub rom_name: Option<String>,
-    pub revision: Option<String>,
-    pub source: Option<String>,
-    pub checked_at: Option<i64>,
-    pub error: Option<String>,
-}
+// DAT results per ROM
 
 /// Writes a DAT result for `rom`, provided the row still holds the bytes
 /// it was computed for. `true` when a row was updated.
@@ -585,7 +575,7 @@ pub fn save_identification(conn: &Connection, rom: &Rom, state: &Identification)
              WHERE id = ?1 AND sha1 = ?9 AND size = ?10",
             params![
                 rom.id,
-                state.status.as_str(),
+                state.status,
                 state.game_name,
                 state.rom_name,
                 state.revision,
@@ -603,44 +593,6 @@ pub fn save_identification(conn: &Connection, rom: &Rom, state: &Identification)
 // ---------------------------------------------------------------------------
 // Covers
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CoverStatus {
-    /// Downloaded and on disk.
-    Ok,
-    /// libretro has no cover for this name (404); not retried unless asked.
-    NotFound,
-    /// Network or disk error; retried next time.
-    Error,
-}
-
-impl CoverStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            CoverStatus::Ok => "ok",
-            CoverStatus::NotFound => "none",
-            CoverStatus::Error => "error",
-        }
-    }
-    fn parse(s: &str) -> CoverStatus {
-        match s {
-            "ok" => CoverStatus::Ok,
-            "none" => CoverStatus::NotFound,
-            _ => CoverStatus::Error,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct CoverRecord {
-    pub game_id: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rel_path: Option<PathBuf>,
-    pub status: CoverStatus,
-    pub fetched_at: i64,
-    pub imported: bool,
-}
-
 pub fn cover_record(conn: &Connection, game_id: i64) -> Result<Option<CoverRecord>> {
     conn.query_row(
         "SELECT game_id, rel_path, status, fetched_at, imported FROM covers WHERE game_id = ?1",
@@ -649,7 +601,7 @@ pub fn cover_record(conn: &Connection, game_id: i64) -> Result<Option<CoverRecor
             Ok(CoverRecord {
                 game_id: r.get(0)?,
                 rel_path: r.get::<_, Option<String>>(1)?.map(PathBuf::from),
-                status: CoverStatus::parse(&r.get::<_, String>(2)?),
+                status: r.get(2)?,
                 fetched_at: r.get(3)?,
                 imported: r.get(4)?,
             })
@@ -687,7 +639,7 @@ pub fn upsert_cover(
             params![
                 game_id,
                 rel.map(|p| p.to_string_lossy().into_owned()),
-                status.as_str(),
+                status,
                 fsutil::now_secs()
             ],
         )
@@ -714,39 +666,6 @@ pub fn delete_catalog_cover(conn: &Connection, game_id: i64) -> Result<()> {
     )
     .map_err(|e| Error::db(e, "invalidate previous catalog cover"))?;
     Ok(())
-}
-
-#[derive(Debug, Clone, Default, Serialize, PartialEq)]
-pub struct CoverStats {
-    pub platform: String,
-    pub games: usize,
-    pub with_cover: usize,
-    pub not_found: usize,
-    pub supported: bool,
-}
-
-pub fn cover_stats(conn: &Connection) -> Result<Vec<CoverStats>> {
-    query_rows(
-        conn,
-        "SELECT g.platform,
-                COUNT(*),
-                SUM(CASE WHEN c.status = 'ok' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN c.status = 'none' THEN 1 ELSE 0 END)
-         FROM games g LEFT JOIN covers c ON c.game_id = g.id
-         GROUP BY g.platform ORDER BY g.platform",
-        [],
-        "cover stats",
-        |r| {
-            let platform: String = r.get(0)?;
-            Ok(CoverStats {
-                supported: crate::catalog::thumbnail_system(&platform).is_some(),
-                platform,
-                games: get_usize(r, 1)?,
-                with_cover: get_usize(r, 2)?,
-                not_found: get_usize(r, 3)?,
-            })
-        },
-    )
 }
 
 // ---------------------------------------------------------------------------

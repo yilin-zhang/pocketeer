@@ -4,8 +4,6 @@
 
 pub mod import;
 
-pub use super::db::{CoverRecord, CoverStats, CoverStatus};
-
 use crate::library::{Library, db};
 use crate::{
     Error, Result,
@@ -17,6 +15,27 @@ use rusqlite::Connection;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverStatus {
+    /// Downloaded and on disk.
+    Ok,
+    /// libretro has no cover for this name (404); not retried unless asked.
+    NotFound,
+    /// Network or disk error; retried next time.
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CoverRecord {
+    pub game_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rel_path: Option<PathBuf>,
+    pub status: CoverStatus,
+    pub fetched_at: i64,
+    pub imported: bool,
+}
+
 /// Absolute path of a game's cover if it was fetched.
 pub fn path_for(lib: &Library, game_id: i64) -> Result<Option<PathBuf>> {
     Ok(db::cover_record(lib.conn(), game_id)?
@@ -24,10 +43,6 @@ pub fn path_for(lib: &Library, game_id: i64) -> Result<Option<PathBuf>> {
         .and_then(|r| r.rel_path)
         .map(|rel| lib.root().join(rel))
         .filter(|p| p.is_file()))
-}
-
-pub fn stats(lib: &Library) -> Result<Vec<CoverStats>> {
-    db::cover_stats(lib.conn())
 }
 
 /// Use a catalog title only when every ROM in this game agrees. Local file
@@ -408,8 +423,8 @@ mod tests {
         let all = FetchOptions::default();
         let report = fetch(&lib, &http, &all, &base, &mut |_| {}).unwrap();
         assert_eq!(report.unsupported_platforms, ["weird"]);
-        let st = stats(&lib).unwrap();
-        assert_eq!(st[0].with_cover, 1);
-        assert!(!st[1].supported);
+        let st = lib.platform_stats().unwrap();
+        assert_eq!((st[0].covers, st[0].covers_not_found), (1, 1));
+        assert!(!st[1].covers_mapped);
     }
 }

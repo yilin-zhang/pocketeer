@@ -16,7 +16,7 @@ pub mod import;
 pub mod remove;
 pub mod rename;
 
-pub use db::{Game, PlatformStats, Rom, SaveVersion};
+pub use db::{Game, Rom, SaveVersion};
 
 use std::path::{Path, PathBuf};
 
@@ -138,7 +138,7 @@ impl Library {
     }
 
     /// Per-platform counts and bytes.
-    pub fn platform_stats(&self) -> Result<Vec<db::PlatformStats>> {
+    pub fn platform_stats(&self) -> Result<Vec<PlatformStats>> {
         db::platform_stats(&self.conn)
     }
 
@@ -250,13 +250,34 @@ pub fn resolve_game_roms(
     Ok(hits)
 }
 
+/// One platform of the library: what `library status` and `covers status`
+/// both show.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PlatformStats {
+    pub platform: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub games: usize,
+    pub roms: usize,
+    /// ROMs a DAT matched.
+    pub verified: usize,
+    pub bytes: u64,
+    /// Games with a cover on disk.
+    pub covers: usize,
+    /// Games libretro has no cover for.
+    pub covers_not_found: usize,
+    /// Whether libretro-thumbnails has a folder for this platform; without
+    /// one, fetching needs `--libretro-system`.
+    pub covers_mapped: bool,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Status {
     pub root: PathBuf,
     pub games: usize,
     pub roms: usize,
     pub bytes: u64,
-    pub platforms: Vec<db::PlatformStats>,
+    pub platforms: Vec<PlatformStats>,
 }
 
 #[cfg(test)]

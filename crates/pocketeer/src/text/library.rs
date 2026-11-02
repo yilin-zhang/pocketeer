@@ -465,9 +465,9 @@ impl Text for CoversStatusReport {
             .map(|s| {
                 [
                     s.platform.clone(),
-                    format!("{}/{}", s.with_cover, s.games),
-                    s.not_found.to_string(),
-                    if s.supported {
+                    format!("{}/{}", s.covers, s.games),
+                    s.covers_not_found.to_string(),
+                    if s.covers_mapped {
                         "yes".into()
                     } else {
                         "no (--libretro-system)".into()

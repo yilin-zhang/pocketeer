@@ -24,8 +24,8 @@ fn fetch_and_status() {
     let (v, code) = env.json(&["covers", "status"]);
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["data"]["platforms"][0]["games"], 2);
-    assert_eq!(v["data"]["platforms"][0]["with_cover"], 0);
-    assert_eq!(v["data"]["platforms"][0]["supported"], true);
+    assert_eq!(v["data"]["platforms"][0]["covers"], 0);
+    assert_eq!(v["data"]["platforms"][0]["covers_mapped"], true);
 
     let mut server = mockito::Server::new();
     let hit = server
@@ -57,8 +57,8 @@ fn fetch_and_status() {
     );
 
     let (v, _) = env.json(&["covers", "status"]);
-    assert_eq!(v["data"]["platforms"][0]["with_cover"], 1);
-    assert_eq!(v["data"]["platforms"][0]["not_found"], 1);
+    assert_eq!(v["data"]["platforms"][0]["covers"], 1);
+    assert_eq!(v["data"]["platforms"][0]["covers_not_found"], 1);
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn import_copies_validated_images_and_dry_run_keeps_library_unchanged() {
     let copied = env.lib.join(v["data"]["result"]["path"].as_str().unwrap());
     let (status, code) = env.json(&["covers", "status"]);
     assert_eq!(code, 0, "{status}");
-    assert_eq!(status["data"]["platforms"][0]["with_cover"], 1);
+    assert_eq!(status["data"]["platforms"][0]["covers"], 1);
     assert_eq!(fs::read(&copied).unwrap(), original);
     assert_eq!(fs::read(&source).unwrap(), original);
     fs::write(&source, b"not an image").unwrap();

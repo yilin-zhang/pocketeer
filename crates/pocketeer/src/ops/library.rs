@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use pocketeer_core::{
     Error, Result,
     library::{
-        self, Game, Library,
-        covers::{self, CoverStats, FetchOptions, FetchReport},
+        self, Game, Library, PlatformStats,
+        covers::{self, FetchOptions, FetchReport},
         import::{self, ImportAction, ImportOptions, ImportPlan, ImportResult},
         remove::{self, RemovePlan, RemoveResult},
         rename::{self, RenamePlan, RenameResult},
@@ -486,11 +486,16 @@ pub fn covers_fetch(
 
 #[derive(Debug, Serialize)]
 pub struct CoversStatusReport {
-    pub platforms: Vec<CoverStats>,
+    pub platforms: Vec<PlatformStats>,
 }
 
 pub fn covers_status(ctx: &Context) -> Result<CoversStatusReport> {
     Ok(CoversStatusReport {
-        platforms: covers::stats(&ctx.library()?)?,
+        platforms: ctx
+            .library()?
+            .platform_stats()?
+            .into_iter()
+            .filter(|p| p.games > 0)
+            .collect(),
     })
 }

@@ -2,7 +2,6 @@
 //! valid only for that catalog revision; transport/parse failures stay retryable.
 use super::{Library, db};
 
-pub use super::db::{DatStatus, Identification};
 use crate::{
     Error, Result,
     catalog::libretro,
@@ -12,6 +11,43 @@ use crate::{
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
+
+/// Where a ROM stands against its platform's DAT.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatStatus {
+    #[default]
+    Unchecked,
+    Matched,
+    NoMatch,
+    Error,
+    Unsupported,
+    Ambiguous,
+}
+impl DatStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unchecked => "not checked",
+            Self::Matched => "matched",
+            Self::NoMatch => "no match in DAT",
+            Self::Error => "failed; will retry",
+            Self::Unsupported => "no automatic DAT source",
+            Self::Ambiguous => "multiple DAT matches",
+        }
+    }
+}
+
+/// What the DAT said about one ROM, as stored on its row.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Identification {
+    pub status: DatStatus,
+    pub game_name: Option<String>,
+    pub rom_name: Option<String>,
+    pub revision: Option<String>,
+    pub source: Option<String>,
+    pub checked_at: Option<i64>,
+    pub error: Option<String>,
+}
 
 #[derive(Debug, Default, Serialize)]
 pub struct Report {
@@ -405,7 +441,7 @@ mod tests {
     #[test]
     fn manual_dat_match_is_preserved_when_automatic_catalog_lacks_it() {
         let (_tmp, mut lib, cache) = setup();
-        let manual = db::Identification {
+        let manual = Identification {
             status: DatStatus::Matched,
             game_name: Some("Custom verified title".into()),
             source: Some("manual".into()),
