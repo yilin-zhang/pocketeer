@@ -42,7 +42,7 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     Cell::from("lib")
                 };
-                use pocketeer_core::library::identify::Status as DatStatus;
+                use pocketeer_core::library::identify::DatStatus;
                 let states: Vec<_> = g.game.roms.iter().map(|r| r.dat.status).collect();
                 let (symbol, color) = if states.iter().all(|s| *s == DatStatus::Matched) {
                     ("✓", Palette::Good)
@@ -245,7 +245,7 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
                 lines.push(kv_text("Size", text::bytes(rom.size)));
             }
             // The DAT column shows a match; only other states need words.
-            if rom.dat.status != pocketeer_core::library::identify::Status::Matched {
+            if rom.dat.status != pocketeer_core::library::identify::DatStatus::Matched {
                 lines.push(kv_text("DAT", rom.dat.status.label().to_string()));
             }
             if let Some(name) = rom.dat.game_name.as_ref().filter(|n| **n != game.name) {

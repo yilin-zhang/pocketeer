@@ -411,10 +411,10 @@ pub fn standardize(ctx: &Context, platform: Option<&str>, mode: Mode) -> Result<
     Ok(Batch::stage(ctx, mode, renames, &mut |_| {}))
 }
 
-pub type CoverImportReport = Staged<covers::import::ImportPlan>;
+pub type CoverImportReport = Staged<covers::import::CoverImportPlan>;
 
-impl Apply for covers::import::ImportPlan {
-    type Output = covers::import::ImportResult;
+impl Apply for covers::import::CoverImportPlan {
+    type Output = covers::import::CoverImportResult;
     fn apply(&mut self, ctx: &Context, _: Progress<'_>) -> Result<Self::Output> {
         covers::import::apply(&mut ctx.library()?, self)
     }

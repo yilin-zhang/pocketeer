@@ -332,7 +332,7 @@ impl Session {
                 g.game
                     .roms
                     .iter()
-                    .any(|r| r.dat.status == identify::Status::Unchecked)
+                    .any(|r| r.dat.status == identify::DatStatus::Unchecked)
             })
         });
         if (self.auto.metadata_done && !unchecked) || self.busy.side.is_some() {

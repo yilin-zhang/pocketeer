@@ -409,7 +409,7 @@ impl Text for FetchReport {
             r.items.iter().map(|item| {
                 let glyph = match item.status {
                     CoverStatus::Ok => "✓",
-                    CoverStatus::None => "·",
+                    CoverStatus::NotFound => "·",
                     CoverStatus::Error => "✗",
                 };
                 format!(

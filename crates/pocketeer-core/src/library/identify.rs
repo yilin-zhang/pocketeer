@@ -2,7 +2,7 @@
 //! valid only for that catalog revision; transport/parse failures stay retryable.
 use super::{Library, db};
 
-pub use super::db::{Identification, Status};
+pub use super::db::{DatStatus, Identification};
 use crate::{
     Error, Result,
     catalog::libretro,
@@ -31,13 +31,13 @@ pub struct Options<'a> {
 }
 
 impl Report {
-    fn count(&mut self, status: Status) {
+    fn count(&mut self, status: DatStatus) {
         match status {
-            Status::Matched => self.matched += 1,
-            Status::NoMatch => self.no_match += 1,
-            Status::Ambiguous => self.ambiguous += 1,
-            Status::Unsupported => self.unsupported += 1,
-            Status::Unchecked | Status::Error => {}
+            DatStatus::Matched => self.matched += 1,
+            DatStatus::NoMatch => self.no_match += 1,
+            DatStatus::Ambiguous => self.ambiguous += 1,
+            DatStatus::Unsupported => self.unsupported += 1,
+            DatStatus::Unchecked | DatStatus::Error => {}
         }
     }
 }
@@ -116,11 +116,11 @@ pub fn run(
 fn mark_unsupported(lib: &mut Library, roms: &[db::Rom], report: &mut Report) -> Result<()> {
     for rom in roms {
         match rom.dat.status {
-            Status::Matched => report.unchanged += 1,
-            Status::Unsupported => report.unsupported += 1,
+            DatStatus::Matched => report.unchanged += 1,
+            DatStatus::Unsupported => report.unsupported += 1,
             _ => {
                 let state = Identification {
-                    status: Status::Unsupported,
+                    status: DatStatus::Unsupported,
                     checked_at: Some(fsutil::now_secs()),
                     ..Default::default()
                 };
@@ -139,9 +139,9 @@ fn mark_failed(lib: &mut Library, roms: &[db::Rom], error: &str) -> Result<()> {
         let mut state = rom.dat.clone();
         if matches!(
             state.status,
-            Status::Unchecked | Status::Error | Status::Unsupported
+            DatStatus::Unchecked | DatStatus::Error | DatStatus::Unsupported
         ) {
-            state.status = Status::Error;
+            state.status = DatStatus::Error;
         }
         state.error = Some(error.to_string());
         save(lib, rom, &state)?;
@@ -216,14 +216,14 @@ impl Catalog {
             .get(&(rom.size, rom.sha1.to_ascii_lowercase()));
         match names.map(Vec::as_slice).unwrap_or_default() {
             [(game, name)] => {
-                state.status = Status::Matched;
+                state.status = DatStatus::Matched;
                 state.game_name = Some(game.clone());
                 state.rom_name = Some(name.clone());
             }
-            [] => state.status = Status::NoMatch,
-            _ => state.status = Status::Ambiguous,
+            [] => state.status = DatStatus::NoMatch,
+            _ => state.status = DatStatus::Ambiguous,
         }
-        if rom.dat.source.as_deref() == Some("manual") && state.status != Status::Matched {
+        if rom.dat.source.as_deref() == Some("manual") && state.status != DatStatus::Matched {
             return Verdict::KeepManual;
         }
         Verdict::New(state)
@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn cached_identification_keeps_names_and_rematches_only_after_revision_changes() {
         let (_tmp, mut lib, cache) = setup();
-        assert_eq!(rom(&lib, "my title.gba").dat.status, Status::Unchecked);
+        assert_eq!(rom(&lib, "my title.gba").dat.status, DatStatus::Unchecked);
         store(&cache, XML);
         let report = offline(&mut lib, &cache);
         assert_eq!((report.matched, report.no_match), (1, 1));
@@ -317,7 +317,7 @@ mod tests {
         .unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].new_name, "Corrected Name (USA).fkh");
-        assert_eq!(rom(&lib, "unknown.gba").dat.status, Status::NoMatch);
+        assert_eq!(rom(&lib, "unknown.gba").dat.status, DatStatus::NoMatch);
     }
 
     #[test]
@@ -325,7 +325,7 @@ mod tests {
         let (_tmp, mut lib, cache) = setup();
         let report = offline(&mut lib, &cache);
         assert_eq!(report.errors.len(), 1);
-        assert_eq!(rom(&lib, "my title.gba").dat.status, Status::Error);
+        assert_eq!(rom(&lib, "my title.gba").dat.status, DatStatus::Error);
         store(&cache, XML);
         offline(&mut lib, &cache);
         let before = rom(&lib, "my title.gba").dat;
@@ -350,7 +350,7 @@ mod tests {
         failed.assert();
         assert_eq!(r.errors.len(), 1);
         let after = rom(&lib, "my title.gba").dat;
-        assert_eq!(after.status, Status::Matched);
+        assert_eq!(after.status, DatStatus::Matched);
         assert_eq!(after.game_name, before.game_name);
         assert!(after.error.is_some());
         failed.remove();
@@ -389,24 +389,24 @@ mod tests {
             .as_bytes(),
         );
         offline(&mut lib, &cache);
-        assert_eq!(rom(&lib, "my title.gba").dat.status, Status::NoMatch);
+        assert_eq!(rom(&lib, "my title.gba").dat.status, DatStatus::NoMatch);
         let duplicated = xml.replace("</datafile>", "<game name=\"Other version\"><rom name=\"Other.gba\" size=\"11\" sha1=\"2aae6c35c94fcfb415dbe95f408b9ce91ee846ed\"/></game></datafile>");
         store(&cache, duplicated.as_bytes());
         offline(&mut lib, &cache);
         let state = rom(&lib, "my title.gba").dat;
-        assert_eq!(state.status, Status::Ambiguous);
+        assert_eq!(state.status, DatStatus::Ambiguous);
         assert!(state.game_name.is_none());
         store(&cache, b"clrmamepro ( name \"broken\" ) game (");
         let report = offline(&mut lib, &cache);
         assert_eq!(report.errors.len(), 1);
-        assert_eq!(rom(&lib, "my title.gba").dat.status, Status::Ambiguous);
+        assert_eq!(rom(&lib, "my title.gba").dat.status, DatStatus::Ambiguous);
     }
 
     #[test]
     fn manual_dat_match_is_preserved_when_automatic_catalog_lacks_it() {
         let (_tmp, mut lib, cache) = setup();
         let manual = db::Identification {
-            status: Status::Matched,
+            status: DatStatus::Matched,
             game_name: Some("Custom verified title".into()),
             source: Some("manual".into()),
             ..Default::default()
@@ -418,7 +418,7 @@ mod tests {
             (report.matched, report.no_match, report.unchanged),
             (1, 0, 1)
         );
-        assert_eq!(rom(&lib, "unknown.gba").dat.status, Status::Matched);
+        assert_eq!(rom(&lib, "unknown.gba").dat.status, DatStatus::Matched);
     }
 
     #[test]

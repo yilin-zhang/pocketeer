@@ -17,7 +17,7 @@ use std::{
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ImportPlan {
+pub struct CoverImportPlan {
     pub game: db::Game,
     pub source: PathBuf,
     pub destination: PathBuf,
@@ -32,7 +32,7 @@ pub struct ImportPlan {
     image: Arc<[u8]>,
 }
 
-impl Plan for ImportPlan {
+impl Plan for CoverImportPlan {
     fn changes(&self) -> usize {
         1
     }
@@ -45,7 +45,7 @@ fn invalid(source: &Path, reason: impl Into<String>) -> Error {
     }
 }
 
-pub fn plan(lib: &Library, game_id: i64, source: &Path) -> Result<ImportPlan> {
+pub fn plan(lib: &Library, game_id: i64, source: &Path) -> Result<CoverImportPlan> {
     let game = db::get_game(lib.conn(), game_id)?.ok_or_else(|| Error::RomNotFound {
         spec: format!("game {game_id}"),
     })?;
@@ -75,7 +75,7 @@ pub fn plan(lib: &Library, game_id: i64, source: &Path) -> Result<ImportPlan> {
         .decode()
         .map_err(|e| invalid(source, format!("Cannot decode cover image: {e}")))?;
     let digest = format!("{:x}", Sha1::digest(&bytes));
-    Ok(ImportPlan {
+    Ok(CoverImportPlan {
         previous: db::cover_record(lib.conn(), game_id)?,
         game,
         source: source.to_path_buf(),
@@ -91,19 +91,19 @@ pub fn plan(lib: &Library, game_id: i64, source: &Path) -> Result<ImportPlan> {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ImportResult {
+pub struct CoverImportResult {
     pub path: PathBuf,
     pub replaced: bool,
     pub warnings: Vec<String>,
 }
 
-impl Applied for ImportResult {
+impl Applied for CoverImportResult {
     fn failed(&self) -> usize {
         0
     }
 }
 
-pub fn apply(lib: &mut Library, plan: &ImportPlan) -> Result<ImportResult> {
+pub fn apply(lib: &mut Library, plan: &CoverImportPlan) -> Result<CoverImportResult> {
     if lib.root() != plan.library_root {
         return Err(Error::Stale {
             what: "the library".into(),
@@ -158,7 +158,7 @@ pub fn apply(lib: &mut Library, plan: &ImportPlan) -> Result<ImportResult> {
             "New cover saved; old image could not be removed: {e}"
         ));
     }
-    Ok(ImportResult {
+    Ok(CoverImportResult {
         path: plan.destination.clone(),
         replaced: plan.previous.as_ref().is_some_and(|p| p.rel_path.is_some()),
         warnings,

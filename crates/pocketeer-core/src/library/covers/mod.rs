@@ -37,7 +37,7 @@ pub fn cover_name(game: &db::Game) -> &str {
         return &game.name;
     };
     if game.roms.iter().all(|r| {
-        r.dat.status == crate::library::identify::Status::Matched
+        r.dat.status == crate::library::identify::DatStatus::Matched
             && r.dat.game_name.as_deref() == Some(first)
     }) {
         first
@@ -124,7 +124,7 @@ fn fetch_one(http: &Http, url: &str, full: &Path) -> (CoverStatus, Option<String
         Ok(crate::net::Conditional::NotModified) => {
             (CoverStatus::Error, Some("unexpected 304".into()))
         }
-        Err(Error::Http { status: 404, .. }) => (CoverStatus::None, None),
+        Err(Error::Http { status: 404, .. }) => (CoverStatus::NotFound, None),
         Err(e) => (CoverStatus::Error, Some(e.to_string())),
     }
 }
@@ -155,7 +155,7 @@ pub fn fetch(
                     report.summary.already += 1;
                     false
                 }
-                Some(r) if r.status == CoverStatus::None && !opts.retry_missing => {
+                Some(r) if r.status == CoverStatus::NotFound && !opts.retry_missing => {
                     report.summary.not_found += 1;
                     false
                 }
@@ -241,7 +241,7 @@ pub fn fetch(
                 }
                 Ok(true) => match status {
                     CoverStatus::Ok => report.summary.fetched += 1,
-                    CoverStatus::None => report.summary.not_found += 1,
+                    CoverStatus::NotFound => report.summary.not_found += 1,
                     CoverStatus::Error => report.summary.errors += 1,
                 },
                 Err(e) => {

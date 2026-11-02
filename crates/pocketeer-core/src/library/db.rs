@@ -228,7 +228,7 @@ fn rom_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Rom> {
         crc32: r.get("crc32")?,
         sha1: r.get("sha1")?,
         dat: Identification {
-            status: Status::parse(&r.get::<_, String>("dat_status")?)?,
+            status: DatStatus::parse(&r.get::<_, String>("dat_status")?)?,
             game_name: r.get("dat_game_name")?,
             rom_name: r.get("dat_rom_name")?,
             revision: r.get("dat_revision")?,
@@ -521,7 +521,7 @@ const MIGRATION_RENAMES: &str = "
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Status {
+pub enum DatStatus {
     #[default]
     Unchecked,
     Matched,
@@ -530,7 +530,7 @@ pub enum Status {
     Unsupported,
     Ambiguous,
 }
-impl Status {
+impl DatStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Unchecked => "unchecked",
@@ -565,7 +565,7 @@ impl Status {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Identification {
-    pub status: Status,
+    pub status: DatStatus,
     pub game_name: Option<String>,
     pub rom_name: Option<String>,
     pub revision: Option<String>,
@@ -608,7 +608,7 @@ pub enum CoverStatus {
     /// Downloaded and on disk.
     Ok,
     /// libretro has no cover for this name (404); not retried unless asked.
-    None,
+    NotFound,
     /// Network or disk error; retried next time.
     Error,
 }
@@ -617,14 +617,14 @@ impl CoverStatus {
     fn as_str(self) -> &'static str {
         match self {
             CoverStatus::Ok => "ok",
-            CoverStatus::None => "none",
+            CoverStatus::NotFound => "none",
             CoverStatus::Error => "error",
         }
     }
     fn parse(s: &str) -> CoverStatus {
         match s {
             "ok" => CoverStatus::Ok,
-            "none" => CoverStatus::None,
+            "none" => CoverStatus::NotFound,
             _ => CoverStatus::Error,
         }
     }
@@ -1038,7 +1038,7 @@ mod tests {
 
         let games = list_games(&c, None, None).unwrap();
         assert_eq!(games.len(), 1);
-        assert_eq!(games[0].roms[0].dat.status, Status::Matched);
+        assert_eq!(games[0].roms[0].dat.status, DatStatus::Matched);
         assert_eq!(list_games(&c, Some("gb"), None).unwrap().len(), 0);
         assert_eq!(list_games(&c, None, Some("hello")).unwrap().len(), 1);
         assert_eq!(

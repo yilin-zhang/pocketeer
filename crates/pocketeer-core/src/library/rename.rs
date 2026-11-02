@@ -171,7 +171,7 @@ pub fn standardize_plan(
             } else {
                 // Once a DAT has been consulted, do not guess a different
                 // version from a similar filename.
-                if rom.dat.status != super::identify::Status::Unchecked {
+                if rom.dat.status != super::identify::DatStatus::Unchecked {
                     continue;
                 }
                 let list = lists

@@ -16,7 +16,7 @@ use pocketeer_core::{
         roms::DeletePlan,
     },
     library::{
-        covers::import::ImportPlan as CoverImportPlan, import::ImportPlan,
+        covers::import::CoverImportPlan, import::ImportPlan,
         remove::RemovePlan as LibraryRemovePlan, rename::RenamePlan,
     },
     plan::{Plan, Progress},

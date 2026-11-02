@@ -347,7 +347,7 @@ fn cover_news(c: &FetchReport) -> Vec<(usize, &'static str)> {
     let missing = c
         .items
         .iter()
-        .filter(|i| i.status == CoverStatus::None)
+        .filter(|i| i.status == CoverStatus::NotFound)
         .count();
     [
         (c.summary.fetched, "downloaded"),
