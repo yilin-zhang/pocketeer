@@ -548,6 +548,69 @@ mod tests {
         assert_eq!(selected_id(&app), 7);
     }
 
+    /// Pumps the app until `done` holds (the worker runs on its own threads).
+    fn settle(app: &mut App, what: &str, done: impl Fn(&App) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !done(app) {
+            assert!(std::time::Instant::now() < deadline, "never got to: {what}");
+            app.pump();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn removing_a_game_asks_first_then_moves_it_to_the_library_trash() {
+        use pocketeer_core::{
+            HashCache,
+            library::{
+                Library,
+                import::{self, ImportOptions},
+            },
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("Only Game.gba"), "rom").unwrap();
+        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
+        let plan = import::plan_folder(
+            &lib,
+            &src,
+            Some("gba"),
+            &[],
+            &ImportOptions::default(),
+            None,
+            &mut HashCache::in_memory(),
+            &mut |_| {},
+        )
+        .unwrap();
+        import::apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
+        drop(lib);
+
+        let mut app = test_app(tmp.path());
+        app.reload();
+        let games = |a: &App| a.session().library().map_or(0, |l| l.games.len());
+        settle(&mut app, "the library is loaded", |a| games(a) == 1);
+        app.key(KeyEvent::from(KeyCode::Char('x')));
+        settle(&mut app, "the remove is planned", |a| {
+            matches!(a.modal(), Some(Modal::Confirm { .. }))
+        });
+        let Some(Modal::Confirm { title, .. }) = app.modal() else {
+            unreachable!()
+        };
+        assert_eq!(title, "Remove Only Game?");
+        assert_eq!(games(&app), 1, "nothing happens before confirming");
+
+        app.key(KeyEvent::from(KeyCode::Char('y')));
+        settle(&mut app, "the game is gone", |a| games(a) == 0);
+        let trash = tmp.path().join("library/.trash");
+        let trashed: Vec<_> = walkdir::WalkDir::new(&trash)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name() == "Only Game.gba")
+            .collect();
+        assert_eq!(trashed.len(), 1, "the file went to the trash, not away");
+    }
+
     #[test]
     fn prompts_take_emacs_keys_and_c_n_picks_a_suggestion() {
         let tmp = tempfile::tempdir().unwrap();

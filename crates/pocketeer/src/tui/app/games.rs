@@ -435,10 +435,10 @@ impl Games {
         };
         let platform = game.game.platform.clone();
         let specs: Vec<String> = game.game.roms.iter().map(|r| r.id.to_string()).collect();
-        match library_ops::plan_remove(&cx.session.ctx(), Some(&platform), &specs) {
-            Err(e) => cx.dialog.error("Can't remove", &e),
-            Ok(plan) => cx.planned(plan),
-        }
+        cx.session.plan("Planning", move |ctx, _| {
+            let plan = library_ops::plan_remove(ctx, Some(&platform), &specs)?;
+            Ok(pending::preview(plan))
+        });
     }
 
     // -- covers -------------------------------------------------------------
