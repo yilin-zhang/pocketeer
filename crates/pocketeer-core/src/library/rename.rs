@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::{
     Error, Result,
-    fsutil::names::{FileRename, RenameKind, apply_renames, complete_name, stem, validate_name},
+    fsutil::names::{FileRename, apply_renames, complete_name, stem, validate_name},
     plan::{Applied, Plan},
 };
 
@@ -78,7 +78,6 @@ pub fn plan(
     let library_file = FileRename {
         from: rom.rel_path.clone(),
         to,
-        kind: RenameKind::Rom,
     };
     Ok(RenamePlan {
         rom: RomRef::of(&game, &rom),
@@ -135,7 +134,6 @@ pub fn apply(lib: &mut Library, plan: &RenamePlan) -> Result<RenameResult> {
             .map(|m| FileRename {
                 from: m.to.clone(),
                 to: m.from.clone(),
-                kind: m.kind,
             })
             .collect();
         return Err(Error::ApplyFailed {

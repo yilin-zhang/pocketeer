@@ -9,7 +9,6 @@ use pocketeer_core::{
         clean::JunkKind,
         roms::Identity,
     },
-    names::RenameKind,
     plan::Plan,
     transfer::Presence,
 };
@@ -348,15 +347,13 @@ impl Text for RenameReport {
     fn text(&self, reader: Reader) -> String {
         let report = self;
         let mut text = String::new();
-        for file in &report.plan.moves {
+        let plan = &report.plan;
+        let files =
+            std::iter::once(("ROM", &plan.rom)).chain(plan.saves.iter().map(|s| ("save", s)));
+        for (what, file) in files {
             let _ = writeln!(
                 text,
-                "{}: {} → {}",
-                match file.kind {
-                    RenameKind::Rom => "ROM",
-                    RenameKind::Save => "save",
-                    RenameKind::SaveState => "save state",
-                },
+                "{what}: {} → {}",
                 file.from.display(),
                 file.to.display()
             );

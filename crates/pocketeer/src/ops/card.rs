@@ -14,7 +14,6 @@ use pocketeer_core::{
     },
     catalog::inventory::{Inventory, Platforms},
     library::import::{ImportPlan, ImportResult},
-    names::RenameKind,
     net::{Policy, Source},
     plan::{Event, Progress},
     transfer::{
@@ -216,9 +215,8 @@ impl Apply for card_rename::CardRenamePlan {
         let result = card_rename::apply_card(&ctx.pocket()?, self)?;
         // Backed-up saves follow, or the next backup would see them as new.
         let saves: Vec<_> = self
-            .moves
+            .saves
             .iter()
-            .filter(|m| m.kind == RenameKind::Save)
             .map(|m| (m.from.clone(), m.to.clone()))
             .collect();
         if !saves.is_empty()

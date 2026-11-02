@@ -2,7 +2,7 @@
 
 use crate::fsutil::Stamp;
 use crate::fsutil::names::{
-    FileRename, RenameKind, apply_renames, complete_name, extension, stem, validate_name,
+    FileRename, apply_renames, complete_name, extension, stem, validate_name,
 };
 use crate::plan::{Applied, Plan};
 use crate::{Error, Result};
@@ -11,7 +11,9 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CardRenamePlan {
-    pub moves: Vec<FileRename>,
+    pub rom: FileRename,
+    /// The ROM's ordinary saves, which follow its name.
+    pub saves: Vec<FileRename>,
     pub warnings: Vec<String>,
     #[serde(skip)]
     identity: crate::card::CardIdentity,
@@ -21,7 +23,7 @@ pub struct CardRenamePlan {
 }
 impl Plan for CardRenamePlan {
     fn changes(&self) -> usize {
-        self.moves.len()
+        1 + self.saves.len()
     }
 }
 
@@ -52,11 +54,11 @@ pub fn plan_card(pocket: &crate::Pocket, path: &Path, new_name: &str) -> Result<
     if pocket.root().join(&destination).exists() {
         return Err(Error::AlreadyExists { path: destination });
     }
-    let mut moves = vec![FileRename {
+    let rom_move = FileRename {
         from: path.to_path_buf(),
         to: destination,
-        kind: RenameKind::Rom,
-    }];
+    };
+    let mut saves = Vec::new();
     let save_dir = crate::card::save_dir_for(path).ok_or_else(|| Error::InvalidPath {
         path: path.to_path_buf(),
         reason: "not inside a ROM folder pocketeer knows the saves of".into(),
@@ -94,10 +96,9 @@ pub fn plan_card(pocket: &crate::Pocket, path: &Path, new_name: &str) -> Result<
                         if pocket.root().join(&to).exists() {
                             return Err(Error::AlreadyExists { path: to });
                         }
-                        moves.push(FileRename {
+                        saves.push(FileRename {
                             from: save_dir.join(name),
                             to,
-                            kind: RenameKind::Save,
                         });
                     }
                 }
@@ -106,13 +107,14 @@ pub fn plan_card(pocket: &crate::Pocket, path: &Path, new_name: &str) -> Result<
             Err(e) => return Err(Error::io(&dir, e)),
         }
     }
-    moves[1..].sort_by(|a, b| a.from.cmp(&b.from));
+    saves.sort_by(|a, b| a.from.cmp(&b.from));
     let warnings = vec![
         "Memories stay unchanged; loading an existing save state may require the old ROM name."
             .into(),
     ];
     Ok(CardRenamePlan {
-        moves,
+        rom: rom_move,
+        saves,
         warnings,
         identity: crate::card::CardIdentity::read(pocket)?,
         stamp: Stamp::of(&pocket.root().join(path))?,
@@ -121,7 +123,7 @@ pub fn plan_card(pocket: &crate::Pocket, path: &Path, new_name: &str) -> Result<
 
 pub fn apply_card(pocket: &crate::Pocket, plan: &CardRenamePlan) -> Result<CardRenameResult> {
     plan.identity.check(pocket)?;
-    let rom = &plan.moves[0];
+    let rom = &plan.rom;
     let source = pocket.root().join(&rom.from);
     if Stamp::of(&source)? != plan.stamp {
         return Err(Error::Stale {
@@ -129,7 +131,7 @@ pub fn apply_card(pocket: &crate::Pocket, plan: &CardRenamePlan) -> Result<CardR
         });
     }
     let mut index = super::roms::Index::scan(pocket)?;
-    let renamed = apply_renames(pocket.root(), &plan.moves)?;
+    let renamed = apply_renames(pocket.root(), std::iter::once(rom).chain(&plan.saves))?;
     let mut warnings = plan.warnings.clone();
     if let Err(e) = index
         .relocate(pocket, &rom.from, &rom.to)
@@ -179,7 +181,7 @@ mod card_tests {
             "new name",
         )
         .unwrap();
-        assert_eq!(preview.moves.len(), 3);
+        assert_eq!(preview.saves.len(), 2);
         let result = apply_card(&pocket, &preview).unwrap();
         assert_eq!(result.renamed, 3);
         assert_eq!(

@@ -7,20 +7,11 @@ use serde::Serialize;
 use super::{is_hidden, rename_no_replace};
 use crate::{Error, Result};
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RenameKind {
-    Rom,
-    Save,
-    SaveState,
-}
-
 /// One file move, both paths relative to the same root (SD card or library).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FileRename {
     pub from: PathBuf,
     pub to: PathBuf,
-    pub kind: RenameKind,
 }
 
 /// File name without its extension, when it has a short one
@@ -72,7 +63,11 @@ pub fn validate_name(name: &str) -> Result<()> {
 /// Renames in order, all or nothing: the first failure moves every rename
 /// already done back, then is returned. A target that already exists is a
 /// failure, never an overwrite. Returns how many files were renamed.
-pub fn apply_renames(root: &Path, renames: &[FileRename]) -> Result<usize> {
+pub fn apply_renames<'a>(
+    root: &Path,
+    renames: impl IntoIterator<Item = &'a FileRename>,
+) -> Result<usize> {
+    let renames: Vec<&FileRename> = renames.into_iter().collect();
     let mut done = 0;
     let result = renames.iter().try_for_each(|r| {
         rename_one(root, r)?;
@@ -151,12 +146,10 @@ mod tests {
             FileRename {
                 from: "a".into(),
                 to: "new".into(),
-                kind: RenameKind::Rom,
             },
             FileRename {
                 from: "b".into(),
                 to: "occupied".into(),
-                kind: RenameKind::Save,
             },
         ];
         assert!(apply_renames(tmp.path(), &moves).is_err());
