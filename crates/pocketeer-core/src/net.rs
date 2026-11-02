@@ -486,7 +486,8 @@ mod tests {
             .fetch(
                 &http,
                 "k",
-                "http://127.0.0.1:9/x",
+                // Never contacted: offline means no request at all.
+                "http://example.invalid/x",
                 "inventory",
                 Policy::Offline,
             )
@@ -499,8 +500,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cache = Cache::new(tmp.path());
         let http = Http::new(None).unwrap();
-        // Port 9 (discard) refuses connections quickly.
-        let url = "http://127.0.0.1:9/x";
+        let mut server = mockito::Server::new();
+        let down = server.mock("GET", "/x").with_status(503).create();
+        let url = format!("{}/x", server.url());
+        let url = url.as_str();
         cache.store("k", url, b"old", None).unwrap();
         let got = cache.fetch(&http, "k", url, "t", Policy::Refresh).unwrap();
         assert_eq!(got.bytes, b"old");
@@ -511,5 +514,6 @@ mod tests {
                 ..
             }
         ));
+        down.assert();
     }
 }
