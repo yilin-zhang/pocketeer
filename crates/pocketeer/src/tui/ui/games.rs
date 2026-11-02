@@ -333,7 +333,10 @@ fn placeholder(frame: &mut Frame, area: Rect, title: &str, what: &str, keys: &[(
     frame.render_widget(Paragraph::new(dots), inner);
 
     let mut lines = vec![Line::from(dim(what.to_string())), Line::from("")];
-    lines.extend(keys.iter().map(|(k, what)| key_line(&[(k, what)])));
+    lines.extend(
+        keys.iter()
+            .map(|(k, what)| key_line(&[(k, what)], usize::MAX)),
+    );
     let height = lines.len() as u16;
     let width = lines
         .iter()

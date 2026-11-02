@@ -429,15 +429,16 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("q", "quit"),
         ],
         Tab::Games => &[
+            // Most used first: a narrow legend drops keys from the end.
             ("a", "import"),
+            ("S", "copy to card"),
             ("i", "from card"),
             ("e", "rename"),
-            ("d", "check DAT"),
-            ("t", "standard names"),
             ("x", "remove"),
-            ("b", "import cover"),
+            ("t", "standard names"),
+            ("d", "check DAT"),
             ("f", "fetch cover"),
-            ("S", "copy to card"),
+            ("b", "import cover"),
             ("?", "help"),
             ("q", "quit"),
         ],
@@ -448,15 +449,41 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("q", "quit"),
         ],
     };
-    frame.render_widget(Paragraph::new(key_line(keys)), keys_row);
+    frame.render_widget(
+        Paragraph::new(key_line(keys, keys_row.width as usize)),
+        keys_row,
+    );
 }
 
-/// ` [key] description  [key] description …`: a button legend.
-fn key_line(keys: &[(&str, &str)]) -> Line<'static> {
+/// ` [key] description  [key] description …`: a button legend. When it is
+/// wider than `width`, keys are left out from the end of the list rather
+/// than cut mid-word; help and quit always stay, since `?` lists the rest.
+fn key_line(keys: &[(&str, &str)], width: usize) -> Line<'static> {
+    fn entry(key: &str, what: &str) -> [Span<'static>; 2] {
+        [keycap(key), dim(format!(" {what}  "))]
+    }
+    fn entry_width(e: &[Span<'static>; 2]) -> usize {
+        e.iter().map(Span::width).sum()
+    }
+    let kept = |key: &str| matches!(key, "?" | "q");
+    let reserved: usize = keys
+        .iter()
+        .filter(|(k, _)| kept(k))
+        .map(|(k, w)| entry_width(&entry(k, w)))
+        .sum();
+    let mut room = width.saturating_sub(1 + reserved);
     let mut spans = vec![Span::raw(" ")];
-    for (k, what) in keys {
-        spans.push(keycap(k));
-        spans.push(dim(format!(" {what}  ")));
+    for (k, what) in keys.iter().filter(|(k, _)| !kept(k)) {
+        let e = entry(k, what);
+        let w = entry_width(&e);
+        if w > room {
+            break;
+        }
+        room -= w;
+        spans.extend(e);
+    }
+    for (k, what) in keys.iter().filter(|(k, _)| kept(k)) {
+        spans.extend(entry(k, what));
     }
     Line::from(spans)
 }
@@ -514,4 +541,37 @@ fn no_card(app: &App) -> Paragraph<'static> {
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .block(panel("CARD").padding(Padding::new(2, 2, 1, 1)))
+}
+
+#[cfg(test)]
+mod key_line_tests {
+    use super::key_line;
+
+    fn text(width: usize) -> String {
+        let keys = [
+            ("a", "import"),
+            ("x", "remove"),
+            ("S", "copy to card"),
+            ("?", "help"),
+            ("q", "quit"),
+        ];
+        key_line(&keys, width)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn a_narrow_legend_drops_keys_from_the_end_but_keeps_help_and_quit() {
+        let wide = text(200);
+        assert!(wide.contains("copy to card") && wide.contains("quit"));
+        let narrow = text(50);
+        assert!(narrow.len() <= 50 + 10, "{narrow}");
+        assert!(narrow.contains("import") && !narrow.contains("copy"));
+        assert!(
+            narrow.contains("help") && narrow.contains("quit"),
+            "{narrow}"
+        );
+    }
 }

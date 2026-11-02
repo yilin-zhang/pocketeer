@@ -327,8 +327,8 @@ pub(super) fn draw_device(frame: &mut Frame, app: &mut App, area: Rect) {
     let actions = vec![
         Line::from(format!("{} ROM file(s) on this card", snap.card_roms.len())),
         Line::from(""),
-        key_line(&[("3", "manage ROMs on the Games tab")]),
-        key_line(&[("V", "review save backups")]),
+        key_line(&[("3", "manage ROMs on the Games tab")], usize::MAX),
+        key_line(&[("V", "review save backups")], usize::MAX),
     ];
     frame.render_widget(
         Paragraph::new(actions)
@@ -339,7 +339,7 @@ pub(super) fn draw_device(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let junk = vec![
         Line::from("Scanned only when requested.").dim(),
-        key_line(&[("c", "scan and review cleanup")]),
+        key_line(&[("c", "scan and review cleanup")], usize::MAX),
     ];
     frame.render_widget(Paragraph::new(junk).block(panel("MACOS JUNK")), junk_area);
 
