@@ -125,6 +125,33 @@ pub fn dir_size(path: &Path) -> (usize, u64) {
     (files, bytes)
 }
 
+/// Markdown documents that ship with releases. Only these names: `.md` is
+/// also the Mega Drive / Genesis ROM extension, so `Sonic.md` is a game.
+fn is_doc(name: &str) -> bool {
+    let Some(stem) = name
+        .len()
+        .checked_sub(3)
+        .filter(|&i| name.is_char_boundary(i) && name[i..].eq_ignore_ascii_case(".md"))
+        .map(|i| &name[..i])
+    else {
+        return false;
+    };
+    [
+        "readme",
+        "changelog",
+        "changes",
+        "license",
+        "licence",
+        "contributing",
+        "credits",
+        "authors",
+        "notes",
+        "history",
+    ]
+    .iter()
+    .any(|d| stem.eq_ignore_ascii_case(d))
+}
+
 /// Hidden entries (`.DS_Store`, `._foo`, `.pocketeer`) are never content.
 pub fn is_hidden(name: &OsStr) -> bool {
     name.to_string_lossy().starts_with('.')
@@ -144,7 +171,7 @@ pub fn is_junk(path: &Path) -> bool {
         || name.starts_with("._")
         || name == ".keep"
         || name == ".gitkeep"
-        || name.ends_with(".md")
+        || is_doc(name)
         || name.ends_with(".mra")
         || (top_level && name.ends_with(".txt"))
 }
@@ -392,6 +419,7 @@ mod tests {
             "Assets/gba/.gitkeep",
             "README.md",
             "Cores/a.b/CHANGELOG.md",
+            "Cores/a.b/License.MD",
             "readme.txt",
             "Cores/a.b/game.mra",
         ] {
@@ -402,6 +430,8 @@ mod tests {
             "Cores/a.b/notes.txt",
             "Platforms/_images/gba.bin",
             "LICENSE",
+            "Assets/genesis/common/Sonic The Hedgehog 2 (World) (Rev A).md",
+            "Streets of Rage 2 (USA).MD",
         ] {
             assert!(!is_junk(Path::new(p)), "{p} should be kept");
         }
