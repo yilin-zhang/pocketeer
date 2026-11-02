@@ -90,10 +90,8 @@ fn memories_list_back_up_and_trash_with_the_files_beside_them() {
     assert_eq!(env.json(&["library", "init"]).1, 0);
     let sta = "Memories/Save States/cart_1.sta";
     let sav = "Memories/Save States/cart_1.sav";
-    let mut state = vec![0u8; 600];
-    state[28..32].copy_from_slice(b"KIRB");
     fs::create_dir_all(env.sd.join("Memories/Save States")).unwrap();
-    fs::write(env.sd.join(sta), &state).unwrap();
+    fs::copy(common::fixture("memories/cart_1.sta"), env.sd.join(sta)).unwrap();
     env.write(sav, "sram");
     env.write("Saves/gba/common/game.sav", "not a Memory");
 

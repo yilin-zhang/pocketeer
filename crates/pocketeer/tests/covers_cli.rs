@@ -75,9 +75,7 @@ fn import_copies_validated_images_and_dry_run_keeps_library_unchanged() {
     ]);
     assert_eq!(code, 0, "{v}");
     let source = env.tmp.path().join("cover.png");
-    image::RgbImage::from_pixel(3, 2, image::Rgb([10, 20, 30]))
-        .save(&source)
-        .unwrap();
+    fs::copy(common::fixture("covers/3x2.png"), &source).unwrap();
     let original = fs::read(&source).unwrap();
     let args = ["covers", "import", "game.gba", source.to_str().unwrap()];
     let mut dry = args.to_vec();

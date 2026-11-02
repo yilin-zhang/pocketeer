@@ -14,3 +14,8 @@ Synthetic SD card layouts. Nothing here comes from a real card.
 
 `core-gba-1.3.0.json`: the minimal spiritualized.GBA core.json that the
 core and CLI tests both build cards and core zips from.
+
+`memories/cart_1.sta`: a Memory made while playing a cartridge, whose
+header names the game `KIRB`.
+
+`covers/3x2.png`: a valid 3×2 PNG for `covers import`.
