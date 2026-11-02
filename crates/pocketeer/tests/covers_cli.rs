@@ -87,14 +87,10 @@ fn import_copies_validated_images_and_dry_run_keeps_library_unchanged() {
     assert!(!env.lib.join("covers/imported").exists());
     let (v, code) = env.json(&args);
     assert_eq!(code, 0, "{v}");
+    let copied = env.lib.join(v["data"]["result"]["path"].as_str().unwrap());
     let (status, code) = env.json(&["covers", "status"]);
     assert_eq!(code, 0, "{status}");
     assert_eq!(status["data"]["platforms"][0]["with_cover"], 1);
-    let lib = pocketeer_core::library::Library::open(&env.lib).unwrap();
-    let game = lib.list_games(None, None).unwrap().remove(0);
-    let copied = pocketeer_core::library::covers::path_for(&lib, game.id)
-        .unwrap()
-        .unwrap();
     assert_eq!(fs::read(&copied).unwrap(), original);
     assert_eq!(fs::read(&source).unwrap(), original);
     fs::write(&source, b"not an image").unwrap();
@@ -103,49 +99,4 @@ fn import_copies_validated_images_and_dry_run_keeps_library_unchanged() {
     assert_eq!(fs::read(&copied).unwrap(), original);
     fs::remove_file(&source).unwrap();
     assert_eq!(fs::read(&copied).unwrap(), original);
-}
-
-#[test]
-fn webp_import_detects_content_and_preserves_transparency() {
-    let env = Harness::new();
-    env.json(&["library", "init"]);
-    env.write_src("game.gba", "ROM");
-    env.json(&[
-        "library",
-        "import",
-        env.src.to_str().unwrap(),
-        "--platform",
-        "gba",
-    ]);
-    let pixels = image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 128]));
-    // Both the user's double extension and a misleading extension must work.
-    for name in ["cover.jpg.webp", "cover.jpg"] {
-        let source = env.tmp.path().join(name);
-        pixels
-            .save_with_format(&source, image::ImageFormat::WebP)
-            .unwrap();
-        let (v, code) = env.json(&["covers", "import", "game.gba", source.to_str().unwrap()]);
-        assert_eq!(code, 0, "{v}");
-        let lib = pocketeer_core::library::Library::open(&env.lib).unwrap();
-        let game = lib.list_games(None, None).unwrap().remove(0);
-        let copied = pocketeer_core::library::covers::path_for(&lib, game.id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(copied.extension().unwrap(), "webp");
-        assert_eq!(fs::read(&copied).unwrap(), fs::read(&source).unwrap());
-        // Same decode path used by the TUI cover renderer.
-        let decoded = image::ImageReader::open(&copied)
-            .unwrap()
-            .with_guessed_format()
-            .unwrap()
-            .decode()
-            .unwrap();
-        assert_eq!(decoded.to_rgba8(), pixels);
-        let mut truncated = fs::read(&source).unwrap();
-        truncated.truncate(16);
-        fs::write(&source, truncated).unwrap();
-        let (v, code) = env.json(&["covers", "import", "game.gba", source.to_str().unwrap()]);
-        assert_ne!(code, 0, "{v}");
-        assert_eq!(image::open(&copied).unwrap().to_rgba8(), pixels);
-    }
 }

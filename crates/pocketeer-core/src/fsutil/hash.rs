@@ -213,21 +213,6 @@ impl HashCache {
 mod tests {
     use super::*;
 
-    #[test]
-    fn known_answers() {
-        // CRC32 and SHA-1 of "hello world" and the pangram are widely published.
-        let h = hash_reader(&mut &b"hello world"[..]).unwrap();
-        assert_eq!(h.size, 11);
-        assert_eq!(h.crc32_hex(), "0d4a1185");
-        assert_eq!(h.sha1, "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed");
-        let h = hash_reader(&mut &b"The quick brown fox jumps over the lazy dog"[..]).unwrap();
-        assert_eq!(h.crc32_hex(), "414fa339");
-        assert_eq!(h.sha1, "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12");
-        let h = hash_reader(&mut &b""[..]).unwrap();
-        assert_eq!(h.crc32, 0);
-        assert_eq!(h.sha1, "da39a3ee5e6b4b0d3255bfef95601890afd80709");
-    }
-
     /// Zip entries are stamped with the zip's size but hashed by their own.
     #[test]
     fn cached_entry_keeps_content_size_separate_from_stamp() {

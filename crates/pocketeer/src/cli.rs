@@ -187,7 +187,7 @@ pub enum CoresCommand {
         #[arg(long, value_name = "ID")]
         platform: Option<String>,
         /// Include cores that are already installed.
-        #[arg(long, alias = "all")]
+        #[arg(long)]
         installed: bool,
     },
     /// Show everything known about one core.
@@ -256,7 +256,7 @@ pub enum BiosCommand {
         #[arg(value_name = "ID")]
         ids: Vec<String>,
         /// Also list files that are present.
-        #[arg(long, alias = "all")]
+        #[arg(long)]
         present: bool,
     },
     /// Move files dropped at the SD card root into the folders cores expect.
@@ -520,7 +520,7 @@ pub enum CoversCommand {
         #[arg(long)]
         retry: bool,
         /// libretro system name to use, e.g. "Nintendo - Game Boy Advance" (for unmapped platforms).
-        #[arg(long, value_name = "NAME", alias = "system", requires = "platform")]
+        #[arg(long, value_name = "NAME", requires = "platform")]
         libretro_system: Option<String>,
     },
     /// How many games have covers, per platform.

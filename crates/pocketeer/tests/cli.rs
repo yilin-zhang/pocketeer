@@ -121,8 +121,6 @@ fn search_filters_and_all() {
         ids(&["--installed"]),
         ["agg23.Arduboy", "jotego.jtbeta", "spiritualized.GBA"]
     );
-    // The old spelling still works for scripts.
-    assert_eq!(ids(&["--all"]), ids(&["--installed"]));
     assert_eq!(ids(&["gba", "--installed"]), ["spiritualized.GBA"]);
     assert_eq!(
         ids(&["--platform", "arduboy", "--installed"]),

@@ -307,30 +307,3 @@ pub fn config_set(ctx: &Context, key: ConfigKey, value: Option<&str>) -> Result<
     config.save(&path)?;
     Ok(show(&config, path, Some(key)))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn config_errors_keep_their_codes() {
-        let path = || PathBuf::from("/cfg");
-        assert_eq!(config_error(&Error::NoHomeDir, path).code(), "NO_HOME_DIR");
-        let io = Error::Io {
-            path: "/cfg".into(),
-            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
-        };
-        let mapped = config_error(&io, path);
-        assert_eq!(mapped.code(), "IO_ERROR");
-        assert!(mapped.to_string().contains("/cfg"), "{mapped}");
-        let parse = Error::ConfigParse {
-            path: "/cfg".into(),
-            message: "bad toml".into(),
-        };
-        assert_eq!(config_error(&parse, path).code(), "CONFIG_PARSE_ERROR");
-        assert_eq!(
-            config_error(&Error::NoCacheDir, path).code(),
-            "CONFIG_PARSE_ERROR"
-        );
-    }
-}

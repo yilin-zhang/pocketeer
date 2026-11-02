@@ -223,6 +223,24 @@ mod tests {
     }
 
     #[test]
+    fn the_format_comes_from_the_bytes_not_the_file_name() {
+        let (tmp, mut lib) = library_with(&[("game.gba", "ROM")]);
+        let game = lib.list_games(None, None).unwrap().remove(0);
+        let source = tmp.path().join("cover.jpg");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 128]))
+            .save_with_format(&source, image::ImageFormat::WebP)
+            .unwrap();
+        let preview = plan(&lib, game.id, &source).unwrap();
+        let result = apply(&mut lib, &preview).unwrap();
+        assert_eq!(result.path.extension().unwrap(), "webp");
+        // Copied as is: the transparency survives.
+        assert_eq!(
+            fs::read(lib.root().join(&result.path)).unwrap(),
+            fs::read(&source).unwrap()
+        );
+    }
+
+    #[test]
     fn failed_database_update_keeps_the_old_cover_and_removes_only_the_new_copy() {
         let (tmp, mut lib) = library_with(&[("game.gba", "ROM")]);
         let game = lib.list_games(None, None).unwrap().remove(0);

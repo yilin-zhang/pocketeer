@@ -1,6 +1,16 @@
 //! Shared harness for the end-to-end CLI tests: a throwaway card copy,
 //! library, cache and source folder in one temp dir, and one way to run the
 //! binary that never touches the user's real card, config or network.
+//!
+//! Where a test belongs:
+//! - Rules, guards and rollback of an operation are unit tests in the core
+//!   module that owns it, against `testutil`'s card and library.
+//! - Tests here are black-box: they set state up through the binary or
+//!   fixture files and check JSON, exit codes and files on disk. They never
+//!   read the core's internals. (Setup may seed the download cache through
+//!   the core's public `Cache`, standing in for the network.)
+//! - Unit tests in the binary crate are for the TUI's state machines and
+//!   for generic machinery like `Batch`, not for orchestration or prose.
 
 #![allow(dead_code)]
 

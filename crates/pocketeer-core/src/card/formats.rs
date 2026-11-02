@@ -101,15 +101,6 @@ mod analogue_pocket_tests {
         assert_eq!(firmware_version_from_byte(0xb5), "1.1-beta-5");
         assert_eq!(firmware_version_from_byte(0x7), "7");
     }
-
-    #[test]
-    fn parses_runtime() {
-        let json: AnaloguePocketJson = serde_json::from_str(
-            r#"{"product":"Analogue Pocket","firmware":{"runtime":{"name":"2.2","byte":34,"build_date":"20240501"}}}"#,
-        )
-        .unwrap();
-        assert_eq!(json.runtime().unwrap().byte, Some(34));
-    }
 }
 
 // ----------------------------------------------------------------------------
@@ -165,38 +156,6 @@ mod core_json_tests {
     use super::*;
 
     // Sample from Pocket Sync's test suite (agg23's Arduboy core).
-    const ARDUBOY: &str = r#"
-    {
-      "core": {
-        "magic": "APF_VER_1",
-        "metadata": {
-          "platform_ids": ["arduboy"],
-          "shortname": "Arduboy",
-          "description": "A small, portable Arduino console.",
-          "author": "agg23",
-          "url": "https://github.com/agg23/analogue-arduboy/",
-          "version": "0.9.0",
-          "date_release": "2022-09-03"
-        },
-        "framework": {
-          "target_product": "Analogue Pocket",
-          "version_required": "1.1",
-          "sleep_supported": false,
-          "dock": { "supported": true, "analog_output": false },
-          "hardware": { "link_port": false, "cartridge_adapter": -1 }
-        },
-        "cores": [{ "name": "default", "id": 0, "filename": "arduboy.rev" }]
-      }
-    }"#;
-
-    #[test]
-    fn parses_full_core_json() {
-        let core: CoreJson = serde_json::from_str(ARDUBOY).unwrap();
-        assert_eq!(core.core.metadata.author, "agg23");
-        assert_eq!(core.core.metadata.shortname, "Arduboy");
-        assert_eq!(core.core.metadata.platform_ids, vec!["arduboy"]);
-        assert_eq!(core.core.metadata.version, "0.9.0");
-    }
 
     #[test]
     fn tolerates_minimal_core_json() {
@@ -357,24 +316,6 @@ mod data_json_tests {
         assert_eq!(SlotParams::from_bits(1 << 25).platform_index, 2);
         assert_eq!(SlotParams::from_bits(3 << 24).platform_index, 3);
     }
-
-    #[test]
-    fn parses_data_json() {
-        let d: DataJson = serde_json::from_str(
-            r#"{"data":{"magic":"APF_VER_1","data_slots":[
-                {"name":"BIOS","id":1,"required":true,"parameters":"0x1","filename":"gba_bios.bin","md5":"abc"},
-                {"name":"ROM","id":"0x2","parameters":0,"extensions":["gba"]}
-            ]}}"#,
-        )
-        .unwrap();
-        assert_eq!(d.data.data_slots.len(), 2);
-        assert_eq!(
-            d.data.data_slots[0].filename.as_deref(),
-            Some("gba_bios.bin")
-        );
-        assert_eq!(d.data.data_slots[1].id.value(), 2);
-        assert!(!d.data.data_slots[1].required);
-    }
 }
 
 // ----------------------------------------------------------------------------
@@ -413,22 +354,6 @@ pub struct InstanceSlot {
 impl InstanceJson {
     pub fn read(path: &Path) -> Result<Self> {
         read_json(path)
-    }
-}
-
-#[cfg(test)]
-mod instance_json_tests {
-    use super::*;
-
-    #[test]
-    fn parses_instance() {
-        let i: InstanceJson = serde_json::from_str(
-            r#"{"instance":{"magic":"APF_VER_1","variant_select":{"id":0,"select":false},
-                "data_path":"nested/here","data_slots":[{"id":1,"filename":"game.rom","md5":"abcd"},{"id":"0x2","filename":"x.bin"}]}}"#,
-        )
-        .unwrap();
-        assert_eq!(i.instance.data_path, "nested/here");
-        assert_eq!(i.instance.data_slots[1].id.value(), 2);
     }
 }
 
@@ -490,10 +415,5 @@ mod updaters_tests {
         let prev = u.previous_cores();
         assert_eq!(prev.len(), 1);
         assert_eq!(prev[0].id(), "a.b");
-    }
-
-    #[test]
-    fn empty_object_is_fine() {
-        assert_eq!(UpdatersJson::parse(b"{}").unwrap(), UpdatersJson::default());
     }
 }

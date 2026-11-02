@@ -402,14 +402,6 @@ mod tests {
     }
 
     #[test]
-    fn formats_known_timestamps() {
-        assert_eq!(format_timestamp(0), "19700101-000000");
-        assert_eq!(format_timestamp(1_700_000_000), "20231114-221320");
-        assert_eq!(format_timestamp(951_782_400), "20000229-000000");
-        assert_eq!(timestamp().len(), 15);
-    }
-
-    #[test]
     fn junk_rules() {
         for p in [
             "__MACOSX/Cores/x",

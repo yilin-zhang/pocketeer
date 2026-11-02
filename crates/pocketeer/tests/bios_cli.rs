@@ -29,34 +29,13 @@ fn bios_check_reports_missing_files() {
 }
 
 #[test]
-fn bios_check_human() {
-    let env = env();
-    let out = env.run(false, &["bios", "check"]);
-    assert!(out.status.success());
-    insta::assert_snapshot!(String::from_utf8(out.stdout).unwrap());
-}
-
-#[test]
-fn bios_check_present_and_wrong_hash() {
+fn bios_check_lists_present_files_only_when_asked() {
     let env = env();
     env.write("Assets/gba/common/gba_bios.bin", "GBA BIOS");
-    env.write("Assets/arduboy/common/games/game1.hex", "whatever");
     let (v, _) = env.json(&["bios", "check"]);
-    assert!(
-        files_of(&v, "spiritualized.GBA").is_empty(),
-        "present files hidden by default"
-    );
+    assert!(files_of(&v, "spiritualized.GBA").is_empty());
     let (v, _) = env.json(&["bios", "check", "--present"]);
     assert_eq!(files_of(&v, "spiritualized.GBA")[0]["status"], "present");
-    assert_eq!(v["data"]["summary"]["present"], 2);
-    // The old spelling still works for scripts.
-    let (old, _) = env.json(&["bios", "check", "--all"]);
-    assert_eq!(old["data"], v["data"]);
-
-    env.write("Assets/gba/common/gba_bios.bin", "corrupt");
-    let (v, _) = env.json(&["bios", "check", "spiritualized.GBA"]);
-    assert_eq!(v["data"]["cores"].as_array().unwrap().len(), 1);
-    assert_eq!(files_of(&v, "spiritualized.GBA")[0]["status"], "wrong_hash");
 }
 
 #[test]

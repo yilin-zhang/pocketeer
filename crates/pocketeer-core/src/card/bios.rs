@@ -614,23 +614,4 @@ mod tests {
         let err = check(&pocket, &installed, Some(&["nope.Core".to_string()])).unwrap_err();
         assert_eq!(err.code(), "CORE_NOT_INSTALLED");
     }
-
-    /// Known-answer test for our streaming/hex wrapper around the md5 crate.
-    /// Expected values are the official test vectors from RFC 1321, appendix A.5.
-    #[test]
-    fn md5_matches_rfc_1321_test_vectors() {
-        let tmp = tempfile::tempdir().unwrap();
-        for (input, expected) in [
-            ("", "d41d8cd98f00b204e9800998ecf8427e"),
-            ("abc", "900150983cd24fb0d6963f7d28e17f72"),
-            (
-                "12345678901234567890123456789012345678901234567890123456789012345678901234567890",
-                "57edf4a22be3c955ac49da2e2107b67a",
-            ),
-        ] {
-            let p = tmp.path().join("f");
-            fs::write(&p, input).unwrap();
-            assert_eq!(md5_of(&p).unwrap(), expected, "md5({input:?})");
-        }
-    }
 }

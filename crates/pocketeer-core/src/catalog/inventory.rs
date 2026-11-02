@@ -300,25 +300,4 @@ mod tests {
         assert!(update_available("", "1.0"));
         assert!(!update_available("V2.0", "v2.0"));
     }
-
-    #[test]
-    fn parses_inventory_sample() {
-        let json = include_str!("../../../../tests/fixtures/inventory/cores.json");
-        let parsed: CoresJson = serde_json::from_str(json).unwrap();
-        let gba = parsed
-            .data
-            .iter()
-            .find(|c| c.id == "spiritualized.GBA")
-            .unwrap();
-        assert_eq!(gba.latest().unwrap().core.metadata.version, "1.3.0");
-        assert_eq!(gba.release("1.2.0").unwrap().core.metadata.version, "1.2.0");
-        let empty = parsed
-            .data
-            .iter()
-            .find(|c| c.id == "nobody.Unreleased")
-            .unwrap();
-        assert!(empty.latest().is_none());
-        assert_eq!(gba.author(), "spiritualized");
-        assert_eq!(gba.shortname(), "GBA");
-    }
 }

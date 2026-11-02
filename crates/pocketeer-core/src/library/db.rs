@@ -240,9 +240,8 @@ fn rom_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Rom> {
     })
 }
 
-const ROM_COLS: &str = "id, game_id, name, size, crc32, sha1, rel_path, dat_status, dat_game_name, dat_rom_name, dat_revision, dat_source, dat_checked_at, dat_error";
-/// [`ROM_COLS`] qualified with the `r` alias used in joins.
-const ROM_COLS_R: &str = "r.id, r.game_id, r.name, r.size, r.crc32, r.sha1, r.rel_path, r.dat_status, r.dat_game_name, r.dat_rom_name, r.dat_revision, r.dat_source, r.dat_checked_at, r.dat_error";
+/// Every column of `roms`, for queries that call the table `r`.
+const ROM_COLS: &str = "r.id, r.game_id, r.name, r.size, r.crc32, r.sha1, r.rel_path, r.dat_status, r.dat_game_name, r.dat_rom_name, r.dat_revision, r.dat_source, r.dat_checked_at, r.dat_error";
 
 /// A ROM on this platform whose `column` (`sha1` or `name`) equals `value`.
 fn find_rom_by(
@@ -253,7 +252,7 @@ fn find_rom_by(
 ) -> Result<Option<Rom>> {
     conn.query_row(
         &format!(
-            "SELECT {ROM_COLS_R} FROM roms r JOIN games g ON g.id = r.game_id
+            "SELECT {ROM_COLS} FROM roms r JOIN games g ON g.id = r.game_id
              WHERE g.platform = ?1 AND r.{column} = ?2 LIMIT 1"
         ),
         params![platform, value],
@@ -286,7 +285,9 @@ fn game_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Game> {
 fn roms_of(conn: &Connection, game_id: i64, context: &str) -> Result<Vec<Rom>> {
     query_rows(
         conn,
-        &format!("SELECT {ROM_COLS} FROM roms WHERE game_id = ?1 ORDER BY name COLLATE NOCASE"),
+        &format!(
+            "SELECT {ROM_COLS} FROM roms r WHERE r.game_id = ?1 ORDER BY r.name COLLATE NOCASE"
+        ),
         params![game_id],
         context,
         rom_from_row,
@@ -318,7 +319,7 @@ pub fn list_games(
 
 pub fn get_rom(conn: &Connection, id: i64) -> Result<Option<Rom>> {
     conn.query_row(
-        &format!("SELECT {ROM_COLS} FROM roms WHERE id = ?1"),
+        &format!("SELECT {ROM_COLS} FROM roms r WHERE r.id = ?1"),
         params![id],
         rom_from_row,
     )
@@ -353,7 +354,7 @@ pub fn find_roms_by_spec(
     query_rows(
         conn,
         &format!(
-            "SELECT g.id AS g_id, g.platform AS g_platform, g.name AS g_name, {ROM_COLS_R}
+            "SELECT g.id AS g_id, g.platform AS g_platform, g.name AS g_name, {ROM_COLS}
              FROM roms r JOIN games g ON g.id = r.game_id
              WHERE (?1 IS NULL OR g.platform = ?1)
                AND (r.name = ?2 COLLATE NOCASE OR g.name = ?2 COLLATE NOCASE)
@@ -927,6 +928,44 @@ mod tests {
         c
     }
 
+    /// A library from before v10 (ROMs still had `verified`, `source_path`
+    /// and `mode`), with a game, its ROM, a cover and a save owner, keeps all
+    /// of it through the migration.
+    #[test]
+    fn migrating_a_v9_library_keeps_its_games_roms_and_covers() {
+        let mut c = Connection::open_in_memory().unwrap();
+        c.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        for sql in &MIGRATIONS[..9] {
+            c.execute_batch(sql).unwrap();
+        }
+        c.pragma_update(None, "user_version", 9).unwrap();
+        c.execute_batch(
+            "INSERT INTO platforms (id, name) VALUES ('gba', 'Game Boy Advance');
+             INSERT INTO games (id, platform, name, added_at) VALUES (1, 'gba', 'Hello (USA)', 0);
+             INSERT INTO roms (game_id, name, size, crc32, sha1, verified, rel_path, source_path,
+                               mode, added_at, dat_status, dat_game_name, dat_rom_name, dat_source)
+                 VALUES (1, 'Hello (USA).gba', 11, '0d4a1185', 'ab', 1, 'roms/gba/Hello (USA).gba',
+                         NULL, 'copy', 0, 'matched', 'Hello (USA)', 'Hello (USA).gba', 'manual');
+             INSERT INTO covers (game_id, rel_path, status, fetched_at, imported)
+                 VALUES (1, 'covers/gba/Hello (USA).png', 'ok', 0, 0);
+             INSERT INTO save_games (rel_path, game_id) VALUES ('Saves/gba/common/Hello (USA).sav', 1);",
+        )
+        .unwrap();
+
+        migrate(&mut c).unwrap();
+
+        assert_eq!(user_version(&c), MIGRATIONS.len() as i64);
+        let games = list_games(&c, None, None).unwrap();
+        assert_eq!(games.len(), 1);
+        let rom = &games[0].roms[0];
+        assert_eq!(rom.name, "Hello (USA).gba");
+        assert_eq!(rom.rel_path, Path::new("roms/gba/Hello (USA).gba"));
+        assert_eq!(rom.dat.status, DatStatus::Matched);
+        let cover = cover_record(&c, 1).unwrap().unwrap();
+        assert_eq!(cover.status, CoverStatus::Ok);
+        assert_eq!(save_games(&c).unwrap().values().next(), Some(&Some(1)));
+    }
+
     fn user_version(c: &Connection) -> i64 {
         c.query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap()
@@ -937,13 +976,6 @@ mod tests {
         let mut c = conn();
         migrate(&mut c).unwrap();
         assert_eq!(user_version(&c) as usize, MIGRATIONS.len());
-    }
-
-    /// The prefixed column list is written out by hand for the SQL; it must
-    /// name the same columns.
-    #[test]
-    fn rom_column_lists_agree() {
-        assert_eq!(ROM_COLS_R, format!("r.{}", ROM_COLS.replace(", ", ", r.")));
     }
 
     #[test]

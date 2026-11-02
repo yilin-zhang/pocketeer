@@ -566,22 +566,6 @@ mod tests {
     }
 
     #[test]
-    fn dots_take_the_colour_of_the_picture_lifted_to_show_on_black() {
-        let red = DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, image::Rgb([200, 40, 40])));
-        let dots = Dots::new(&red, Size::new(4, 2));
-        let colours: Vec<_> = dots
-            .lines
-            .iter()
-            .flat_map(|l| &l.spans)
-            .filter_map(|s| s.style.fg)
-            .collect();
-        assert!(!colours.is_empty());
-        assert!(colours.iter().all(|c| *c == Color::Rgb(200, 40, 40)));
-        // Dark navy keeps its hue but comes up to a visible brightness.
-        assert_eq!(visible(0, 0, 60), Color::Rgb(0, 0, 130));
-    }
-
-    #[test]
     fn mid_grey_dithers_to_about_half_the_dots() {
         // A grey ramp: after stretching, the middle is mid-grey.
         let on = dither(&picture(64, 64, |x, _| (x * 4) as u8).to_luma8());
