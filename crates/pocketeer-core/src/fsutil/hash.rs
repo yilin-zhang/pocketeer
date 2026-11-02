@@ -14,7 +14,7 @@ pub use super::Stamp;
 use super::write_atomic;
 use crate::{Error, Result};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hashes {
     pub size: u64,
     pub crc32: u32,
@@ -108,10 +108,9 @@ pub fn parse_sha1(s: &str) -> Option<[u8; 20]> {
 struct Entry {
     /// Validity stamp of the file this came from (for zip entries: the zip).
     stamp: Stamp,
-    /// Size of the hashed content itself.
-    size: u64,
-    crc32: u32,
-    sha1: String,
+    /// Of the content itself (for zip entries: the entry, not the zip).
+    #[serde(flatten)]
+    hashes: Hashes,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -166,20 +165,14 @@ impl HashCache {
         if let Some(e) = self.store.entries.get(key)
             && e.stamp == stamp
         {
-            return Ok(Hashes {
-                size: e.size,
-                crc32: e.crc32,
-                sha1: e.sha1.clone(),
-            });
+            return Ok(e.hashes.clone());
         }
         let hashes = compute()?;
         self.store.entries.insert(
             key.to_string(),
             Entry {
                 stamp,
-                size: hashes.size,
-                crc32: hashes.crc32,
-                sha1: hashes.sha1.clone(),
+                hashes: hashes.clone(),
             },
         );
         self.dirty = true;
