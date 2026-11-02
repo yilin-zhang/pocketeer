@@ -4,7 +4,9 @@ use std::fmt::Write;
 
 use pocketeer_core::{
     card::{Status, bios::BiosReport, bios::FileStatus, clean::JunkKind, roms::Identity},
+    names::RenameKind,
     plan::Plan,
+    transfer::Presence,
 };
 
 use super::{Reader, Text, actions, bytes, failure_lines, source, staged_footer};
@@ -228,6 +230,16 @@ impl Text for RefreshReport {
     }
 }
 
+/// Where a ROM is, said the way the TUI's WHERE column says it.
+fn presence_label(presence: Presence) -> &'static str {
+    match presence {
+        Presence::Both => "library + card",
+        Presence::Local => "library only",
+        Presence::Card => "card only",
+        Presence::Unknown => "not read yet",
+    }
+}
+
 /// How sure pocketeer is of a card file's contents, in a word or two.
 pub fn identity(identity: &Identity) -> &'static str {
     match identity {
@@ -246,9 +258,9 @@ impl Text for RomsReport {
         for (rom, presence) in report.roms.iter().zip(&report.comparison.card) {
             let _ = writeln!(
                 text,
-                "{}  {:?}  {}",
+                "{}  {}  {}",
                 rom.rel_path.display(),
-                presence,
+                presence_label(*presence),
                 identity(&rom.identity)
             );
             if let Identity::Error { error } = &rom.identity {
@@ -256,11 +268,13 @@ impl Text for RomsReport {
             }
         }
         for local in report.comparison.local.values() {
-            if local.presence != pocketeer_core::transfer::Presence::Both {
+            if local.presence != Presence::Both {
                 let _ = writeln!(
                     text,
-                    "[{}] {}  {:?}",
-                    local.platform, local.name, local.presence
+                    "[{}] {}  {}",
+                    local.platform,
+                    local.name,
+                    presence_label(local.presence)
                 );
             } else {
                 for copy in local.copies.iter().filter(|c| c.name_mismatch) {
@@ -325,8 +339,12 @@ impl Text for RenameReport {
         for file in &report.plan.moves {
             let _ = writeln!(
                 text,
-                "{:?}: {} → {}",
-                file.kind,
+                "{}: {} → {}",
+                match file.kind {
+                    RenameKind::Rom => "ROM",
+                    RenameKind::Save => "save",
+                    RenameKind::SaveState => "save state",
+                },
                 file.from.display(),
                 file.to.display()
             );
