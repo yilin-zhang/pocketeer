@@ -6,7 +6,13 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use pocketeer_core::Error;
 
-use super::{games, import, line_edit::LineEdit, memories, path_input::PathLookup, rename, saves};
+use super::{
+    games, import,
+    line_edit::LineEdit,
+    memories,
+    path_input::{PathCompletion, PathLookup},
+    rename, saves,
+};
 use crate::tui::pending::Pending;
 
 pub use super::path_input::Suggestion;
@@ -36,13 +42,8 @@ pub enum Modal {
         lines: Vec<String>,
         value: LineEdit,
         step: Step,
-        /// Entries matching what is typed so far (path prompts only).
-        suggestions: Vec<Suggestion>,
-        completion: Option<String>,
-        searching: bool,
-        tab_pending: bool,
-        /// Which suggestion ↑/↓ moved to, if any.
-        highlight: Option<usize>,
+        /// Path prompts only: what the typed path matches.
+        paths: Option<PathCompletion>,
     },
     /// Choose one item.
     Pick {
@@ -167,12 +168,8 @@ impl Dialog {
             title: title.into(),
             lines,
             value: LineEdit::new(value),
+            paths: step.completes_paths().then(PathCompletion::default),
             step,
-            suggestions: Vec::new(),
-            completion: None,
-            searching: false,
-            tab_pending: false,
-            highlight: None,
         });
         self.refresh_paths();
     }
@@ -218,25 +215,12 @@ impl Dialog {
         let mut complete = false;
         if let Some(Modal::Input {
             value,
-            step,
-            suggestions,
-            completion,
-            searching,
-            tab_pending,
-            highlight,
+            paths: Some(paths),
             ..
         }) = &mut self.modal
-            && step.completes_paths()
             && value.as_str() == result.value
         {
-            // While a folder is being read the last list stays up.
-            if let Some(list) = result.suggestions {
-                *suggestions = list;
-                *highlight = highlight.filter(|h| *h < suggestions.len());
-            }
-            *completion = Some(result.completion);
-            *searching = !result.finished;
-            complete = std::mem::take(tab_pending);
+            complete = paths.take(result);
         }
         if complete {
             self.key(KeyEvent::from(KeyCode::Tab));
@@ -247,20 +231,11 @@ impl Dialog {
     fn refresh_paths(&mut self) {
         if let Some(Modal::Input {
             value,
-            step,
-            highlight,
-            completion,
-            tab_pending,
+            paths: Some(paths),
             ..
         }) = &mut self.modal
-            && step.completes_paths()
         {
-            // The current list stays until the new one arrives (a few
-            // milliseconds once the folder has been read), so typing
-            // doesn't make it flicker.
-            *highlight = None;
-            *completion = None;
-            *tab_pending = false;
+            paths.reset();
             self.paths.request(value.as_str().to_string());
         }
     }
@@ -271,60 +246,30 @@ impl Dialog {
     pub fn key(&mut self, key: KeyEvent) -> Option<Submitted> {
         let modal = self.modal.as_mut()?;
         match modal {
-            Modal::Input {
-                value,
-                step,
-                suggestions,
-                highlight,
-                completion,
-                tab_pending,
-                ..
-            } => {
-                let paths = step.completes_paths();
-                let shown = suggestions.len();
-                // Take a suggestion: folders keep the prompt open for the next level.
-                let accept = |value: &mut LineEdit, s: &Suggestion| {
-                    value.set(if s.is_dir {
-                        format!("{}/", s.path)
-                    } else {
-                        s.path.clone()
-                    });
-                };
-                match key.code {
-                    KeyCode::Esc if highlight.is_some() => *highlight = None,
-                    KeyCode::Esc => self.close(),
-                    KeyCode::Down if paths && shown > 0 => {
-                        *highlight = Some(highlight.map_or(0, |h| (h + 1).min(shown - 1)));
-                    }
-                    KeyCode::Up if paths => *highlight = highlight.and_then(|h| h.checked_sub(1)),
-                    KeyCode::Tab if paths => {
-                        match highlight.and_then(|h| suggestions.get(h)) {
-                            Some(s) => accept(value, s),
-                            None if shown == 1 => accept(value, &suggestions[0]),
-                            None => {
-                                let Some(completed) = completion.as_ref() else {
-                                    *tab_pending = true;
-                                    return None;
-                                };
-                                value.set(completed.clone());
-                            }
-                        }
+            Modal::Input { value, paths, .. } => match (key.code, paths) {
+                (KeyCode::Esc, Some(p)) if p.highlight.is_some() => p.highlight = None,
+                (KeyCode::Esc, _) => self.close(),
+                (KeyCode::Down, Some(p)) => p.down(),
+                (KeyCode::Up, Some(p)) => p.up(),
+                (KeyCode::Tab, Some(p)) => {
+                    if let Some(text) = p.tab() {
+                        value.set(text);
                         self.refresh_paths();
-                    }
-                    KeyCode::Enter if paths && highlight.is_some() => {
-                        if let Some(s) = highlight.and_then(|h| suggestions.get(h)) {
-                            accept(value, s);
-                        }
-                        self.refresh_paths();
-                    }
-                    KeyCode::Enter => return self.press(true),
-                    _ => {
-                        if value.key(key) == Some(true) {
-                            self.refresh_paths();
-                        }
                     }
                 }
-            }
+                (KeyCode::Enter, Some(p)) if p.highlight.is_some() => {
+                    if let Some(text) = p.tab() {
+                        value.set(text);
+                    }
+                    self.refresh_paths();
+                }
+                (KeyCode::Enter, _) => return self.press(true),
+                _ => {
+                    if value.key(key) == Some(true) {
+                        self.refresh_paths();
+                    }
+                }
+            },
             Modal::Pick {
                 items, selected, ..
             } => match key.code {
@@ -422,8 +367,11 @@ impl Dialog {
 
     #[cfg(test)]
     pub fn set_suggestions(&mut self, list: Vec<Suggestion>) {
-        if let Some(Modal::Input { suggestions, .. }) = &mut self.modal {
-            *suggestions = list;
+        if let Some(Modal::Input {
+            paths: Some(paths), ..
+        }) = &mut self.modal
+        {
+            paths.suggestions = list;
         }
     }
 
@@ -438,7 +386,7 @@ impl Dialog {
     #[cfg(test)]
     pub fn highlight(&self) -> Option<usize> {
         match &self.modal {
-            Some(Modal::Input { highlight, .. }) => *highlight,
+            Some(Modal::Input { paths, .. }) => paths.as_ref().and_then(|p| p.highlight),
             _ => None,
         }
     }
@@ -473,13 +421,6 @@ mod tests {
         // Results only land in `pump`, so right now the lookup is pending
         // and Tab has to wait for it.
         dialog.key(KeyEvent::from(KeyCode::Tab));
-        assert!(matches!(
-            dialog.modal(),
-            Some(Modal::Input {
-                tab_pending: true,
-                ..
-            })
-        ));
         let expected = format!("{}/roms/", tmp.path().display());
         let deadline = Instant::now() + Duration::from_secs(5);
         while dialog.text() != Some(expected.as_str()) {

@@ -73,15 +73,14 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
                 title,
                 lines,
                 value,
-                step,
-                suggestions,
-                searching,
+                paths,
                 ..
             } => {
                 let mut all = lines.clone();
                 all.push(String::new());
                 all.push(format!("> {}", edit_view(value, usize::MAX)));
-                if step.completes_paths() {
+                if let Some(paths) = paths {
+                    let suggestions = &paths.suggestions;
                     // Fixed rows: results and long paths never move the input.
                     let rect = path_rect(area);
                     let columns = rect.width.saturating_sub(4) as usize;
@@ -93,7 +92,7 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
                     let slots = rect.height.saturating_sub(11) as usize;
                     // Drawn styled on top afterwards (see `suggestion_line`).
                     all.extend(std::iter::repeat_n(String::new(), slots));
-                    all.push(if *searching {
+                    all.push(if paths.searching {
                         "Searching…".into()
                     } else if suggestions.is_empty() {
                         "Nothing matches".into()
@@ -103,7 +102,7 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
                         String::new()
                     });
                 }
-                let hint = if step.completes_paths() {
+                let hint = if paths.is_some() {
                     "↓ pick  ·  Tab completes"
                 } else {
                     ""
@@ -257,13 +256,10 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     frame.render_widget(paragraph.scroll((scroll, 0)), body);
     if let Modal::Input {
-        suggestions,
-        highlight,
-        step,
-        ..
+        paths: Some(paths), ..
     } = modal
-        && step.completes_paths()
     {
+        let (suggestions, highlight) = (&paths.suggestions, &paths.highlight);
         // Rows 0–4 are the two text lines, a gap, the input and a gap.
         let slots = path_rect(area).height.saturating_sub(11) as usize;
         let offset = highlight

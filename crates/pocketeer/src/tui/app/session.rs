@@ -22,14 +22,35 @@ use super::super::worker::{CardSnapshot, Job, LibraryView, Msg, SavesView, Snaps
 pub struct Busy {
     /// The main worker's job, if one is running. Keys that change things
     /// are ignored while it is set.
-    pub main: Option<String>,
-    /// Progress of that job, when it reports steps.
-    pub step: Option<(usize, usize)>,
-    pub download_pct: Option<u64>,
+    pub main: Option<MainJob>,
     /// The side worker (covers, DAT checks); never blocks keys.
     pub side: Option<String>,
     /// Background ROM verification ("ROM check 3/12").
     pub roms: Option<String>,
+}
+
+pub struct MainJob {
+    /// What it is doing now ("Copying", "Downloading 40%").
+    pub label: String,
+    pub progress: Option<JobProgress>,
+}
+
+/// How far the main job is, when it says.
+#[derive(Clone, Copy)]
+pub enum JobProgress {
+    /// Items done of the total.
+    Step(usize, usize),
+    /// Percent of a download.
+    Download(u64),
+}
+
+impl MainJob {
+    fn new(label: impl Into<String>) -> Self {
+        MainJob {
+            label: label.into(),
+            progress: None,
+        }
+    }
 }
 
 /// What the screen has to do after the workers reported.
@@ -59,8 +80,7 @@ pub struct Session {
     /// Settings as loaded at the last reload; every job gets a clone.
     base: Context,
     worker: Worker,
-    pocket: Option<Pocket>,
-    pocket_error: Option<ErrorInfo>,
+    card: Card,
     snapshot: Option<Snapshot>,
     /// Saves and Memories, from the side worker after each load.
     saves: SavesView,
@@ -69,6 +89,22 @@ pub struct Session {
     log: VecDeque<String>,
     auto: AutoRefresh,
     verify: Verification,
+}
+
+/// The card as this session knows it.
+enum Card {
+    Mounted(Pocket),
+    /// None found, or one that couldn't be opened: why.
+    Missing(ErrorInfo),
+}
+
+impl Card {
+    fn detect(ctx: &Context) -> Card {
+        match ctx.pocket() {
+            Ok(p) => Card::Mounted(p),
+            Err(e) => Card::Missing(e.to_info()),
+        }
+    }
 }
 
 /// What the app re-reads or re-checks without being asked.
@@ -100,16 +136,11 @@ impl Session {
     pub fn new(global: Global) -> Self {
         let base = Context::new(global.clone());
         let library_path = base.library_path().ok();
-        let (pocket, pocket_error) = match base.pocket() {
-            Ok(p) => (Some(p), None),
-            Err(e) => (None, Some(e.to_info())),
-        };
         Session {
+            card: Card::detect(&base),
             global,
             base,
             worker: Worker::spawn(),
-            pocket,
-            pocket_error,
             snapshot: None,
             saves: SavesView::default(),
             library_path,
@@ -123,11 +154,18 @@ impl Session {
     // -- what is known ------------------------------------------------------
 
     pub fn pocket(&self) -> Option<&Pocket> {
-        self.pocket.as_ref()
+        match &self.card {
+            Card::Mounted(p) => Some(p),
+            Card::Missing(_) => None,
+        }
     }
 
+    /// Why there is no card, when there isn't one.
     pub fn pocket_error(&self) -> Option<&ErrorInfo> {
-        self.pocket_error.as_ref()
+        match &self.card {
+            Card::Mounted(_) => None,
+            Card::Missing(e) => Some(e),
+        }
     }
 
     /// `None` until the first load lands.
@@ -195,7 +233,7 @@ impl Session {
     /// What a job needs: the CLI's context, told which card we have (if any)
     /// instead of detecting one.
     pub fn ctx(&self) -> Context {
-        self.base.clone().with_pocket(self.pocket.clone())
+        self.base.clone().with_pocket(self.pocket().cloned())
     }
 
     /// For actions that need the library to exist; `None` says so.
@@ -212,10 +250,10 @@ impl Session {
 
     /// For actions that need a card; `None` says so.
     pub fn require_card(&mut self) -> Option<Pocket> {
-        if self.pocket.is_none() {
+        if self.pocket().is_none() {
             self.notice("No SD card mounted: plug one in, it is picked up by itself.");
         }
-        self.pocket.clone()
+        self.pocket().cloned()
     }
 
     /// A main-worker job is running: keys that change things wait.
@@ -234,7 +272,7 @@ impl Session {
             self.auto.importing = true;
             self.auto.metadata_done = false;
         }
-        self.busy.main = Some(status.to_string());
+        self.busy.main = Some(MainJob::new(status));
         self.worker.submit(self.ctx(), job);
     }
 
@@ -257,14 +295,8 @@ impl Session {
     pub fn reload(&mut self) {
         // Pick up an edited config file.
         self.base = Context::new(self.global.clone());
-        if self.pocket.is_none() {
-            match self.base.pocket() {
-                Ok(p) => {
-                    self.pocket = Some(p);
-                    self.pocket_error = None;
-                }
-                Err(e) => self.pocket_error = Some(e.to_info()),
-            }
+        if self.pocket().is_none() {
+            self.card = Card::detect(&self.base);
         }
         self.submit("Loading", Job::Load);
     }
@@ -333,8 +365,6 @@ impl Session {
 
     fn clear_busy(&mut self) {
         self.busy.main = None;
-        self.busy.step = None;
-        self.busy.download_pct = None;
     }
 
     // -- what the workers said ----------------------------------------------
@@ -360,11 +390,10 @@ impl Session {
                             if let Some(warning) = index.warning.take() {
                                 self.notice(warning);
                             }
-                            if let Some(snap) = &mut self.snapshot {
-                                if let Some(card) = &mut snap.card {
-                                    card.card_roms = index.roms.clone();
-                                }
-                                snap.verification = Some(index);
+                            if let Some(snap) = &mut self.snapshot
+                                && let Some(card) = &mut snap.card
+                            {
+                                card.set_index(index);
                                 snap.rematch();
                             }
                             self.verify.next = next;
@@ -373,22 +402,23 @@ impl Session {
                         Err(e) => self.notice(format!("ROM verification stopped: {e}")),
                     }
                 }
-                Msg::Progress(Event::Status(s)) => {
-                    self.busy.main = Some(s);
-                    self.busy.download_pct = None;
-                    self.busy.step = None;
-                }
+                Msg::Progress(Event::Status(s)) => self.busy.main = Some(MainJob::new(s)),
                 Msg::Progress(Event::Download {
                     received, total, ..
                 }) => {
-                    self.busy.download_pct = total.filter(|t| *t > 0).map(|t| received * 100 / t);
-                    self.busy.main = Some(match self.busy.download_pct {
-                        Some(p) => format!("Downloading {p}%"),
-                        None => format!("Downloading {} KiB", received / 1024),
+                    let pct = total.filter(|t| *t > 0).map(|t| received * 100 / t);
+                    self.busy.main = Some(MainJob {
+                        label: match pct {
+                            Some(p) => format!("Downloading {p}%"),
+                            None => format!("Downloading {} KiB", received / 1024),
+                        },
+                        progress: pct.map(JobProgress::Download),
                     });
                 }
                 Msg::Progress(Event::Step { done, total }) => {
-                    self.busy.step = Some((done, total));
+                    if let Some(job) = &mut self.busy.main {
+                        job.progress = Some(JobProgress::Step(done, total));
+                    }
                     if self.auto.importing && !self.auto.library_inflight {
                         self.auto.library_inflight = true;
                         self.submit_side(Job::RefreshLibrary);
@@ -406,9 +436,8 @@ impl Session {
                     self.clear_busy();
                     match result {
                         Ok(mut snap) => {
-                            if let Some(warning) =
-                                snap.verification.as_mut().and_then(|i| i.warning.take())
-                            {
+                            let index = snap.card.as_mut().and_then(|c| c.index.as_mut());
+                            if let Some(warning) = index.and_then(|i| i.warning.take()) {
                                 self.notice(warning);
                             }
                             self.snapshot = Some(*snap);
@@ -493,7 +522,8 @@ impl Session {
         if self.is_busy() || dialog_open || self.verify.inflight {
             return;
         }
-        let Some(index) = self.snapshot.as_mut().and_then(|s| s.verification.take()) else {
+        let card = self.snapshot.as_mut().and_then(|s| s.card.as_mut());
+        let Some(index) = card.and_then(|c| c.index.take()) else {
             return;
         };
         if self.verify.next >= index.roms.len() {
@@ -524,21 +554,19 @@ impl Session {
         if self.is_busy() {
             return None;
         }
-        match &self.pocket {
+        match &self.card {
             // No card: look for one, so plugging it in is enough.
-            None => {
+            Card::Missing(_) => {
                 if let Ok(p) = self.base.pocket() {
-                    self.pocket = Some(p);
-                    self.pocket_error = None;
+                    self.card = Card::Mounted(p);
                     self.notice("SD card detected");
                     self.reload();
                     return None;
                 }
             }
             // The card went away: drop its tabs, keep the library, keep looking.
-            Some(p) if !p.root().is_dir() => {
-                self.pocket = None;
-                self.pocket_error = Some(ErrorInfo {
+            Card::Mounted(p) if !p.root().is_dir() => {
+                self.card = Card::Missing(ErrorInfo {
                     code: "SD_NOT_FOUND",
                     message: "SD card removed".into(),
                     hint: Some("Plug it back in; pocketeer picks it up by itself.".into()),
@@ -548,7 +576,7 @@ impl Session {
                 self.reload();
                 return Some(Update::CardRemoved);
             }
-            Some(_) => {}
+            Card::Mounted(_) => {}
         }
         if !self.auto.fingerprint_inflight && self.snapshot.is_some() {
             self.auto.fingerprint_inflight = true;

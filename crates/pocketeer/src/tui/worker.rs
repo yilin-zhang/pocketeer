@@ -52,7 +52,6 @@ pub struct Snapshot {
     pub card: Option<CardSnapshot>,
     /// `None` when there is no library at the configured path.
     pub library: Option<LibraryView>,
-    pub verification: Option<Box<Index>>,
 }
 
 /// What the Cores, BIOS and Device tabs show of the mounted card.
@@ -61,10 +60,18 @@ pub struct CardSnapshot {
     pub cores: CoreListReport,
     pub inventory: Option<Arc<Inventory>>,
     pub bios: BiosReport,
-    /// ROM files on the card the library doesn't hold (every ROM file when
-    /// there is no library). BIOS and other core-declared files are excluded.
-    pub card_roms: Vec<CardRom>,
-    pub card_presence: Vec<Presence>,
+    /// Every ROM file on the card (BIOS and other core-declared files
+    /// excluded), with whether the library holds it. A copy of the index's
+    /// list, so rows can be drawn while the worker verifies the index.
+    pub files: Vec<CardFile>,
+    /// The ROM index, except while the worker is verifying it.
+    pub index: Option<Box<Index>>,
+}
+
+/// A ROM file on the card, and whether the library has it too.
+pub struct CardFile {
+    pub rom: CardRom,
+    pub presence: Presence,
 }
 
 /// What the Games tab shows of the library.
@@ -93,6 +100,20 @@ pub struct GameRow {
 }
 
 impl CardSnapshot {
+    /// The index is back (from loading, or from the worker): its ROMs are
+    /// what the screens show. Library presence follows with `rematch`.
+    pub fn set_index(&mut self, index: Box<Index>) {
+        self.files = index
+            .roms
+            .iter()
+            .map(|rom| CardFile {
+                rom: rom.clone(),
+                presence: Presence::Card,
+            })
+            .collect();
+        self.index = Some(index);
+    }
+
     pub fn installed(&self) -> CoreList {
         CoreList {
             cores: self.cores.cores.iter().map(|c| c.core.clone()).collect(),
@@ -419,13 +440,8 @@ fn load(ctx: &Context, progress: &mut dyn FnMut(Event)) -> Result<Snapshot> {
         Err(Error::LibraryNotFound { .. }) => None,
         Err(e) => return Err(e),
     };
-    let mut verification = None;
     let card = match &pocket {
-        Some(pocket) => {
-            let (card, index) = load_card(ctx, pocket, progress)?;
-            verification = Some(Box::new(index));
-            Some(card)
-        }
+        Some(pocket) => Some(load_card(ctx, pocket, progress)?),
         None => None,
     };
     let library = match &lib {
@@ -439,7 +455,6 @@ fn load(ctx: &Context, progress: &mut dyn FnMut(Event)) -> Result<Snapshot> {
         fingerprint,
         card,
         library,
-        verification,
     };
     snapshot.rematch();
     Ok(snapshot)
@@ -449,7 +464,7 @@ fn load_card(
     ctx: &Context,
     pocket: &Pocket,
     progress: &mut dyn FnMut(Event),
-) -> Result<(CardSnapshot, Index)> {
+) -> Result<CardSnapshot> {
     progress(Event::Status("Reading card".into()));
     let installed = cores::list_installed(pocket)?;
     let status = Status::read(pocket, &installed);
@@ -465,20 +480,19 @@ fn load_card(
         index.warning = Some(format!("Cache not saved: {e}"));
     }
     let cores = installed.report(&inventory);
-    Ok((
-        CardSnapshot {
-            status,
-            cores,
-            inventory: match inventory {
-                InventoryLoad::Loaded(inv) => Some(Arc::new(inv)),
-                InventoryLoad::Unavailable(_) => None,
-            },
-            bios,
-            card_roms: index.roms.clone(),
-            card_presence: Vec::new(),
+    let mut card = CardSnapshot {
+        status,
+        cores,
+        inventory: match inventory {
+            InventoryLoad::Loaded(inv) => Some(Arc::new(inv)),
+            InventoryLoad::Unavailable(_) => None,
         },
-        index,
-    ))
+        bios,
+        files: Vec::new(),
+        index: None,
+    };
+    card.set_index(Box::new(index));
+    Ok(card)
 }
 
 impl Snapshot {
@@ -490,7 +504,8 @@ impl Snapshot {
             .library
             .iter()
             .flat_map(|l| l.games.iter().map(|r| &r.game));
-        let comparison = transfer::compare(games, &card.card_roms);
+        let roms: Vec<CardRom> = card.files.iter().map(|f| f.rom.clone()).collect();
+        let comparison = transfer::compare(games, &roms);
         if let Some(library) = &mut self.library {
             for row in &mut library.games {
                 row.matches = row
@@ -501,6 +516,8 @@ impl Snapshot {
                     .collect();
             }
         }
-        card.card_presence = comparison.card;
+        for (file, presence) in card.files.iter_mut().zip(comparison.card) {
+            file.presence = presence;
+        }
     }
 }

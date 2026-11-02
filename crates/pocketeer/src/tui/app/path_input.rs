@@ -11,6 +11,73 @@ use std::{
     time::Duration,
 };
 
+/// What a path prompt has found for its text so far.
+#[derive(Default)]
+pub struct PathCompletion {
+    /// Entries matching what is typed (the last list stays up while a
+    /// folder is being read).
+    pub suggestions: Vec<Suggestion>,
+    /// The longest common completion, once the folder has been read.
+    completion: Option<String>,
+    /// The folder is still being read.
+    pub searching: bool,
+    /// Tab was pressed before the completion arrived.
+    tab_pending: bool,
+    /// Which suggestion ↑/↓ moved to, if any.
+    pub highlight: Option<usize>,
+}
+
+impl PathCompletion {
+    /// New text was typed: forget what belonged to the old one (the list
+    /// stays until the new one arrives, so typing doesn't flicker).
+    pub fn reset(&mut self) {
+        self.highlight = None;
+        self.completion = None;
+        self.tab_pending = false;
+    }
+
+    /// Takes a lookup's result; `true` when a Tab was waiting for it.
+    pub fn take(&mut self, result: Matches) -> bool {
+        if let Some(list) = result.suggestions {
+            self.suggestions = list;
+            self.highlight = self.highlight.filter(|h| *h < self.suggestions.len());
+        }
+        self.completion = Some(result.completion);
+        self.searching = !result.finished;
+        std::mem::take(&mut self.tab_pending)
+    }
+
+    pub fn highlighted(&self) -> Option<&Suggestion> {
+        self.highlight.and_then(|h| self.suggestions.get(h))
+    }
+
+    /// What Tab puts in the prompt: the highlighted or only suggestion, else
+    /// the common completion. `None` when that isn't known yet (Tab waits).
+    pub fn tab(&mut self) -> Option<String> {
+        if let Some(s) = self.highlighted() {
+            return Some(s.typed());
+        }
+        if let [only] = self.suggestions.as_slice() {
+            return Some(only.typed());
+        }
+        if self.completion.is_none() {
+            self.tab_pending = true;
+        }
+        self.completion.clone()
+    }
+
+    pub fn down(&mut self) {
+        let shown = self.suggestions.len();
+        if shown > 0 {
+            self.highlight = Some(self.highlight.map_or(0, |h| (h + 1).min(shown - 1)));
+        }
+    }
+
+    pub fn up(&mut self) {
+        self.highlight = self.highlight.and_then(|h| h.checked_sub(1));
+    }
+}
+
 pub struct Matches {
     pub generation: u64,
     pub value: String,
@@ -268,6 +335,19 @@ pub struct Suggestion {
     /// Where the typed text is in `name` (byte range), to highlight it.
     pub matched: Option<Span>,
 }
+
+impl Suggestion {
+    /// The prompt's text once this is taken: a folder ends in `/`, so the
+    /// prompt stays open for the next level.
+    fn typed(&self) -> String {
+        if self.is_dir {
+            format!("{}/", self.path)
+        } else {
+            self.path.clone()
+        }
+    }
+}
+
 pub(super) fn start_path() -> String {
     dirs::home_dir()
         .map(|home| format!("{}/", home.display()))

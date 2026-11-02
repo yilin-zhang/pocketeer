@@ -75,7 +75,7 @@ impl Cycle for GameFilter {
 pub enum GameRef {
     /// Index into `LibraryView::games`.
     Library(usize),
-    /// Index into `CardSnapshot::card_roms`.
+    /// Index into `CardSnapshot::files`.
     CardOnly(usize),
 }
 
@@ -89,7 +89,7 @@ impl GameRef {
 
     pub fn card_rom(self, s: &Session) -> Option<&CardRom> {
         match self {
-            GameRef::CardOnly(i) => s.card()?.card_roms.get(i),
+            GameRef::CardOnly(i) => s.card()?.files.get(i).map(|f| &f.rom),
             GameRef::Library(_) => None,
         }
     }
@@ -198,7 +198,7 @@ impl Games {
     pub fn keep(&self, s: &Session) -> Option<Keep> {
         match self.selected()? {
             GameRef::Library(i) => Some(Keep::Library(s.library()?.games.get(i)?.game.id)),
-            GameRef::CardOnly(i) => Some(Keep::Card(s.card()?.card_roms.get(i)?.rel_path.clone())),
+            GameRef::CardOnly(i) => Some(Keep::Card(s.card()?.files.get(i)?.rom.rel_path.clone())),
         }
     }
 
@@ -259,8 +259,8 @@ impl Games {
         if !matches!(f, GameFilter::InLibrary | GameFilter::NotOnCard)
             && let Some(card) = &snap.card
         {
-            for (i, o) in card.card_roms.iter().enumerate() {
-                let presence = card.card_presence[i];
+            for (i, file) in card.files.iter().enumerate() {
+                let (o, presence) = (&file.rom, file.presence);
                 if presence == Presence::Both
                     || (f == GameFilter::CardOnly && presence != Presence::Card)
                     || (f == GameFilter::WithSaves
@@ -390,7 +390,7 @@ impl Games {
         if cx.session.require_card().is_none() || cx.session.require_library().is_none() {
             return;
         }
-        if cx.session.card().is_none_or(|c| c.card_roms.is_empty()) {
+        if cx.session.card().is_none_or(|c| c.files.is_empty()) {
             cx.session
                 .notice("Every ROM on the card is already in the library.");
             return;

@@ -14,7 +14,7 @@ use ratatui::{
 };
 use ratatui_image::{StatefulImage, protocol::StatefulProtocol};
 
-use super::app::{App, BiosFilter, Cycle, Modal, Splitter, Tab};
+use super::app::{App, BiosFilter, Cycle, JobProgress, Modal, Splitter, Tab};
 use crate::text;
 
 mod card_tabs;
@@ -319,8 +319,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
 
     let busy = app.session().busy();
-    match (&busy.main, busy.download_pct) {
-        (Some(b), Some(pct)) => {
+    let job = busy.main.as_ref();
+    match job.map(|j| (&j.label, j.progress)) {
+        Some((b, Some(JobProgress::Download(pct)))) => {
             let [label, bar] =
                 Layout::horizontal([Constraint::Length(28), Constraint::Min(10)]).areas(status_row);
             frame.render_widget(
@@ -336,10 +337,12 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             );
         }
         _ => {
-            let mut status = match (&busy.main, app.session().log().next()) {
-                (Some(b), _) => Line::from(Palette::Ink.span(match busy.step {
-                    Some((done, total)) => format!(" {} {b}  {done}/{total}", spinner()),
-                    None => format!(" {} {b}", spinner()),
+            let mut status = match (job, app.session().log().next()) {
+                (Some(j), _) => Line::from(Palette::Ink.span(match j.progress {
+                    Some(JobProgress::Step(done, total)) => {
+                        format!(" {} {}  {done}/{total}", spinner(), j.label)
+                    }
+                    _ => format!(" {} {}", spinner(), j.label),
                 })),
                 (None, Some(l)) => Line::from(vec![
                     Palette::Faint.span(" › "),
@@ -491,7 +494,7 @@ fn card_tab(frame: &mut Frame, app: &App, area: Rect) -> bool {
 /// The body before the first load has landed.
 fn loading(app: &App) -> Paragraph<'static> {
     let text = match &app.session().busy().main {
-        Some(b) => format!("{} {b}…", spinner()),
+        Some(job) => format!("{} {}…", spinner(), job.label),
         None => format!("{} Loading…", spinner()),
     };
     Paragraph::new(Line::from(Palette::Muted.span(text)))

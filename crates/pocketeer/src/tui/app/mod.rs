@@ -37,7 +37,7 @@ pub use games::GameRef;
 pub use layout::{Layout, Splitter};
 pub use pane::{Cycle, PaneOps};
 pub use saves::{SaveLine, SaveMark, status as save_status};
-pub use session::Session;
+pub use session::{JobProgress, Session};
 
 use card::{Bios, Cores};
 pub use dialog::Step;
@@ -347,7 +347,8 @@ impl App {
                 }
             }
             _ if self.session.is_busy() => {
-                let busy = self.session.busy().main.clone().unwrap_or_default();
+                let busy = self.session.busy().main.as_ref().map(|j| j.label.clone());
+                let busy = busy.unwrap_or_default();
                 self.session
                     .notice(format!("⟳ {busy} — wait for it to finish."));
             }
@@ -510,7 +511,6 @@ mod tests {
         app.session.set_snapshot(Snapshot {
             fingerprint: 0,
             card: None,
-            verification: None,
             library: Some(LibraryView {
                 root: tmp.path().join("library"),
                 games: vec![game(7, "Middle"), game(9, "Zulu")],

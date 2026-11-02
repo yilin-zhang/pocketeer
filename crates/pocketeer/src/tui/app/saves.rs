@@ -95,11 +95,11 @@ impl SaveIndex {
             }
         }
         if let Some(card) = session.card() {
-            for (i, rom) in card.card_roms.iter().enumerate() {
-                if card.card_presence.get(i) == Some(&Presence::Both) {
+            for (i, file) in card.files.iter().enumerate() {
+                if file.presence == Presence::Both {
                     continue;
                 }
-                if let Some(key) = saves::rom_key(&rom.rel_path) {
+                if let Some(key) = saves::rom_key(&file.rom.rel_path) {
                     by_key.entry(key).or_insert(GameRef::CardOnly(i));
                 }
             }

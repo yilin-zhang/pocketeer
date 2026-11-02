@@ -303,7 +303,7 @@ pub(super) fn draw_device(frame: &mut Frame, app: &mut App, area: Rect) {
         ));
     }
     card.push(kv_text("Cores", st.installed_cores.to_string()));
-    card.push(kv_text("ROMs", snap.card_roms.len().to_string()));
+    card.push(kv_text("ROMs", snap.files.len().to_string()));
     card.push(kv_text(
         "Inventory",
         match snap.inventory.as_ref().map(|i| &i.source) {
