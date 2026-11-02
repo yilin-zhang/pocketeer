@@ -3,7 +3,12 @@
 use std::fmt::Write;
 
 use pocketeer_core::{
-    card::{Status, bios::BiosReport, bios::FileStatus, clean::JunkKind, roms::Identity},
+    card::{
+        Status,
+        bios::{BiosReport, FileStatus, RootFile},
+        clean::JunkKind,
+        roms::Identity,
+    },
     names::RenameKind,
     plan::Plan,
     transfer::Presence,
@@ -85,12 +90,16 @@ impl Text for BiosReport {
                     FileStatus::Unreadable { error } => {
                         format!("  ! {}  (unreadable: {})", f.path.display(), error.message)
                     }
-                    FileStatus::FoundAtRoot { root_file } => format!(
+                    FileStatus::AtRoot {
+                        found: RootFile::File { path: root_file },
+                    } => format!(
                         "  ↑ {}  ({req}, found at root: {} → `pocketeer bios place`)",
                         f.path.display(),
                         root_file.display()
                     ),
-                    FileStatus::FoundAtRootZipped { zip, inner } => format!(
+                    FileStatus::AtRoot {
+                        found: RootFile::Zip { zip, inner },
+                    } => format!(
                         "  ↑ {}  ({req}, inside {} as {inner}; unzip it at the root)",
                         f.path.display(),
                         zip.display()
@@ -124,7 +133,10 @@ impl Text for PlaceReport {
             actions(&mut out, list);
         }
         for z in &r.plan.zipped {
-            if let FileStatus::FoundAtRootZipped { zip, inner } = &z.status {
+            if let FileStatus::AtRoot {
+                found: RootFile::Zip { zip, inner },
+            } = &z.status
+            {
                 let _ = writeln!(
                     out,
                     "  (skipped) {} is inside {}; unzip it at the root first",

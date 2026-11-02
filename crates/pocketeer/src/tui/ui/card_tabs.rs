@@ -127,8 +127,12 @@ pub(super) fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
             for f in missing {
                 let note = match &f.status {
                     FileStatus::WrongHash { .. } => " (wrong md5)",
-                    FileStatus::FoundAtRoot { .. } => " (at root → BIOS tab, p)",
-                    FileStatus::FoundAtRootZipped { .. } => " (zipped at root)",
+                    FileStatus::AtRoot {
+                        found: RootFile::File { .. },
+                    } => " (at root → BIOS tab, p)",
+                    FileStatus::AtRoot {
+                        found: RootFile::Zip { .. },
+                    } => " (zipped at root)",
                     _ => "",
                 };
                 lines.push(Line::from(format!("  {}{note}", f.path.display())));
@@ -163,8 +167,12 @@ fn status_cell(f: &FileStatus) -> (String, Style) {
         FileStatus::Missing => ("missing".into(), Palette::Bad.style()),
         FileStatus::WrongHash { .. } => ("wrong md5".into(), Palette::Warn.style()),
         FileStatus::Unreadable { .. } => ("unreadable".into(), Palette::Warn.style()),
-        FileStatus::FoundAtRoot { .. } => ("at card root → p".into(), Palette::Ink.style()),
-        FileStatus::FoundAtRootZipped { .. } => ("zipped at root".into(), Palette::Ink.style()),
+        FileStatus::AtRoot {
+            found: RootFile::File { .. },
+        } => ("at card root → p".into(), Palette::Ink.style()),
+        FileStatus::AtRoot {
+            found: RootFile::Zip { .. },
+        } => ("zipped at root".into(), Palette::Ink.style()),
     }
 }
 
@@ -248,11 +256,15 @@ pub(super) fn draw_bios(frame: &mut Frame, app: &mut App, area: Rect) {
                     "The file is on the card but could not be read: {}",
                     error.message
                 )],
-                FileStatus::FoundAtRoot { root_file } => vec![format!(
+                FileStatus::AtRoot {
+                    found: RootFile::File { path: root_file },
+                } => vec![format!(
                     "{} is at the card root. Press p to move it into place.",
                     root_file.display()
                 )],
-                FileStatus::FoundAtRootZipped { zip, inner } => vec![format!(
+                FileStatus::AtRoot {
+                    found: RootFile::Zip { zip, inner },
+                } => vec![format!(
                     "{inner} is inside {} at the card root; unzip it first, then p.",
                     zip.display()
                 )],

@@ -48,15 +48,23 @@ pub enum FileStatus {
         error: ErrorInfo,
     },
     Missing,
-    /// Missing, but a file with this name sits at the SD card root.
-    FoundAtRoot {
-        root_file: PathBuf,
+    /// Missing from its folder, but the user dropped one with this name at
+    /// the SD card root.
+    AtRoot {
+        #[serde(flatten)]
+        found: RootFile,
     },
-    /// Missing, but a zip at the SD card root contains a file with this name.
-    FoundAtRootZipped {
-        zip: PathBuf,
-        inner: String,
-    },
+}
+
+/// A file at the SD card root, by itself or inside a zip there. Paths are
+/// relative to the SD root.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "form", rename_all = "snake_case")]
+pub enum RootFile {
+    /// `bios place` can move it into the folder.
+    File { path: PathBuf },
+    /// Left for the user to unpack.
+    Zip { zip: PathBuf, inner: String },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -140,13 +148,12 @@ pub fn check(pocket: &Pocket, installed: &CoreList, only: Option<&[String]>) -> 
                 FileStatus::WrongHash { .. } => summary.wrong_hash += 1,
                 FileStatus::Unreadable { .. } => summary.unreadable += 1,
                 FileStatus::Missing => summary.missing += 1,
-                FileStatus::FoundAtRoot { .. } => {
+                FileStatus::AtRoot { found } => {
                     summary.missing += 1;
-                    summary.placeable += 1;
-                }
-                FileStatus::FoundAtRootZipped { .. } => {
-                    summary.missing += 1;
-                    summary.zipped_at_root += 1;
+                    match found {
+                        RootFile::File { .. } => summary.placeable += 1,
+                        RootFile::Zip { .. } => summary.zipped_at_root += 1,
+                    }
                 }
             }
         }
@@ -299,13 +306,8 @@ fn find_instance_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-#[derive(Debug, Clone)]
-enum RootFile {
-    Plain(PathBuf),
-    Zipped { zip: PathBuf, inner: String },
-}
-
 /// Files the user dropped at the SD root (optionally inside zips), by name.
+/// A loose file wins over a zipped one of the same name.
 fn index_root_files(root: &Path) -> HashMap<String, RootFile> {
     let mut map = HashMap::new();
     let Ok(entries) = std::fs::read_dir(root) else {
@@ -316,6 +318,7 @@ fn index_root_files(root: &Path) -> HashMap<String, RootFile> {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
+        let rel = PathBuf::from(name);
         if fsutil::is_hidden(&entry.file_name())
             || !path.is_file()
             || name == "Analogue_Pocket.json"
@@ -334,17 +337,16 @@ fn index_root_files(root: &Path) -> HashMap<String, RootFile> {
                         && let Some(inner_name) = inner.file_name().and_then(|n| n.to_str())
                         && let Ok(full) = f.name()
                     {
-                        map.entry(inner_name.to_string())
-                            .or_insert(RootFile::Zipped {
-                                zip: path.clone(),
-                                inner: full.into_owned(),
-                            });
+                        map.entry(inner_name.to_string()).or_insert(RootFile::Zip {
+                            zip: rel.clone(),
+                            inner: full.into_owned(),
+                        });
                     }
                 }
             }
             continue;
         }
-        map.insert(name.to_string(), RootFile::Plain(path.clone()));
+        map.insert(name.to_string(), RootFile::File { path: rel });
     }
     map
 }
@@ -369,12 +371,8 @@ fn status_of(
     }
     let name = file.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     match root_files.get(name) {
-        Some(RootFile::Plain(p)) => FileStatus::FoundAtRoot {
-            root_file: p.strip_prefix(root).unwrap_or(p).to_path_buf(),
-        },
-        Some(RootFile::Zipped { zip, inner }) => FileStatus::FoundAtRootZipped {
-            zip: zip.strip_prefix(root).unwrap_or(zip).to_path_buf(),
-            inner: inner.clone(),
+        Some(found) => FileStatus::AtRoot {
+            found: found.clone(),
         },
         None => FileStatus::Missing,
     }
@@ -412,7 +410,9 @@ pub fn plan_place(pocket: &Pocket, report: &BiosReport) -> Result<PlacePlan> {
     let mut seen_sources: Vec<PathBuf> = Vec::new();
     for file in report.all_files() {
         match &file.status {
-            FileStatus::FoundAtRoot { root_file } => {
+            FileStatus::AtRoot {
+                found: RootFile::File { path: root_file },
+            } => {
                 // A root file wanted by several cores is moved once; the rest
                 // would need copies, which `place` doesn't do (yet).
                 if seen_sources.contains(root_file) {
@@ -425,7 +425,9 @@ pub fn plan_place(pocket: &Pocket, report: &BiosReport) -> Result<PlacePlan> {
                     reason: install::plan::MoveReason::PlaceRootFile,
                 });
             }
-            FileStatus::FoundAtRootZipped { .. } => zipped.push(file.clone()),
+            FileStatus::AtRoot {
+                found: RootFile::Zip { .. },
+            } => zipped.push(file.clone()),
             _ => {}
         }
     }
@@ -559,8 +561,10 @@ mod tests {
         ));
         assert_eq!(
             file(&r, "Assets/arduboy/common/games/game1.hex").status,
-            FileStatus::FoundAtRoot {
-                root_file: "game1.hex".into()
+            FileStatus::AtRoot {
+                found: RootFile::File {
+                    path: "game1.hex".into()
+                }
             }
         );
         assert_eq!(r.summary.wrong_hash, 1);
@@ -594,9 +598,11 @@ mod tests {
         let r = report(&pocket);
         assert_eq!(
             file(&r, "Assets/gba/common/gba_bios.bin").status,
-            FileStatus::FoundAtRootZipped {
-                zip: "bios.zip".into(),
-                inner: "bios/gba_bios.bin".into()
+            FileStatus::AtRoot {
+                found: RootFile::Zip {
+                    zip: "bios.zip".into(),
+                    inner: "bios/gba_bios.bin".into()
+                }
             }
         );
         let plan = plan_place(&pocket, &r).unwrap();

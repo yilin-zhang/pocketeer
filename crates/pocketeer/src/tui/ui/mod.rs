@@ -1,7 +1,7 @@
 //! Drawing. A pure function of `App`, except that it records where things
 //! were drawn (in `Layout`) so clicks can be mapped back.
 
-use pocketeer_core::card::bios::FileStatus;
+use pocketeer_core::card::bios::{FileStatus, RootFile};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},

@@ -46,9 +46,10 @@ fn bios_place_moves_root_files() {
 
     let (v, _) = env.json(&["bios", "check"]);
     assert_eq!(v["data"]["summary"]["placeable"], 2);
+    let gba = &files_of(&v, "spiritualized.GBA")[0];
     assert_eq!(
-        files_of(&v, "spiritualized.GBA")[0]["status"],
-        "found_at_root"
+        (&gba["status"], &gba["form"]),
+        (&"at_root".into(), &"file".into())
     );
 
     let (v, code) = env.json(&["bios", "place", "--dry-run"]);
