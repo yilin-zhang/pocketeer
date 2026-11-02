@@ -474,7 +474,7 @@ mod tests {
     use super::*;
     use crate::tui::worker::{GameRow, LibraryView, Snapshot};
     use pocketeer_core::{
-        card::roms::Confidence,
+        card::roms::Identity,
         library::Game,
         transfer::{CardMatch, LocalMatch, Presence},
     };
@@ -538,7 +538,9 @@ mod tests {
             copies: vec![CardMatch {
                 path: path.clone(),
                 name: "card-name.gba".into(),
-                confidence: Confidence::Full,
+                identity: Identity::Full {
+                    sha1: "0".repeat(40),
+                },
                 name_mismatch: true,
             }],
         });

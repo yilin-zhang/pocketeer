@@ -3,7 +3,7 @@
 use super::saves::{draw_save_panel, save_cell, save_summary};
 use super::*;
 use crate::tui::app::covers::{self, Cover};
-use pocketeer_core::{card::roms::Confidence, transfer::Presence};
+use pocketeer_core::{card::roms::Identity, transfer::Presence};
 
 pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.session().snapshot().is_none() {
@@ -84,9 +84,9 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(text::bytes(size)).style(Style::new().dim()),
                 ])
             } else if let Some(o) = r.card_rom(s) {
-                let (where_, color) = match o.confidence {
-                    Confidence::Pending => ("card + ?", Palette::Warn),
-                    Confidence::Error => ("read error", Palette::Bad),
+                let (where_, color) = match o.identity {
+                    Identity::Pending => ("card + ?", Palette::Warn),
+                    Identity::Error { .. } => ("read error", Palette::Bad),
                     _ => ("card", Palette::Warn),
                 };
                 game_row(vec![
@@ -207,11 +207,11 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
     if let Some(o) = &orphan {
         lines.push(kv_text("AP path", o.rel_path.display().to_string()));
         lines.extend(summary.clone());
-        lines.push(kv_text("Identity", format!("{:?}", o.confidence)));
-        if let Some(sha1) = &o.sha1 {
-            lines.push(kv_text("SHA-1", sha1.clone()));
+        lines.push(kv_text("Identity", text::card::identity(&o.identity)));
+        if let Some(sha1) = o.identity.sha1() {
+            lines.push(kv_text("SHA-1", sha1.to_string()));
         }
-        if let Some(error) = &o.error {
+        if let Identity::Error { error } = &o.identity {
             lines.push(Line::from(Palette::Bad.span(error.clone())));
         }
     }
@@ -222,7 +222,7 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
         for matched in &selected_matches {
             for copy in &matched.copies {
                 lines.push(kv_text("AP path", copy.path.display().to_string()));
-                lines.push(kv_text("Identity", format!("{:?}", copy.confidence)));
+                lines.push(kv_text("Identity", text::card::identity(&copy.identity)));
                 if copy.name_mismatch {
                     lines.push(Line::from(
                         Palette::Muted.span("≠ names differ; e reviews rename options"),

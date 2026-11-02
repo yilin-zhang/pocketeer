@@ -21,7 +21,7 @@ use serde::Serialize;
 
 use crate::{
     Pocket,
-    card::roms::{CardRom, Confidence},
+    card::roms::{CardRom, Identity},
     library::db::Game,
 };
 
@@ -41,7 +41,7 @@ pub enum Presence {
 pub struct CardMatch {
     pub path: PathBuf,
     pub name: String,
-    pub confidence: Confidence,
+    pub identity: Identity,
     pub name_mismatch: bool,
 }
 
@@ -65,7 +65,7 @@ pub fn compare<'a>(games: impl IntoIterator<Item = &'a Game>, card: &[CardRom]) 
     let mut by_hash: HashMap<(&str, &str), Vec<&CardRom>> = HashMap::new();
     let mut unknown = HashSet::new();
     for rom in card {
-        if let Some(sha1) = &rom.sha1 {
+        if let Some(sha1) = rom.identity.sha1() {
             by_hash.entry((&rom.platform, sha1)).or_default().push(rom);
         } else {
             unknown.insert((rom.platform.as_str(), rom.size));
@@ -83,7 +83,7 @@ pub fn compare<'a>(games: impl IntoIterator<Item = &'a Game>, card: &[CardRom]) 
                 .map(|c| CardMatch {
                     path: c.rel_path.clone(),
                     name: c.name.clone(),
-                    confidence: c.confidence,
+                    identity: c.identity.clone(),
                     name_mismatch: c.name != rom.name,
                 })
                 .collect();
@@ -108,11 +108,9 @@ pub fn compare<'a>(games: impl IntoIterator<Item = &'a Game>, card: &[CardRom]) 
     }
     let card = card
         .iter()
-        .map(|rom| match &rom.sha1 {
+        .map(|rom| match rom.identity.sha1() {
             None => Presence::Unknown,
-            Some(sha1) if local_hashes.contains(&(rom.platform.as_str(), sha1.as_str())) => {
-                Presence::Both
-            }
+            Some(sha1) if local_hashes.contains(&(rom.platform.as_str(), sha1)) => Presence::Both,
             Some(_) => Presence::Card,
         })
         .collect();

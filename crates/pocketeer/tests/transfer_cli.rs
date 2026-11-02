@@ -81,7 +81,7 @@ fn import_selects_an_exact_nested_path() {
         .iter()
         .find(|rom| rom["path"] == "Assets/fkh/common/two/game.fkh")
         .unwrap();
-    assert_eq!(imported["confidence"], "cached");
+    assert_eq!(imported["identity"], "cached");
     assert!(imported["sha1"].is_string());
     let (missing, code) = env.json(&["card", "import", "game.fkh"]);
     assert_eq!(code, 1, "{missing}");

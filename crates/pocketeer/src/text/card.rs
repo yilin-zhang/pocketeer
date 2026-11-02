@@ -3,7 +3,7 @@
 use std::fmt::Write;
 
 use pocketeer_core::{
-    card::{Status, bios::BiosReport, bios::FileStatus, clean::JunkKind},
+    card::{Status, bios::BiosReport, bios::FileStatus, clean::JunkKind, roms::Identity},
     plan::Plan,
 };
 
@@ -228,6 +228,17 @@ impl Text for RefreshReport {
     }
 }
 
+/// How sure pocketeer is of a card file's contents, in a word or two.
+pub fn identity(identity: &Identity) -> &'static str {
+    match identity {
+        Identity::Pending => "not read yet",
+        Identity::Cached { .. } => "cached",
+        Identity::Sampled { .. } => "sampled",
+        Identity::Full { .. } => "fully read",
+        Identity::Error { .. } => "read error",
+    }
+}
+
 impl Text for RomsReport {
     fn text(&self, _: Reader) -> String {
         let report = self;
@@ -235,12 +246,12 @@ impl Text for RomsReport {
         for (rom, presence) in report.roms.iter().zip(&report.comparison.card) {
             let _ = writeln!(
                 text,
-                "{}  {:?}  {:?}",
+                "{}  {:?}  {}",
                 rom.rel_path.display(),
                 presence,
-                rom.confidence
+                identity(&rom.identity)
             );
-            if let Some(error) = &rom.error {
+            if let Identity::Error { error } = &rom.identity {
                 let _ = writeln!(text, "  {error}");
             }
         }

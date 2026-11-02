@@ -151,7 +151,7 @@ pub fn apply_card(pocket: &crate::Pocket, plan: &CardRenamePlan) -> Result<CardR
 mod card_tests {
     use super::*;
     use crate::{
-        card::roms::{Confidence, Index},
+        card::roms::{Identity, Index},
         testutil::{sd, write},
     };
 
@@ -178,7 +178,7 @@ mod card_tests {
         for i in 0..index.roms.len() {
             index.verify(&pocket, i, false, &|| false);
         }
-        let sha1 = index.roms[0].sha1.clone();
+        let sha1 = index.roms[0].identity.sha1().map(str::to_owned);
         index.save(&pocket).unwrap();
         let preview = plan_card(
             &pocket,
@@ -224,8 +224,8 @@ mod card_tests {
             .iter()
             .find(|r| r.name == "new name.gba")
             .unwrap();
-        assert_eq!(renamed.confidence, Confidence::Cached);
-        assert_eq!(renamed.sha1, sha1);
+        assert!(matches!(renamed.identity, Identity::Cached { .. }));
+        assert_eq!(renamed.identity.sha1(), sha1.as_deref());
     }
 
     #[test]

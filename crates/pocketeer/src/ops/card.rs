@@ -10,7 +10,7 @@ use pocketeer_core::{
         bios::{self, BiosReport, PlacePlan},
         clean::{self, CleanPlan, CleanResult},
         install, rename as card_rename,
-        roms::{self, CardRom, Index},
+        roms::{self, CardRom, Identity, Index},
     },
     catalog::inventory::{Inventory, Platforms},
     library::import::{ImportPlan, ImportResult},
@@ -127,7 +127,11 @@ pub struct RomsReport {
 
 impl Outcome for RomsReport {
     fn error(&self) -> Option<Error> {
-        let failed = self.roms.iter().filter(|r| r.error.is_some()).count();
+        let failed = self
+            .roms
+            .iter()
+            .filter(|r| matches!(r.identity, Identity::Error { .. }))
+            .count();
         (failed > 0).then_some(Error::SomeFailed {
             failed,
             total: self.roms.len(),

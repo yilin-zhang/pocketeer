@@ -3,7 +3,7 @@
 use crate::library::{Library, resolve_rom};
 use crate::{
     Error, Pocket, Result,
-    card::roms::Index,
+    card::roms::{Identity, Index},
     fsutil,
     fsutil::hash::copy_and_hash,
     plan::{Applied, Event, Failure, Plan, Progress},
@@ -81,9 +81,9 @@ pub fn plan(
             .filter(|(_, c)| {
                 c.platform == game.platform
                     && c.size == rom.size
-                    && (c.sha1.is_none() || c.sha1.as_deref() == Some(&rom.sha1))
+                    && c.identity.sha1().is_none_or(|sha1| sha1 == rom.sha1)
             })
-            .map(|(i, c)| (c.sha1.is_none(), i))
+            .map(|(i, c)| (c.identity.sha1().is_none(), i))
             .collect();
         candidates.sort_unstable();
         let mut found = None;
@@ -96,7 +96,7 @@ pub fn plan(
                 index.verify(pocket, i, false, &|| false);
                 checked[i] = true;
             }
-            if index.roms[i].sha1.as_deref() == Some(&rom.sha1) {
+            if index.roms[i].identity.sha1() == Some(&rom.sha1) {
                 found = Some(index.roms[i].rel_path.clone());
                 break;
             }
@@ -105,14 +105,17 @@ pub fn plan(
             plan.already_present.push(path);
             continue;
         }
-        if let Some(error) = index
-            .roms
-            .iter()
-            .find(|c| c.platform == game.platform && c.size == rom.size && c.error.is_some())
-        {
+        // A same-size card file that couldn't be read might be this ROM.
+        let unreadable = index.roms.iter().find_map(|c| match &c.identity {
+            Identity::Error { error } if c.platform == game.platform && c.size == rom.size => {
+                Some((c, error))
+            }
+            _ => None,
+        });
+        if let Some((card, error)) = unreadable {
             return Err(Error::Mismatch {
-                path: pocket.root().join(&error.rel_path),
-                what: error.error.clone().unwrap_or_default(),
+                path: pocket.root().join(&card.rel_path),
+                what: error.clone(),
             });
         }
         crate::fsutil::names::validate_name(&game.platform)?;
@@ -202,10 +205,7 @@ mod tests {
             .iter()
             .find(|r| r.name == "a-unresolved.fkh")
             .unwrap();
-        assert_eq!(
-            unresolved.confidence,
-            crate::card::roms::Confidence::Pending
-        );
+        assert_eq!(unresolved.identity, Identity::Pending);
     }
 
     #[test]
@@ -218,10 +218,10 @@ mod tests {
         assert_eq!(result.copied, 1);
         assert!(result.failed.is_empty());
         assert!(result.warnings.is_empty());
-        assert_eq!(
-            Index::scan(&pocket).unwrap().roms[0].confidence,
-            crate::card::roms::Confidence::Cached
-        );
+        assert!(matches!(
+            Index::scan(&pocket).unwrap().roms[0].identity,
+            Identity::Cached { .. }
+        ));
         std::fs::rename(
             tmp.path().join("Assets/fkh/common/local.fkh"),
             tmp.path().join("Assets/fkh/common/renamed.fkh"),

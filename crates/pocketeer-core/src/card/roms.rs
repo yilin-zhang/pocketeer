@@ -192,14 +192,32 @@ const VERSION: u8 = 1;
 const CACHE_PATH: &str = ".pocketeer/rom-index.msgpack";
 const SAMPLE_BYTES: u64 = 16 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Confidence {
+/// What is known about a card ROM's contents. pocketeer reads card files
+/// only when asked, so most start out `Pending` or `Cached`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "identity", rename_all = "snake_case")]
+pub enum Identity {
+    /// Not read yet.
     Pending,
-    Cached,
-    Sampled,
-    Full,
-    Error,
+    /// From the cache: the file looks unchanged since it was last hashed.
+    Cached { sha1: String },
+    /// Confirmed by reading a sample of the file.
+    Sampled { sha1: String },
+    /// Confirmed by reading every byte.
+    Full { sha1: String },
+    /// Reading it failed.
+    Error { error: String },
+}
+
+impl Identity {
+    pub fn sha1(&self) -> Option<&str> {
+        match self {
+            Identity::Cached { sha1 } | Identity::Sampled { sha1 } | Identity::Full { sha1 } => {
+                Some(sha1)
+            }
+            Identity::Pending | Identity::Error { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -210,9 +228,8 @@ pub struct CardRom {
     pub rel_path: PathBuf,
     pub name: String,
     pub size: u64,
-    pub sha1: Option<String>,
-    pub confidence: Confidence,
-    pub error: Option<String>,
+    #[serde(flatten)]
+    pub identity: Identity,
     #[serde(skip)]
     stamp: Stamp,
 }
@@ -283,15 +300,14 @@ impl Index {
                             .to_string_lossy()
                             .into_owned(),
                         size: stamp.size,
-                        sha1: cached.map(|c| hash::hex(&c.sha1)),
-                        confidence: if cached.is_some() {
-                            Confidence::Cached
-                        } else {
-                            Confidence::Pending
+                        identity: match cached {
+                            Some(c) => Identity::Cached {
+                                sha1: hash::hex(&c.sha1),
+                            },
+                            None => Identity::Pending,
                         },
                         rel_path: path,
                         stamp,
-                        error: None,
                     });
                 }
             }
@@ -331,20 +347,18 @@ impl Index {
         }
         let rom = &mut self.roms[i];
         match result {
-            Ok((entry, confidence)) => {
-                rom.sha1 = Some(hash::hex(&entry.sha1));
+            Ok((entry, identity)) => {
+                rom.identity = identity;
                 rom.stamp = entry.stamp;
                 rom.size = entry.stamp.size;
-                rom.confidence = confidence;
-                rom.error = None;
                 self.dirty |= self.entries.get(&rel) != Some(&entry);
                 self.entries.insert(rel, entry);
             }
             Err(e) => {
                 self.dirty |= self.entries.remove(&rel).is_some();
-                rom.sha1 = None;
-                rom.confidence = Confidence::Error;
-                rom.error = Some(e.to_string());
+                rom.identity = Identity::Error {
+                    error: e.to_string(),
+                };
             }
         }
         true
@@ -359,7 +373,7 @@ impl Index {
         rel: &Path,
         full: bool,
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<(Cached, Confidence)> {
+    ) -> Result<(Cached, Identity)> {
         self.identity.check(pocket)?;
         let path = pocket.root().join(rel);
         let before = Stamp::of(&path)?;
@@ -369,8 +383,8 @@ impl Index {
             .entries
             .get(rel)
             .filter(|c| !full && c.stamp == before && c.sample == sample);
-        let (sha1, confidence) = match cached {
-            Some(cached) => (cached.sha1, Confidence::Sampled),
+        let (sha1, sampled) = match cached {
+            Some(cached) => (cached.sha1, true),
             None => {
                 file.rewind().map_err(|e| Error::io(&path, e))?;
                 let mut digest = Sha1::new();
@@ -380,7 +394,7 @@ impl Index {
                     Ok(())
                 })
                 .map_err(|e| Error::io(&path, e))?;
-                (digest.finalize().into(), Confidence::Full)
+                (digest.finalize().into(), false)
             }
         };
         self.identity.check(pocket)?;
@@ -392,7 +406,12 @@ impl Index {
             sha1,
             sample,
         };
-        Ok((entry, confidence))
+        let sha1 = hash::hex(&sha1);
+        let identity = match sampled {
+            true => Identity::Sampled { sha1 },
+            false => Identity::Full { sha1 },
+        };
+        Ok((entry, identity))
     }
 
     pub fn relocate(&mut self, pocket: &Pocket, from: &Path, to: &Path) -> Result<()> {
@@ -555,10 +574,10 @@ mod index_tests {
         for i in 0..2 {
             assert!(index.verify(&pocket, i, false, &|| false));
         }
-        assert_eq!(index.roms[0].sha1, index.roms[1].sha1);
+        assert_eq!(index.roms[0].identity.sha1(), index.roms[1].identity.sha1());
         // `shasum` of "same bytes".
         assert_eq!(
-            index.roms[0].sha1.as_deref(),
+            index.roms[0].identity.sha1(),
             Some("9ad949ae6c2f37319cfa43f410db66843000a047")
         );
         index.save(&pocket).unwrap();
@@ -567,10 +586,10 @@ mod index_tests {
             index
                 .roms
                 .iter()
-                .all(|r| r.confidence == Confidence::Cached)
+                .all(|r| matches!(r.identity, Identity::Cached { .. }))
         );
         index.verify(&pocket, 0, false, &|| false);
-        assert_eq!(index.roms[0].confidence, Confidence::Sampled);
+        assert!(matches!(index.roms[0].identity, Identity::Sampled { .. }));
         fs::rename(
             tmp.path().join("Assets/gba/common/two.gba"),
             tmp.path().join("Assets/gba/common/renamed.gba"),
@@ -582,9 +601,9 @@ mod index_tests {
             .iter()
             .position(|r| r.name == "renamed.gba")
             .unwrap();
-        assert_eq!(index.roms[i].confidence, Confidence::Pending);
+        assert!(matches!(index.roms[i].identity, Identity::Pending));
         index.verify(&pocket, i, false, &|| false);
-        assert_eq!(index.roms[0].sha1, index.roms[1].sha1);
+        assert_eq!(index.roms[0].identity.sha1(), index.roms[1].identity.sha1());
         index.save(&pocket).unwrap();
         let store: Store =
             rmp_serde::from_slice(&fs::read(tmp.path().join(CACHE_PATH)).unwrap()).unwrap();
@@ -608,7 +627,7 @@ mod index_tests {
         let time = fs::metadata(&path).unwrap().modified().unwrap();
         let mut index = Index::scan(&pocket).unwrap();
         index.verify(&pocket, 0, false, &|| false);
-        let original = index.roms[0].sha1.clone();
+        let original = index.roms[0].identity.sha1().map(str::to_owned);
         index.save(&pocket).unwrap();
         // An edit outside the sample is deliberately NOT claimed as fully verified.
         let mut bytes = fs::read(&path).unwrap();
@@ -622,11 +641,11 @@ mod index_tests {
             .unwrap();
         let mut index = Index::scan(&pocket).unwrap();
         index.verify(&pocket, 0, false, &|| false);
-        assert_eq!(index.roms[0].confidence, Confidence::Sampled);
-        assert_eq!(index.roms[0].sha1, original);
+        assert!(matches!(index.roms[0].identity, Identity::Sampled { .. }));
+        assert_eq!(index.roms[0].identity.sha1(), original.as_deref());
         index.verify(&pocket, 0, true, &|| false);
-        assert_ne!(index.roms[0].sha1, original);
-        let previous = index.roms[0].sha1.clone();
+        assert_ne!(index.roms[0].identity.sha1(), original.as_deref());
+        let previous = index.roms[0].identity.sha1().map(str::to_owned);
         bytes[0] = b'c';
         fs::write(&path, bytes).unwrap();
         File::options()
@@ -636,8 +655,8 @@ mod index_tests {
             .set_modified(time)
             .unwrap();
         index.verify(&pocket, 0, false, &|| false);
-        assert_eq!(index.roms[0].confidence, Confidence::Full);
-        assert_ne!(index.roms[0].sha1, previous);
+        assert!(matches!(index.roms[0].identity, Identity::Full { .. }));
+        assert_ne!(index.roms[0].identity.sha1(), previous.as_deref());
     }
 
     #[test]
@@ -648,14 +667,12 @@ mod index_tests {
         let mut index = Index::scan(&pocket).unwrap();
         assert!(index.warning.is_some());
         assert!(!index.verify(&pocket, 0, false, &|| true));
-        assert_eq!(index.roms[0].confidence, Confidence::Pending);
+        assert!(matches!(index.roms[0].identity, Identity::Pending));
         index.verify(&pocket, 0, false, &|| false);
-        assert_eq!(index.roms[0].confidence, Confidence::Full);
+        assert!(matches!(index.roms[0].identity, Identity::Full { .. }));
         fs::remove_file(tmp.path().join(&index.roms[0].rel_path)).unwrap();
         index.verify(&pocket, 0, false, &|| false);
-        assert_eq!(index.roms[0].confidence, Confidence::Error);
-        assert!(index.roms[0].sha1.is_none());
-        assert!(index.roms[0].error.is_some());
+        assert!(matches!(index.roms[0].identity, Identity::Error { .. }));
     }
 }
 

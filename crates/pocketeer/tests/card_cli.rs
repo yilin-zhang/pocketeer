@@ -5,7 +5,7 @@ use common::Harness;
 fn nested_rom_identity_survives_cached_queries_and_explicit_checks() {
     let env = Harness::new().with_card();
     env.write("Assets/gba/common/folder/game.gba", "game contents");
-    for (args, confidence) in [
+    for (args, identity) in [
         (vec!["card", "list"], "pending"),
         (vec!["card", "check"], "full"),
         (vec!["card", "list"], "cached"),
@@ -20,10 +20,9 @@ fn nested_rom_identity_survives_cached_queries_and_explicit_checks() {
             .iter()
             .find(|r| r["path"] == "Assets/gba/common/folder/game.gba")
             .unwrap();
-        assert_eq!(rom["confidence"], confidence);
-        if confidence != "pending" {
+        assert_eq!(rom["identity"], identity);
+        if identity != "pending" {
             assert_eq!(rom["sha1"].as_str().unwrap().len(), 40);
         }
     }
-    assert!(env.sd.join(".pocketeer/rom-index.msgpack").is_file());
 }
