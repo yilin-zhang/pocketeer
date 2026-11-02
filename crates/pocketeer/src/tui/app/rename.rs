@@ -226,7 +226,7 @@ pub fn standardize(cx: &mut Cx) {
 pub fn offer_standard_names(cx: &mut Cx, plans: Vec<RenamePlan>) {
     let items = plans
         .iter()
-        .map(|p| format!("[{}] {}  →  {}", p.platform, p.old_name, p.new_name))
+        .map(|p| format!("[{}] {}  →  {}", p.rom.platform, p.rom.name, p.new_name))
         .collect();
     cx.dialog.toggle(
         "Rename to standard names?",
@@ -263,7 +263,7 @@ pub fn answer(cx: &mut Cx, step: Step, answer: Answer) {
             if chosen.is_empty() {
                 return;
             }
-            let named = chosen.into_iter().map(|p| (p.old_name.clone(), Ok(p)));
+            let named = chosen.into_iter().map(|p| (p.rom.name.clone(), Ok(p)));
             cx.planned(Batch::planned(named));
         }
         _ => {}

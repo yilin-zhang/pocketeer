@@ -345,7 +345,7 @@ pub type RenameReport = Staged<RenamePlan>;
 impl Apply for RenamePlan {
     type Output = RenameResult;
     fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<RenameResult> {
-        progress(Event::Status(format!("Renaming {}", self.old_name)));
+        progress(Event::Status(format!("Renaming {}", self.rom.name)));
         rename::apply(&mut ctx.library()?, self)
     }
 }
@@ -407,7 +407,7 @@ pub type StandardizeReport = Batch<RenamePlan>;
 pub fn standardize(ctx: &Context, platform: Option<&str>, mode: Mode) -> Result<StandardizeReport> {
     let renames = plan_standardize(ctx, platform)?
         .into_iter()
-        .map(|plan| (plan.old_name.clone(), Ok(plan)));
+        .map(|plan| (plan.rom.name.clone(), Ok(plan)));
     Ok(Batch::stage(ctx, mode, renames, &mut |_| {}))
 }
 

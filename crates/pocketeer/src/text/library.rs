@@ -305,9 +305,13 @@ impl Text for RenameReport {
         let r = self;
         let mut out = String::new();
         let p = &r.plan;
-        let _ = writeln!(out, "[{}] {}  →  {}", p.platform, p.old_name, p.new_name);
-        if p.new_game_name != p.old_game_name {
-            let _ = writeln!(out, "  game   {}  →  {}", p.old_game_name, p.new_game_name);
+        let _ = writeln!(
+            out,
+            "[{}] {}  →  {}",
+            p.rom.platform, p.rom.name, p.new_name
+        );
+        if p.new_game_name != p.rom.game {
+            let _ = writeln!(out, "  game   {}  →  {}", p.rom.game, p.new_game_name);
         }
         let f = &p.library_file;
         let _ = writeln!(
@@ -340,11 +344,11 @@ impl Text for RemoveReport {
             let _ = writeln!(
                 out,
                 "  - [{}] {}  {}{}",
-                item.platform,
-                item.name,
+                item.rom.platform,
+                item.rom.name,
                 bytes(item.size),
-                if item.last_of_game && item.game != item.name {
-                    format!("  [game {} goes too]", item.game)
+                if item.last_of_game && item.rom.game != item.rom.name {
+                    format!("  [game {} goes too]", item.rom.game)
                 } else {
                     String::new()
                 }
@@ -393,7 +397,11 @@ impl Text for StandardizeReport {
             r,
             reader,
             |out, p, _| {
-                let _ = writeln!(out, "  [{}] {}  →  {}", p.platform, p.old_name, p.new_name);
+                let _ = writeln!(
+                    out,
+                    "  [{}] {}  →  {}",
+                    p.rom.platform, p.rom.name, p.new_name
+                );
             },
             |_| "renamed".into(),
         )

@@ -8,16 +8,14 @@ use crate::{
     plan::{Applied, Plan},
 };
 
-use super::{Library, db, resolve_rom};
+use super::{Library, RomRef, db, resolve_rom};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RenamePlan {
-    pub rom_id: i64,
-    pub game_id: i64,
-    pub platform: String,
-    pub old_name: String,
+    /// The ROM as it is named now.
+    #[serde(flatten)]
+    pub rom: RomRef,
     pub new_name: String,
-    pub old_game_name: String,
     /// Follows the file name when the game has one ROM; multi-ROM games keep theirs.
     pub new_game_name: String,
     /// The file move, relative to the library root.
@@ -83,12 +81,8 @@ pub fn plan(
         kind: RenameKind::Rom,
     };
     Ok(RenamePlan {
-        rom_id: rom.id,
-        game_id: game.id,
-        platform: game.platform,
-        old_name: rom.name,
+        rom: RomRef::of(&game, &rom),
         new_name,
-        old_game_name: game.name,
         new_game_name,
         library_file,
         library: lib.identity()?,
@@ -113,10 +107,10 @@ pub fn apply(lib: &mut Library, plan: &RenamePlan) -> Result<RenameResult> {
         .conn_mut()
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| Error::db(e, "begin rename"))?;
-    let current = db::rom_name(&tx, plan.rom_id)?;
-    if current != plan.old_name {
+    let current = db::rom_name(&tx, plan.rom.rom_id)?;
+    if current != plan.rom.name {
         return Err(Error::Stale {
-            what: format!("ROM {}", plan.old_name),
+            what: format!("ROM {}", plan.rom.name),
         });
     }
     let moves = [plan.library_file.clone()];
@@ -124,13 +118,13 @@ pub fn apply(lib: &mut Library, plan: &RenamePlan) -> Result<RenameResult> {
     let updated = (|| -> Result<()> {
         db::rename_rom(
             &tx,
-            plan.rom_id,
+            plan.rom.rom_id,
             &plan.new_name,
             &plan.library_file.to.to_string_lossy(),
         )?;
-        if plan.new_game_name != plan.old_game_name {
-            db::rename_game(&tx, plan.game_id, &plan.new_game_name)?;
-            db::reset_unfound_cover(&tx, plan.game_id)?;
+        if plan.new_game_name != plan.rom.game {
+            db::rename_game(&tx, plan.rom.game_id, &plan.new_game_name)?;
+            db::reset_unfound_cover(&tx, plan.rom.game_id)?;
         }
         tx.commit().map_err(|e| Error::db(e, "commit rename"))
     })();

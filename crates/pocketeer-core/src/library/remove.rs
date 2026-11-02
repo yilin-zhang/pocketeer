@@ -11,15 +11,12 @@ use crate::{
     plan::{Applied, Failure, Plan},
 };
 
-use super::{Library, db};
+use super::{Library, RomRef, db};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RemoveItem {
-    pub rom_id: i64,
-    pub game_id: i64,
-    pub platform: String,
-    pub game: String,
-    pub name: String,
+    #[serde(flatten)]
+    pub rom: RomRef,
     pub size: u64,
     /// The file, relative to the library root.
     pub file: PathBuf,
@@ -55,17 +52,17 @@ pub fn plan(lib: &Library, platform: Option<&str>, specs: &[String]) -> Result<R
     for spec in specs {
         let hits = super::resolve_game_roms(lib, platform, spec)?;
         for (game, rom) in hits {
-            if plan.items.iter().any(|i| i.rom_id == rom.id) {
+            if plan.items.iter().any(|i| i.rom.rom_id == rom.id) {
                 continue;
             }
-            let taken_from_game = plan.items.iter().filter(|i| i.game_id == game.id).count();
+            let taken_from_game = plan
+                .items
+                .iter()
+                .filter(|i| i.rom.game_id == game.id)
+                .count();
             plan.bytes += rom.size;
             plan.items.push(RemoveItem {
-                rom_id: rom.id,
-                game_id: game.id,
-                platform: game.platform.clone(),
-                game: game.name.clone(),
-                name: rom.name.clone(),
+                rom: RomRef::of(&game, &rom),
                 size: rom.size,
                 file: rom.rel_path.clone(),
                 last_of_game: taken_from_game + 1 == game.roms.len(),
@@ -106,7 +103,7 @@ pub fn apply(lib: &mut Library, plan: &RemovePlan) -> Result<RemoveResult> {
         } else {
             Ok(())
         };
-        match moved.and_then(|_| db::delete_rom(lib.conn(), item.rom_id, item.game_id)) {
+        match moved.and_then(|_| db::delete_rom(lib.conn(), item.rom.rom_id, item.rom.game_id)) {
             Ok(game_gone) => {
                 result.removed += 1;
                 result.bytes += item.size;

@@ -221,7 +221,7 @@ impl Ask for RenamePlan {
 impl Pending for LibraryRemovePlan {
     fn preview(self: Box<Self>) -> Preview {
         let games: std::collections::BTreeSet<&str> =
-            self.items.iter().map(|i| i.game.as_str()).collect();
+            self.items.iter().map(|i| i.rom.game.as_str()).collect();
         let title = match (games.len(), games.iter().next()) {
             (1, Some(game)) => format!("Remove {game}?"),
             _ => format!("Remove {} games?", games.len()),
@@ -229,7 +229,7 @@ impl Pending for LibraryRemovePlan {
         let mut lines: Vec<String> = if self.items.len() > 1 {
             self.items
                 .iter()
-                .map(|i| format!("{}  {}", i.name, text::bytes(i.size)))
+                .map(|i| format!("{}  {}", i.rom.name, text::bytes(i.size)))
                 .collect()
         } else {
             Vec::new()

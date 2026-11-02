@@ -250,6 +250,28 @@ pub fn resolve_game_roms(
     Ok(hits)
 }
 
+/// Which ROM a plan is about, named as it was when planned.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RomRef {
+    pub rom_id: i64,
+    pub game_id: i64,
+    pub platform: String,
+    pub game: String,
+    pub name: String,
+}
+
+impl RomRef {
+    pub(crate) fn of(game: &Game, rom: &Rom) -> Self {
+        RomRef {
+            rom_id: rom.id,
+            game_id: game.id,
+            platform: game.platform.clone(),
+            game: game.name.clone(),
+            name: rom.name.clone(),
+        }
+    }
+}
+
 /// One platform of the library: what `library status` and `covers status`
 /// both show.
 #[derive(Debug, Clone, Serialize, PartialEq)]
