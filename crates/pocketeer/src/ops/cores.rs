@@ -3,16 +3,15 @@
 use std::path::PathBuf;
 
 use pocketeer_core::{
-    Error, ErrorInfo, Pocket, Result,
+    Error, Pocket, Result,
     card::cores::{self, CoreInfo, CoreListReport, SearchFilter, SearchHit},
-    card::install::{self, Changes, InstallPlan, PlanOptions, Prepared, UninstallPlan},
+    card::install::{self, InstallPlan, PlanOptions, Prepared, UninstallPlan},
     catalog::inventory::{Inventory, InventoryStatus},
-    plan::{Event, Plan},
+    plan::Event,
 };
 use serde::Serialize;
 
-use super::{Mode, batch_verdict, context::Context, stage_item};
-use crate::output::Outcome;
+use super::{Batch, BatchItem, Mode, context::Context};
 
 pub fn list(ctx: &Context, outdated: bool) -> Result<CoreListReport> {
     let pocket = ctx.pocket()?;
@@ -51,11 +50,7 @@ pub fn search(
     let hits = cores::search(&inventory, &installed, &filter);
     Ok(SearchReport {
         hits,
-        inventory: InventoryStatus {
-            available: true,
-            source: Some(inventory.source.clone()),
-            error: None,
-        },
+        inventory: inventory.status(),
     })
 }
 
@@ -76,40 +71,7 @@ pub struct InstallRequest {
     pub keep_platforms: bool,
 }
 
-/// Result for one requested core.
-#[derive(Debug, Serialize)]
-pub struct InstallOutcome {
-    /// What the user asked for (`id` or `id@version`, or the zip path).
-    pub spec: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub plan: Option<InstallPlan>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<Changes>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<ErrorInfo>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct InstallReport {
-    pub mode: Mode,
-    pub outcomes: Vec<InstallOutcome>,
-}
-
-impl InstallReport {
-    pub fn failed(&self) -> usize {
-        self.outcomes.iter().filter(|o| o.error.is_some()).count()
-    }
-}
-
-impl Outcome for InstallReport {
-    fn error(&self) -> Option<Error> {
-        batch_verdict(
-            self.outcomes
-                .iter()
-                .map(|o| (o.plan.as_ref().map_or(0, Plan::changes), o.error.is_some())),
-        )
-    }
-}
+pub type InstallReport = Batch<InstallPlan>;
 
 /// Resolves `specs` (`id` or `id@version`) against the inventory and
 /// downloads what each install needs. One entry per spec, failures included.
@@ -221,68 +183,23 @@ pub fn apply_prepared(
     prepared: Vec<(String, Result<Prepared>)>,
     progress: &mut dyn FnMut(Event),
 ) -> InstallReport {
-    let mut outcomes = Vec::new();
-    for (spec, result) in prepared {
-        match result {
-            Err(err) => outcomes.push(InstallOutcome {
-                spec,
-                plan: None,
-                result: None,
-                error: Some(err.to_info()),
+    let items = prepared
+        .into_iter()
+        .map(|(spec, result)| match result {
+            Err(e) => BatchItem::unplanned(spec, &e),
+            Ok(prep) => BatchItem::stage(spec, mode, prep.plan.clone(), |plan| {
+                progress(Event::Status(format!(
+                    "Installing {} {}",
+                    plan.core_id, plan.version
+                )));
+                prep.apply(pocket, progress)
             }),
-            Ok(prep) => {
-                let plan = prep.plan.clone();
-                let (result, error) = stage_item(mode, &plan, |plan| {
-                    progress(Event::Status(format!(
-                        "Installing {} {}",
-                        plan.core_id, plan.version
-                    )));
-                    prep.apply(pocket, progress)
-                });
-                outcomes.push(InstallOutcome {
-                    spec,
-                    plan: Some(plan),
-                    result,
-                    error,
-                });
-            }
-        }
-    }
-    InstallReport { mode, outcomes }
+        })
+        .collect();
+    Batch { mode, items }
 }
 
-#[derive(Debug, Serialize)]
-pub struct RemoveOutcome {
-    pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub plan: Option<UninstallPlan>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<Changes>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<ErrorInfo>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RemoveReport {
-    pub mode: Mode,
-    pub outcomes: Vec<RemoveOutcome>,
-}
-
-impl RemoveReport {
-    pub fn failed(&self) -> usize {
-        self.outcomes.iter().filter(|o| o.error.is_some()).count()
-    }
-}
-
-impl Outcome for RemoveReport {
-    fn error(&self) -> Option<Error> {
-        batch_verdict(
-            self.outcomes
-                .iter()
-                .map(|o| (o.plan.as_ref().map_or(0, Plan::changes), o.error.is_some())),
-        )
-    }
-}
+pub type RemoveReport = Batch<UninstallPlan>;
 
 pub fn remove(
     ctx: &Context,
@@ -312,28 +229,15 @@ pub fn apply_removes(
     plans: Vec<(String, Result<UninstallPlan>)>,
     progress: &mut dyn FnMut(Event),
 ) -> RemoveReport {
-    let mut outcomes = Vec::new();
-    for (id, plan) in plans {
-        match plan {
-            Err(err) => outcomes.push(RemoveOutcome {
-                id,
-                plan: None,
-                result: None,
-                error: Some(err.to_info()),
+    let items = plans
+        .into_iter()
+        .map(|(id, plan)| match plan {
+            Err(e) => BatchItem::unplanned(id, &e),
+            Ok(plan) => BatchItem::stage(plan.core_id.clone(), mode, plan, |plan| {
+                progress(Event::Status(format!("Removing {}", plan.core_id)));
+                install::apply_remove(pocket, plan, progress)
             }),
-            Ok(plan) => {
-                let (result, error) = stage_item(mode, &plan, |plan| {
-                    progress(Event::Status(format!("Removing {}", plan.core_id)));
-                    install::apply_remove(pocket, plan, progress)
-                });
-                outcomes.push(RemoveOutcome {
-                    id: plan.core_id.clone(),
-                    plan: Some(plan),
-                    result,
-                    error,
-                });
-            }
-        }
-    }
-    RemoveReport { mode, outcomes }
+        })
+        .collect();
+    Batch { mode, items }
 }

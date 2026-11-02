@@ -54,8 +54,9 @@ fn install_from_file_preview_then_apply() {
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["ok"], true);
     assert_eq!(v["data"]["mode"], "dry_run");
-    assert!(v["data"]["outcomes"][0]["result"].is_null());
-    let plan = &v["data"]["outcomes"][0]["plan"];
+    assert_eq!(v["data"]["items"][0]["state"], "planned");
+    assert!(v["data"]["items"][0]["result"].is_null());
+    let plan = &v["data"]["items"][0]["plan"];
     assert_eq!(plan["core_id"], "spiritualized.GBA");
     assert_eq!(plan["installed_version"], "1.2.0");
     assert_eq!(plan["version"], "1.3.0");
@@ -85,7 +86,8 @@ fn install_from_file_preview_then_apply() {
     // Apply.
     let (v, code) = env.json(&["cores", "install", "--from", zip]);
     assert_eq!(code, 0, "{v}");
-    let applied = &v["data"]["outcomes"][0]["result"];
+    assert_eq!(v["data"]["items"][0]["state"], "applied");
+    let applied = &v["data"]["items"][0]["result"];
     assert_eq!(applied["installed"], 3);
     assert!(
         env.read("Cores/spiritualized.GBA/core.json")
@@ -107,8 +109,8 @@ fn install_from_file_preview_then_apply() {
     // Idempotent: again → nothing to do, exit 0.
     let (v, code) = env.json(&["cores", "install", "--from", zip]);
     assert_eq!(code, 0);
-    assert_eq!(v["data"]["outcomes"][0]["plan"]["changed"], false);
-    assert!(v["data"]["outcomes"][0]["result"].is_null());
+    assert_eq!(v["data"]["items"][0]["plan"]["changed"], false);
+    assert!(v["data"]["items"][0]["result"].is_null());
 }
 
 #[test]
@@ -120,9 +122,9 @@ fn update_all_uses_cached_download() {
 
     let (v, code) = env.json(&["cores", "update", "--all"]);
     assert_eq!(code, 0, "{v}");
-    let outcomes = v["data"]["outcomes"].as_array().unwrap();
+    let outcomes = v["data"]["items"].as_array().unwrap();
     assert_eq!(outcomes.len(), 1, "only GBA is outdated");
-    assert_eq!(outcomes[0]["spec"], "spiritualized.GBA");
+    assert_eq!(outcomes[0]["target"], "spiritualized.GBA");
     assert_eq!(outcomes[0]["plan"]["source"]["url"], GBA_URL);
     assert!(
         env.read("Cores/spiritualized.GBA/core.json")
@@ -146,10 +148,7 @@ fn update_without_cached_download_fails_offline_per_core() {
     let (v, code) = env.json(&["cores", "update", "spiritualized.GBA"]);
     assert_eq!(code, 1);
     assert_eq!(v["error"]["code"], "SOME_FAILED");
-    assert_eq!(
-        v["data"]["outcomes"][0]["error"]["code"],
-        "OFFLINE_NO_CACHE"
-    );
+    assert_eq!(v["data"]["items"][0]["error"]["code"], "OFFLINE_NO_CACHE");
     // The one item failed and planned nothing: total counts failures plus changes.
     assert_eq!(v["error"]["details"]["failed"], 1);
     assert_eq!(v["error"]["details"]["total"], 1);
@@ -160,10 +159,7 @@ fn update_unknown_core_is_reported() {
     let env = env();
     let (v, code) = env.json(&["cores", "update", "nobody.Here", "--dry-run"]);
     assert_eq!(code, 1);
-    assert_eq!(
-        v["data"]["outcomes"][0]["error"]["code"],
-        "CORE_NOT_INSTALLED"
-    );
+    assert_eq!(v["data"]["items"][0]["error"]["code"], "CORE_NOT_INSTALLED");
 }
 
 #[test]
@@ -171,7 +167,7 @@ fn install_pinned_version_not_found() {
     let env = env();
     let (v, code) = env.json(&["cores", "install", "spiritualized.GBA@9.9", "--dry-run"]);
     assert_eq!(code, 1);
-    let err = &v["data"]["outcomes"][0]["error"];
+    let err = &v["data"]["items"][0]["error"];
     assert_eq!(err["code"], "VERSION_NOT_FOUND");
     assert_eq!(
         err["details"]["available"],
@@ -188,7 +184,7 @@ fn remove_default_and_purge() {
 
     let (v, code) = env.json(&["cores", "remove", "spiritualized.GBA", "--dry-run"]);
     assert_eq!(code, 0);
-    let plan = &v["data"]["outcomes"][0]["plan"];
+    let plan = &v["data"]["items"][0]["plan"];
     assert_eq!(
         plan_actions(plan),
         [
@@ -216,10 +212,7 @@ fn remove_default_and_purge() {
 
     let (v, code) = env.json(&["cores", "remove", "spiritualized.GBA"]);
     assert_eq!(code, 1);
-    assert_eq!(
-        v["data"]["outcomes"][0]["error"]["code"],
-        "CORE_NOT_INSTALLED"
-    );
+    assert_eq!(v["data"]["items"][0]["error"]["code"], "CORE_NOT_INSTALLED");
 }
 
 #[test]

@@ -3,32 +3,36 @@
 use std::fmt::Write;
 
 use super::{bytes, table, time_ago};
-use crate::ops::memories::{MemoriesReport, MemoryEntry};
+use crate::ops::memories::{MemoriesReport, MemoryEntry, Place};
 
-/// What a Memory is of: the ROM (with its core) or the cartridge.
-pub fn memory_game(e: &MemoryEntry) -> String {
-    let h = &e.memory.header;
-    match (h.game.is_empty(), h.cartridge) {
-        // A core names the ROM file; the extension adds nothing here.
-        (false, false) => pocketeer_core::fsutil::names::stem(&h.game).to_string(),
-        (false, true) => h.game.clone(),
-        (true, true) => "cartridge".into(),
-        (true, false) => e
-            .memory
-            .rel_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default(),
+impl MemoryEntry {
+    /// What the Memory is of: the ROM (with its core) or the cartridge.
+    pub fn game(&self) -> String {
+        let h = &self.memory.header;
+        match (h.game.is_empty(), h.cartridge) {
+            // A core names the ROM file; the extension adds nothing here.
+            (false, false) => pocketeer_core::names::stem(&h.game).to_string(),
+            (false, true) => h.game.clone(),
+            (true, true) => "cartridge".into(),
+            (true, false) => self
+                .memory
+                .rel_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        }
     }
 }
 
-/// "card", "library" or "library + card".
-pub fn memory_where(e: &MemoryEntry) -> &'static str {
-    match (e.in_library, e.on_card) {
-        (true, true) if e.backed_up => "library + card",
-        (true, true) => "card (changed)",
-        (true, false) => "library",
-        _ => "card",
+impl Place {
+    /// The WHERE column.
+    pub fn label(self) -> &'static str {
+        match self {
+            Place::Card => "card",
+            Place::Library => "library",
+            Place::BackedUp => "library + card",
+            Place::Changed => "card (changed)",
+        }
     }
 }
 
@@ -52,9 +56,9 @@ pub fn memories_list(r: &MemoriesReport) -> String {
         .map(|e| {
             let h = &e.memory.header;
             [
-                memory_game(e),
+                e.game(),
                 h.core.clone().unwrap_or_else(|| "cartridge".into()),
-                memory_where(e).to_string(),
+                e.place.label().to_string(),
                 time_ago(e.memory.mtime),
                 bytes(e.memory.size),
                 e.memory.rel_path.display().to_string(),
@@ -66,11 +70,7 @@ pub fn memories_list(r: &MemoriesReport) -> String {
         ["GAME", "CORE", "WHERE", "SAVED", "SIZE", "PATH"],
         &rows,
     );
-    let new = r
-        .memories
-        .iter()
-        .filter(|e| e.on_card && !e.backed_up)
-        .count();
+    let new = r.memories.iter().filter(|e| e.place.needs_backup()).count();
     let _ = writeln!(
         out,
         "\n{} Memories, {} not backed up",

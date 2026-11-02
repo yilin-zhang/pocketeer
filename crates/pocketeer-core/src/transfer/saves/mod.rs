@@ -16,7 +16,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-pub const ROOTS: [&str; 4] = crate::card::SAVE_ROOTS;
+const ROOTS: [&str; 4] = crate::card::SAVE_ROOTS;
 const MTIME_TOLERANCE: i64 = 2;
 mod owners;
 mod trash;

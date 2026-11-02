@@ -122,31 +122,110 @@ pub fn stage_if<P: Plan, R: Applied>(
     }
 }
 
-/// One member of a batch (`cores install`, `cores update`, `cores remove`):
-/// the same gate as [`stage`], but a failure stays with the item instead of
-/// aborting the batch.
-pub fn stage_item<P: Plan, R: Applied>(
-    mode: Mode,
-    plan: &P,
-    run: impl FnOnce(&P) -> Result<R>,
-) -> (Option<R>, Option<ErrorInfo>) {
-    if mode != Mode::Applied || plan.changes() == 0 {
-        return (None, None);
+/// A batch of independent plans (`cores install`, `update`, `remove`):
+/// each item is planned and applied on its own, and a failure stays with
+/// its item instead of aborting the rest.
+#[derive(Debug, Serialize)]
+pub struct Batch<P> {
+    pub mode: Mode,
+    pub items: Vec<BatchItem<P>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchItem<P> {
+    /// What the user named: `id`, `id@version` or a zip path.
+    pub target: String,
+    #[serde(flatten)]
+    pub state: BatchState<P>,
+}
+
+/// How far one item of a [`Batch`] got.
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum BatchState<P> {
+    /// It couldn't be planned.
+    Unplanned {
+        error: ErrorInfo,
+    },
+    /// Planned and left alone: a dry run, or nothing to change.
+    Planned {
+        plan: P,
+    },
+    Applied {
+        plan: P,
+        result: install::Changes,
+    },
+    /// Planned, but applying it failed.
+    Failed {
+        plan: P,
+        error: ErrorInfo,
+    },
+}
+
+impl<P: Plan> BatchItem<P> {
+    pub fn unplanned(target: String, error: &Error) -> Self {
+        BatchItem {
+            target,
+            state: BatchState::Unplanned {
+                error: error.to_info(),
+            },
+        }
     }
-    match run(plan) {
-        Ok(r) => (Some(r), None),
-        Err(e) => (None, Some(e.to_info())),
+
+    /// The same gate as [`stage`]: `run` applies `plan` unless this is a
+    /// dry run or there is nothing to do.
+    pub fn stage(
+        target: String,
+        mode: Mode,
+        plan: P,
+        run: impl FnOnce(&P) -> Result<install::Changes>,
+    ) -> Self {
+        let state = if mode != Mode::Applied || plan.changes() == 0 {
+            BatchState::Planned { plan }
+        } else {
+            match run(&plan) {
+                Ok(result) => BatchState::Applied { plan, result },
+                Err(e) => BatchState::Failed {
+                    plan,
+                    error: e.to_info(),
+                },
+            }
+        };
+        BatchItem { target, state }
+    }
+
+    pub fn is_failed(&self) -> bool {
+        matches!(
+            self.state,
+            BatchState::Unplanned { .. } | BatchState::Failed { .. }
+        )
+    }
+
+    pub fn plan(&self) -> Option<&P> {
+        match &self.state {
+            BatchState::Unplanned { .. } => None,
+            BatchState::Planned { plan }
+            | BatchState::Applied { plan, .. }
+            | BatchState::Failed { plan, .. } => Some(plan),
+        }
     }
 }
 
-/// [`verdict`] over a batch: each item contributes its changes and whether it failed.
-pub fn batch_verdict(items: impl Iterator<Item = (usize, bool)>) -> Option<Error> {
-    let (mut changes, mut failed) = (0, 0);
-    for (n, is_err) in items {
-        changes += n;
-        failed += is_err as usize;
+impl<P: Plan> Batch<P> {
+    pub fn failed(&self) -> usize {
+        self.items.iter().filter(|i| i.is_failed()).count()
     }
-    verdict(changes, failed)
+}
+
+impl<P: Plan> Outcome for Batch<P> {
+    fn error(&self) -> Option<Error> {
+        let changes = self
+            .items
+            .iter()
+            .filter_map(BatchItem::plan)
+            .map(Plan::changes);
+        verdict(changes.sum(), self.failed())
+    }
 }
 
 /// Reads the optional `--dat FILE`.

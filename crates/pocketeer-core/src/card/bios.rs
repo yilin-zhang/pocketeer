@@ -380,7 +380,7 @@ fn status_of(
     }
 }
 
-pub fn md5_of(path: &Path) -> Result<String> {
+fn md5_of(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path).map_err(|e| Error::io(path, e))?;
     digest_hex::<md5::Md5>(&mut file).map_err(|e| Error::io(path, e))
 }

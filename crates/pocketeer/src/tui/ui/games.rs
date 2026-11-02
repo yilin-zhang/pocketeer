@@ -91,7 +91,7 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
                 };
                 game_row(vec![
                     platform_cell(&o.platform),
-                    Cell::from(pocketeer_core::fsutil::names::stem(&o.name).to_string())
+                    Cell::from(pocketeer_core::names::stem(&o.name).to_string())
                         .style(Palette::Warn.style()),
                     Cell::from(where_).style(color.style()),
                     Cell::from(""),
@@ -238,7 +238,7 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
                 )));
             }
             let multi = game.roms.len() > 1;
-            if multi || pocketeer_core::fsutil::names::stem(&rom.name) != game.name {
+            if multi || pocketeer_core::names::stem(&rom.name) != game.name {
                 lines.push(kv_text("File", rom.name.clone()));
             }
             if multi {
@@ -255,20 +255,6 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
                 lines.push(kv_text("DAT retry", error.clone()));
             }
             lines.push(kv("crc32", Palette::Muted.span(rom.crc32.clone())));
-            match rom.mode.as_str() {
-                "copy" => {}
-                "link" => lines.push(kv_text("Kept as", "hard link in the library")),
-                _ => lines.push(kv_text(
-                    "Kept as",
-                    format!(
-                        "reference to {}",
-                        rom.source_path
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_default()
-                    ),
-                )),
-            }
         }
     }
     details(frame, details_area, lines);

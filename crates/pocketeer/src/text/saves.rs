@@ -256,7 +256,7 @@ pub fn saves_dialog(
         let rel = a.path();
         let file = rel.file_name().unwrap_or_default().to_string_lossy();
         let (key, line) = match games.get(rel) {
-            Some(game) if pocketeer_core::fsutil::names::stem(&file) == game => {
+            Some(game) if pocketeer_core::names::stem(&file) == game => {
                 ((false, game.clone()), format!("  {what}"))
             }
             Some(game) => ((false, game.clone()), format!("  {what}: {file}")),

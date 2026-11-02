@@ -39,7 +39,7 @@ fn cores_list_without_inventory_still_works() {
     let out = h.raw(&["cores", "list", "--json"]);
     assert!(out.status.success());
     let json = json_of(&out);
-    assert_eq!(json["data"]["inventory"]["available"], false);
+    assert_eq!(json["data"]["inventory"]["status"], "unavailable");
     assert_eq!(
         json["data"]["inventory"]["error"]["code"],
         "OFFLINE_NO_CACHE"

@@ -26,6 +26,15 @@ pub enum ZipSource {
     File { path: PathBuf },
 }
 
+impl std::fmt::Display for ZipSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ZipSource::Url { url } => f.write_str(url),
+            ZipSource::File { path } => write!(f, "{}", path.display()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ZipEntry {
     /// Name exactly as stored in the zip (forward slashes).
@@ -53,7 +62,7 @@ impl std::fmt::Debug for CoreZip {
 
 impl CoreZip {
     pub fn from_bytes(bytes: Vec<u8>, source: ZipSource) -> Result<Self> {
-        let context = describe(&source);
+        let context = source.to_string();
         let mut archive =
             ZipArchive::new(Cursor::new(bytes)).map_err(|e| Error::zip(e, &context))?;
         let mut entries = Vec::with_capacity(archive.len());
@@ -96,10 +105,10 @@ impl CoreZip {
 
     /// `"<entry> in <source>"`, the context every zip error here carries.
     fn context(&self, name: &str) -> String {
-        format!("{} in {}", name, describe(&self.source))
+        format!("{name} in {}", self.source)
     }
 
-    pub fn read_entry(&mut self, name: &str) -> Result<Vec<u8>> {
+    fn read_entry(&mut self, name: &str) -> Result<Vec<u8>> {
         let context = self.context(name);
         let mut file = self
             .archive
@@ -162,17 +171,6 @@ impl CoreZip {
         }
         let bytes = self.read_entry(&name).ok()?;
         UpdatersJson::parse(&bytes).ok()
-    }
-
-    pub fn describe(&self) -> String {
-        describe(&self.source)
-    }
-}
-
-pub fn describe(source: &ZipSource) -> String {
-    match source {
-        ZipSource::Url { url } => url.clone(),
-        ZipSource::File { path } => path.display().to_string(),
     }
 }
 

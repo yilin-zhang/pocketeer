@@ -10,7 +10,7 @@ use super::{
     path_input::{expand_home, start_path},
 };
 use crate::tui::{
-    pending::{Pending, Request},
+    pending::{Import, Request},
     worker::Job,
 };
 
@@ -30,7 +30,7 @@ pub enum Step {
     TypePlatform { dir: PathBuf },
     /// Standard names offered for the planned import.
     Names {
-        import: Box<Pending>,
+        import: Box<Import>,
         /// (platform, current name) per item, in item order.
         keys: Vec<(String, String)>,
     },
@@ -144,8 +144,8 @@ fn type_platform(cx: &mut Cx, dir: PathBuf) {
 
 /// The planned import has files that look like known games: ask which
 /// standard names to take.
-pub fn offer_names(cx: &mut Cx, import: Pending) {
-    let suggestions = import.import_suggestions();
+pub fn offer_names(cx: &mut Cx, import: Box<Import>) {
+    let suggestions = import.suggestions();
     let items = suggestions
         .iter()
         .map(|(_, old, new)| format!("{old}  →  {new}"))
@@ -157,9 +157,6 @@ pub fn offer_names(cx: &mut Cx, import: Pending) {
     cx.dialog.toggle(
         "These look like known games. Import under the standard name?",
         items,
-        DialogStep::Import(Step::Names {
-            import: Box::new(import),
-            keys,
-        }),
+        DialogStep::Import(Step::Names { import, keys }),
     );
 }

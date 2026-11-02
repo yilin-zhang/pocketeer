@@ -131,7 +131,10 @@ fn dat_only_import_makes_managed_copies() {
         "zip entries are extracted"
     );
     let (v, _) = env.json(&["library", "list", "hello"]);
-    assert_eq!(v["data"]["games"][0]["roms"][0]["mode"], "copy");
+    assert_eq!(
+        v["data"]["games"][0]["roms"][0]["rel_path"],
+        "roms/fkh/Hello World (USA).fkh"
+    );
 }
 
 #[test]

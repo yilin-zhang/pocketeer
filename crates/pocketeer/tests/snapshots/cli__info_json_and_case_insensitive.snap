@@ -88,8 +88,8 @@ expression: json_of(&out)
     },
     "inventory_status": {
       "age_secs": "[age]",
-      "available": true,
-      "source": "cache"
+      "source": "cache",
+      "status": "loaded"
     },
     "repo_url": "https://github.com/spiritualized1997/openFPGA-GBA",
     "update_available": true

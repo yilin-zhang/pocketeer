@@ -329,7 +329,7 @@ pub fn import_report(r: &CardImportReport) -> String {
     let p = &r.staged.plan;
     for part in &p.parts {
         let _ = writeln!(out, "[{}]", part.platform);
-        let skipped = import_actions(&mut out, part.plan.actions.iter());
+        let skipped = import_actions(&mut out, part.actions.iter());
         if !skipped.is_empty() {
             let _ = writeln!(
                 out,
@@ -350,7 +350,7 @@ pub fn import_report(r: &CardImportReport) -> String {
         suggestion_footer(
             &mut out,
             r.staged.mode,
-            p.parts.iter().flat_map(|p| p.plan.actions.iter()),
+            p.parts.iter().flat_map(|p| p.actions.iter()),
         );
     }
     // Nothing is applied while a name is missing, so no footer then either.

@@ -53,21 +53,13 @@ fn unmatched(
 pub struct CardImportPlan {
     #[serde(skip)]
     identity: crate::card::CardIdentity,
-    pub parts: Vec<CardImportPart>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct CardImportPart {
-    pub platform: String,
-    #[serde(skip)]
-    pub options: ImportOptions,
-    #[serde(flatten)]
-    pub plan: ImportPlan,
+    /// One plan per platform.
+    pub parts: Vec<ImportPlan>,
 }
 
 impl Plan for CardImportPlan {
     fn changes(&self) -> usize {
-        self.parts.iter().map(|p| p.plan.changes()).sum()
+        self.parts.iter().map(|p| p.changes()).sum()
     }
 }
 
@@ -93,21 +85,15 @@ pub fn plan_import(
                 size: r.size,
             })
             .collect();
-        let options = options_for(platform);
-        let plan = import::plan_import_candidates(
+        parts.push(import::plan_import_candidates(
             lib,
             pocket.root(),
             &candidates,
-            &options,
+            &options_for(platform),
             dat,
             cache,
             progress,
-        )?;
-        parts.push(CardImportPart {
-            platform: platform.to_string(),
-            options,
-            plan,
-        });
+        )?);
     }
     Ok(CardImportPlan {
         parts,
@@ -139,10 +125,10 @@ pub fn apply_import(
     let mut out = Vec::new();
     let mut index = crate::card::roms::Index::scan(pocket)?;
     for part in &plan.parts {
-        if part.plan.changes() == 0 {
+        if part.changes() == 0 {
             continue;
         }
-        let result = import::apply_import(lib, &part.options, &part.plan, progress)?;
+        let result = import::apply_import(lib, part, progress)?;
         let mut warnings = Vec::new();
         for verified in &result.verified_sources {
             let Ok(relative) = verified.path.strip_prefix(pocket.root()) else {

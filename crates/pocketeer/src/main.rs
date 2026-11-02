@@ -154,20 +154,24 @@ fn run_library(
         LibraryCommand::Status => out.emit(library::status(ctx), text::library::library_status),
         LibraryCommand::Import(args) => {
             let mode = args.apply.into();
-            if args.platform.is_none() {
+            let Some(platform) = args.platform else {
                 return out.emit_outcome(
                     library::import_sorted(
                         ctx,
                         &args.dir,
-                        args.standard_names,
-                        !args.no_covers,
+                        args.flags.standard_names,
+                        !args.flags.no_covers,
                         mode,
                         progress,
                     ),
                     text::library::library_import_sorted,
                 );
-            }
-            let req = args.request().expect("platform checked above");
+            };
+            let req = library::ImportRequest {
+                source: args.dir,
+                platform,
+                settings: args.flags.into(),
+            };
             out.emit_outcome(
                 library::import(ctx, &req, mode, progress),
                 text::library::library_import,

@@ -293,7 +293,7 @@ mod tests {
         assert_eq!((report.matched, report.no_match), (1, 1));
         let before = rom(&lib, "my title.gba");
         assert_eq!(before.dat.game_name.as_deref(), Some("Hello World (USA)"));
-        assert!(lib.root().join(before.rel_path.as_ref().unwrap()).exists());
+        assert!(lib.root().join(&before.rel_path).exists());
         assert_eq!(offline(&mut lib, &cache).unchanged, 2);
         assert_eq!(rom(&lib, "my title.gba").dat, before.dat);
         let updated = String::from_utf8(XML.to_vec())

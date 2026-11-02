@@ -108,7 +108,7 @@ pub(super) fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
             lines.push(Line::from(""));
             lines.push(Line::from(d.clone()));
         }
-        let missing = missing_files(snap, &c.id);
+        let missing = snap.missing_files(&c.id);
         if !missing.is_empty() {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(

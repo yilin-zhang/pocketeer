@@ -14,7 +14,7 @@ use crate::{
 
 use super::{Library, db};
 
-pub const TRASH_DIR: &str = ".trash";
+pub(crate) const TRASH_DIR: &str = ".trash";
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RemoveItem {
@@ -24,9 +24,8 @@ pub struct RemoveItem {
     pub game: String,
     pub name: String,
     pub size: u64,
-    /// Managed file, relative to the library root; `None` for references.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file: Option<PathBuf>,
+    /// The file, relative to the library root.
+    pub file: PathBuf,
     /// Whether this is the game's last ROM (the game row goes too).
     pub last_of_game: bool,
 }
@@ -102,19 +101,14 @@ pub fn apply(lib: &mut Library, plan: &RemovePlan) -> Result<RemoveResult> {
     let trash = root.join(&plan.trash);
     let mut result = RemoveResult::default();
     for item in &plan.items {
-        let moved: Result<()> = match &item.file {
-            Some(rel) => {
-                let from = root.join(rel);
-                if from.exists() {
-                    let to = trash.join(rel);
-                    std::fs::create_dir_all(to.parent().unwrap_or(&trash))
-                        .map_err(|e| Error::io(&trash, e))
-                        .and_then(|_| std::fs::rename(&from, &to).map_err(|e| Error::io(&from, e)))
-                } else {
-                    Ok(())
-                }
-            }
-            None => Ok(()),
+        let from = root.join(&item.file);
+        let moved: Result<()> = if from.exists() {
+            let to = trash.join(&item.file);
+            std::fs::create_dir_all(to.parent().unwrap_or(&trash))
+                .map_err(|e| Error::io(&trash, e))
+                .and_then(|_| std::fs::rename(&from, &to).map_err(|e| Error::io(&from, e)))
+        } else {
+            Ok(())
         };
         match moved.and_then(|_| db::delete_rom(lib.conn(), item.rom_id, item.game_id)) {
             Ok(game_gone) => {

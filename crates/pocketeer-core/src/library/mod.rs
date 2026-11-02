@@ -10,11 +10,13 @@
 //! device registration or desired card contents are stored.
 
 pub mod covers;
-pub mod db;
+pub(crate) mod db;
 pub mod identify;
 pub mod import;
 pub mod remove;
 pub mod rename;
+
+pub use db::{Game, PlatformStats, Rom, SaveVersion};
 
 use std::path::{Path, PathBuf};
 
@@ -23,10 +25,8 @@ use serde::Serialize;
 
 use crate::{Error, Result};
 
-use db::{Game, Rom};
-
 pub const DB_FILE: &str = "library.sqlite";
-pub const DEFAULT_DIR_NAME: &str = "Pocketeer Library";
+const DEFAULT_DIR_NAME: &str = "Pocketeer Library";
 
 /// `~/Pocketeer Library`, if a home directory is known.
 pub fn default_path() -> Option<PathBuf> {
@@ -103,13 +103,9 @@ impl Library {
         PathBuf::from("roms").join(platform).join(name)
     }
 
-    /// Absolute path of a ROM's bytes: managed file or referenced original.
+    /// Absolute path of a ROM's managed copy.
     pub fn rom_abs_path(&self, rom: &db::Rom) -> PathBuf {
-        match (&rom.rel_path, &rom.source_path) {
-            (Some(rel), _) => self.root.join(rel),
-            (None, Some(src)) => src.clone(),
-            (None, None) => self.root.join("roms").join(&rom.name),
-        }
+        self.root.join(&rom.rel_path)
     }
 
     pub fn status(&self) -> Result<Status> {
@@ -140,7 +136,7 @@ fn connect(db: &Path) -> Result<Connection> {
 
 /// Every ROM `spec` names, each with its full game (ROM list included).
 /// Empty when nothing matches.
-pub fn find_roms(lib: &Library, platform: Option<&str>, spec: &str) -> Result<Vec<(Game, Rom)>> {
+fn find_roms(lib: &Library, platform: Option<&str>, spec: &str) -> Result<Vec<(Game, Rom)>> {
     if let Ok(id) = spec.parse::<i64>()
         && let Some(rom) = db::get_rom(lib.conn(), id)?
         && let Some(game) = db::get_game(lib.conn(), rom.game_id)?

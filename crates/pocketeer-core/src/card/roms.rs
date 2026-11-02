@@ -107,7 +107,7 @@ fn scan_dir(pocket: &Pocket, rel: &Path, owner: &str, recursive: bool) -> Result
 }
 
 /// The `common` and per-core folders of one platform (empty if none exist).
-pub fn platform_dirs(pocket: &Pocket, platform: &str) -> Result<Vec<RomDir>> {
+fn platform_dirs(pocket: &Pocket, platform: &str) -> Result<Vec<RomDir>> {
     let base = pocket.assets_dir().join(platform);
     let entries = match std::fs::read_dir(&base) {
         Ok(entries) => entries,

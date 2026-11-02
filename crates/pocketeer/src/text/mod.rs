@@ -11,10 +11,9 @@ use std::{collections::BTreeMap, fmt::Write};
 
 use pocketeer_core::{
     card::install::{
-        Action, InstallPlan, UninstallPlan,
+        Action,
         plan::{RemoveReason, SkipReason},
     },
-    catalog::inventory::InventoryStatus,
     library::{
         covers::{CoverStatus, FetchReport},
         import::{ImportAction, ImportSkip},
@@ -37,10 +36,10 @@ pub mod memories;
 pub mod saves;
 
 /// Longest plan listing before "… and N more".
-pub(crate) const MAX_PLAN_LINES: usize = 60;
+const MAX_PLAN_LINES: usize = 60;
 
 /// Writes at most [`MAX_PLAN_LINES`] of `lines`, then "… and N more".
-pub(crate) fn plan_lines(out: &mut String, lines: impl IntoIterator<Item = String>) {
+fn plan_lines(out: &mut String, lines: impl IntoIterator<Item = String>) {
     let mut hidden = 0;
     for (i, line) in lines.into_iter().enumerate() {
         if i < MAX_PLAN_LINES {
@@ -54,7 +53,7 @@ pub(crate) fn plan_lines(out: &mut String, lines: impl IntoIterator<Item = Strin
     }
 }
 
-pub(crate) fn mode_footer(out: &mut String, mode: Mode) {
+fn mode_footer(out: &mut String, mode: Mode) {
     match mode {
         Mode::DryRun => {
             let _ = writeln!(out, "\nDry run: nothing was changed.");
@@ -66,7 +65,7 @@ pub(crate) fn mode_footer(out: &mut String, mode: Mode) {
 /// How every plan report ends: what applying did (`done` writes the ✓/✗
 /// lines), else how to apply it, else `nothing` (the domain's own "nothing to
 /// do" line; empty to say nothing).
-pub(crate) fn staged_footer<R>(
+fn staged_footer<R>(
     out: &mut String,
     mode: Mode,
     result: Option<&R>,
@@ -86,7 +85,7 @@ pub(crate) fn staged_footer<R>(
 }
 
 /// "; skipped: 2 up to date, 1 not in DAT", or nothing.
-pub(crate) fn skipped_summary(skipped: &BTreeMap<&str, usize>) -> String {
+fn skipped_summary(skipped: &BTreeMap<&str, usize>) -> String {
     if skipped.is_empty() {
         return String::new();
     }
@@ -120,22 +119,7 @@ pub fn duration(secs: u64) -> String {
     }
 }
 
-pub(crate) fn inventory_footer(out: &mut String, status: &InventoryStatus) {
-    match (&status.source, &status.error) {
-        (Some(src), _) => {
-            let _ = writeln!(out, "\nInventory: {}", source(src));
-        }
-        (None, Some(err)) => {
-            let _ = writeln!(out, "\nwarning: inventory unavailable: {}", err.message);
-            if let Some(hint) = &err.hint {
-                let _ = writeln!(out, "hint: {hint}");
-            }
-        }
-        (None, None) => {}
-    }
-}
-
-pub(crate) fn source(src: &Source) -> String {
+fn source(src: &Source) -> String {
     match src {
         Source::Network => "fetched just now".into(),
         Source::Cache {
@@ -153,7 +137,7 @@ pub(crate) fn source(src: &Source) -> String {
 }
 
 /// Renders aligned columns. Trailing empty cells don't leave trailing spaces.
-pub(crate) fn table<const N: usize>(out: &mut String, header: [&str; N], rows: &[[String; N]]) {
+fn table<const N: usize>(out: &mut String, header: [&str; N], rows: &[[String; N]]) {
     let mut widths: [usize; N] = header.map(str::len);
     for row in rows {
         for (w, cell) in widths.iter_mut().zip(row) {
@@ -194,64 +178,13 @@ pub fn bytes(n: u64) -> String {
     }
 }
 
-pub(crate) fn file_name(p: &std::path::Path) -> String {
+fn file_name(p: &std::path::Path) -> String {
     p.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
 
-// ---------------------------------------------------------------------------
-// Core installation and removal plans.
-
-pub(crate) fn install_plan(out: &mut String, plan: &InstallPlan, mode: Mode) {
-    let transition = match &plan.installed_version {
-        Some(cur) if !plan.changed => format!("{cur} (already installed)"),
-        Some(cur) => format!("{cur} → {}", plan.version),
-        None => format!("install {}", plan.version),
-    };
-    let _ = writeln!(out, "{}: {transition}", plan.core_id);
-    if !plan.changed {
-        let _ = writeln!(
-            out,
-            "  nothing to do{}",
-            if mode == Mode::Interactive {
-                ""
-            } else {
-                " (use --force to reinstall)"
-            }
-        );
-        return;
-    }
-    let s = &plan.summary;
-    let _ = writeln!(
-        out,
-        "  {} file(s), {} ({} new, {} replaced){}",
-        s.install,
-        bytes(s.bytes),
-        s.install - s.overwrite,
-        s.overwrite,
-        if s.skip > 0 {
-            format!(", {} skipped", s.skip)
-        } else {
-            String::new()
-        }
-    );
-    if !plan.also_installs.is_empty() {
-        let _ = writeln!(out, "  also installs: {}", plan.also_installs.join(", "));
-    }
-    if !plan.replaces.is_empty() {
-        let _ = writeln!(out, "  replaces: {}", plan.replaces.join(", "));
-    }
-    if plan.requires_license {
-        let _ = writeln!(
-            out,
-            "  note: this core needs a license file; see the author's instructions"
-        );
-    }
-    actions(out, &plan.actions);
-}
-
-pub(crate) fn actions(out: &mut String, list: &[Action]) {
+fn actions(out: &mut String, list: &[Action]) {
     plan_lines(
         out,
         list.iter().filter_map(|a| {
@@ -296,29 +229,11 @@ pub(crate) fn actions(out: &mut String, list: &[Action]) {
     }
 }
 
-pub(crate) fn remove_plan(out: &mut String, plan: &UninstallPlan) {
-    let _ = writeln!(
-        out,
-        "{}: remove {}{}",
-        plan.core_id,
-        plan.installed_version,
-        if plan.purge {
-            " (with assets and saves)"
-        } else {
-            ""
-        }
-    );
-    if plan.actions.is_empty() {
-        let _ = writeln!(out, "  nothing to remove");
-    }
-    actions(out, &plan.actions);
-}
-
 // ---------------------------------------------------------------------------
 // Library import plans (library import, device import).
 
 /// One planned import; `None` for skips (summarised separately).
-pub(crate) fn import_action_line(a: &ImportAction) -> Option<String> {
+fn import_action_line(a: &ImportAction) -> Option<String> {
     let ImportAction::Add {
         source,
         rom,
@@ -357,7 +272,7 @@ pub(crate) fn import_action_line(a: &ImportAction) -> Option<String> {
 }
 
 /// Why an import skipped a file, worded the same everywhere.
-pub(crate) fn import_skip_reason(r: &ImportSkip) -> &'static str {
+fn import_skip_reason(r: &ImportSkip) -> &'static str {
     match r {
         ImportSkip::AlreadyInLibrary { .. } => "already in library",
         ImportSkip::NotInDat => "not in DAT",
@@ -368,7 +283,7 @@ pub(crate) fn import_skip_reason(r: &ImportSkip) -> &'static str {
 }
 
 /// Lists the adds of an import plan and tallies its skips.
-pub(crate) fn import_actions<'a>(
+fn import_actions<'a>(
     out: &mut String,
     list: impl Iterator<Item = &'a ImportAction> + Clone,
 ) -> BTreeMap<&'static str, usize> {
@@ -383,7 +298,7 @@ pub(crate) fn import_actions<'a>(
 }
 
 /// Tells the user how to take the standard names an import plan suggests.
-pub(crate) fn suggestion_footer<'a>(
+fn suggestion_footer<'a>(
     out: &mut String,
     mode: Mode,
     actions: impl Iterator<Item = &'a ImportAction>,
@@ -414,7 +329,7 @@ pub(crate) fn suggestion_footer<'a>(
 /// What a cover fetch did this run, as counts with what happened ("3",
 /// "downloaded"); empty when it did nothing. Games already marked missing
 /// are not news.
-pub(crate) fn cover_news(c: &FetchReport) -> Vec<(usize, &'static str)> {
+fn cover_news(c: &FetchReport) -> Vec<(usize, &'static str)> {
     let missing = c
         .items
         .iter()
@@ -431,7 +346,7 @@ pub(crate) fn cover_news(c: &FetchReport) -> Vec<(usize, &'static str)> {
 }
 
 /// How to give a libretro system name for platforms without a mapping.
-pub(crate) fn unmapped_hint(c: &FetchReport, mode: Mode) -> Option<String> {
+fn unmapped_hint(c: &FetchReport, mode: Mode) -> Option<String> {
     (!c.unsupported_platforms.is_empty()).then(|| {
         format!(
             "No libretro mapping for {}; {}.",
@@ -468,7 +383,7 @@ pub fn covers_summary(out: &mut String, covers: Option<&FetchReport>, mode: Mode
 }
 
 /// Lines that say an import's follow-up work (DAT check, covers) had trouble.
-pub(crate) fn warning_lines(out: &mut String, warnings: &[String]) {
+fn warning_lines(out: &mut String, warnings: &[String]) {
     for w in warnings {
         let _ = writeln!(out, "! {w}");
     }
@@ -508,35 +423,7 @@ pub fn docs_text(r: &DocsReport) -> String {
 
 #[cfg(test)]
 mod tests {
-    use pocketeer_core::card::install::{InstallPlan, plan::Summary, zipfile::ZipSource};
-
     use super::*;
-
-    fn unchanged_plan() -> InstallPlan {
-        InstallPlan {
-            core_id: "a.B".into(),
-            version: "1.0".into(),
-            installed_version: Some("1.0".into()),
-            source: ZipSource::Url { url: String::new() },
-            requires_license: false,
-            also_installs: vec![],
-            replaces: vec![],
-            changed: false,
-            summary: Summary::default(),
-            actions: vec![],
-        }
-    }
-
-    #[test]
-    fn interactive_text_names_no_cli_flags() {
-        let plan = unchanged_plan();
-        let mut cli = String::new();
-        install_plan(&mut cli, &plan, Mode::DryRun);
-        assert!(cli.contains("--force"), "{cli}");
-        let tui = crate::text::cores::install_plan_text(&plan);
-        assert!(!tui.contains("--"), "{tui}");
-        assert!(tui.contains("nothing to do"), "{tui}");
-    }
 
     #[test]
     fn plan_lines_truncate_after_the_limit() {

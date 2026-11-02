@@ -255,24 +255,18 @@ pub fn library_rename(r: &RenameReport) -> String {
     if p.new_game_name != p.old_game_name {
         let _ = writeln!(out, "  game   {}  →  {}", p.old_game_name, p.new_game_name);
     }
-    match &p.library_file {
-        Some(f) => {
-            let _ = writeln!(
-                out,
-                "  library  {}  →  {}",
-                f.from.display(),
-                f.to.display()
-            );
-        }
-        None => {
-            let _ = writeln!(out, "  library  (referenced file; index only)");
-        }
-    }
+    let f = &p.library_file;
+    let _ = writeln!(
+        out,
+        "  library  {}  →  {}",
+        f.from.display(),
+        f.to.display()
+    );
     staged_footer(
         &mut out,
         r.mode,
         r.result.as_ref(),
-        p.changes().max(1),
+        p.changes(),
         "",
         |out, res| {
             let _ = writeln!(out, "✓ renamed {} library file(s)", res.library_renamed);
@@ -287,15 +281,10 @@ pub fn library_remove(r: &RemoveReport) -> String {
     for item in &p.items {
         let _ = writeln!(
             out,
-            "  - [{}] {}  {}{}{}",
+            "  - [{}] {}  {}{}",
             item.platform,
             item.name,
             bytes(item.size),
-            if item.file.is_none() {
-                "  (reference; file stays)"
-            } else {
-                ""
-            },
             if item.last_of_game && item.game != item.name {
                 format!("  [game {} goes too]", item.game)
             } else {
@@ -491,13 +480,10 @@ pub fn cover_import(staged: &CoverImportReport) -> String {
 /// A folder import in a few lines, for the TUI's dialog: per platform how
 /// many files are new (and their names), what is already there, and the
 /// files left out because their type isn't known.
-pub fn import_brief(
-    parts: &[(pocketeer_core::library::import::ImportOptions, ImportPlan)],
-    unknown: &[String],
-) -> Vec<String> {
+pub fn import_brief(parts: &[ImportPlan], unknown: &[String]) -> Vec<String> {
     const NAMES: usize = 6;
     let mut lines = Vec::new();
-    for (opts, plan) in parts {
+    for plan in parts {
         let mut new = Vec::new();
         let (mut there, mut other) = (0, 0);
         for a in &plan.actions {
@@ -519,7 +505,7 @@ pub fn import_brief(
         }
         lines.push(format!(
             "{:<8}{}",
-            opts.platform.to_uppercase(),
+            plan.platform.to_uppercase(),
             counts.join(", ")
         ));
         for name in new.iter().take(NAMES) {

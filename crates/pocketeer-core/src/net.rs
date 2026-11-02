@@ -31,7 +31,7 @@ pub struct Http {
     github_token: Option<String>,
 }
 
-pub enum Conditional {
+pub(crate) enum Conditional {
     NotModified,
     Fresh {
         bytes: Vec<u8>,
@@ -74,7 +74,7 @@ impl Http {
     }
 
     /// GET with `If-None-Match`; returns `NotModified` on 304.
-    pub fn get_conditional(&self, url: &str, etag: Option<&str>) -> Result<Conditional> {
+    pub(crate) fn get_conditional(&self, url: &str, etag: Option<&str>) -> Result<Conditional> {
         let mut req = self.request(url);
         if let Some(etag) = etag {
             req = req.header(header::IF_NONE_MATCH, etag);

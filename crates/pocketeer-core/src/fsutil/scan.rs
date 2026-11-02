@@ -154,7 +154,7 @@ pub fn hash_candidate(dir: &Path, c: &Candidate, cache: &mut HashCache) -> Resul
 
 /// Hashes a file or zip entry at an absolute location, through the cache.
 /// Zip entries are stamped with the zip's size and mtime.
-pub fn hash_ref(file: &FileRef, cache: &mut HashCache) -> Result<Hashes> {
+fn hash_ref(file: &FileRef, cache: &mut HashCache) -> Result<Hashes> {
     let full = &file.path;
     match &file.inner {
         None => cache.file(full),

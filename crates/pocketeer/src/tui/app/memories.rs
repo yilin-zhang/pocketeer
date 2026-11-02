@@ -14,7 +14,7 @@ use super::{
     session::Session,
 };
 use crate::{
-    ops::memories::MemoryEntry,
+    ops::memories::{MemoryEntry, Place},
     tui::{
         pending::{Request, SaveGames},
         worker::Job,
@@ -82,9 +82,9 @@ impl Memories {
             .enumerate()
             .filter(|(_, m)| match filter {
                 MemoryFilter::All => true,
-                MemoryFilter::OnCard => m.on_card,
-                MemoryFilter::NotBackedUp => m.on_card && !m.backed_up,
-                MemoryFilter::LibraryOnly => !m.on_card,
+                MemoryFilter::OnCard => m.place.on_card(),
+                MemoryFilter::NotBackedUp => m.place.needs_backup(),
+                MemoryFilter::LibraryOnly => m.place == Place::Library,
             })
             .filter(|(_, m)| {
                 let h = &m.memory.header;
@@ -117,7 +117,7 @@ impl Memories {
         let Some(m) = self.selected(cx.session) else {
             return;
         };
-        if !m.on_card {
+        if !m.place.on_card() {
             cx.session.notice("This Memory is only in the library.");
             return;
         }
@@ -131,7 +131,7 @@ impl Memories {
         let Some(m) = self.selected(cx.session) else {
             return;
         };
-        if !m.in_library {
+        if !m.place.in_library() {
             cx.session
                 .notice("The library has no copy of this Memory; b backs it up.");
             return;
@@ -151,7 +151,7 @@ impl Memories {
             return;
         };
         let rel = m.memory.rel_path.clone();
-        match (m.on_card, m.in_library) {
+        match (m.place.on_card(), m.place.in_library()) {
             (true, true) => cx.dialog.pick(
                 "Throw away which copy of this Memory?",
                 vec![
@@ -204,28 +204,4 @@ pub fn answer(cx: &mut Cx, step: Step, answer: Answer) {
         return;
     };
     trash(cx, rel, i == 0);
-}
-
-/// The library game a Memory was made with: the header names the ROM file
-/// and platform; the library may know the ROM by that name, or the card
-/// copy may carry it.
-pub fn library_game(s: &Session, m: &MemoryEntry) -> Option<String> {
-    let h = &m.memory.header;
-    let platform = h.platform.as_deref()?;
-    s.library()?
-        .games
-        .iter()
-        .find(|g| {
-            g.game.platform.eq_ignore_ascii_case(platform)
-                && (g
-                    .game
-                    .roms
-                    .iter()
-                    .any(|r| r.name.eq_ignore_ascii_case(&h.game))
-                    || g.matches
-                        .iter()
-                        .flat_map(|x| &x.copies)
-                        .any(|c| c.name.eq_ignore_ascii_case(&h.game)))
-        })
-        .map(|g| g.game.name.clone())
 }

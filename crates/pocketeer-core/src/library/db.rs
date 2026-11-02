@@ -76,6 +76,11 @@ UPDATE roms SET dat_status='matched',dat_game_name=(SELECT name FROM games WHERE
         rel_path TEXT PRIMARY KEY,
         game_id  INTEGER REFERENCES games(id) ON DELETE SET NULL
     );",
+    // v10: every ROM is a managed copy, and `dat_status` alone says whether
+    // a DAT vouched for it (v8 carried `verified` over).
+    "ALTER TABLE roms DROP COLUMN verified;
+ALTER TABLE roms DROP COLUMN source_path;
+ALTER TABLE roms DROP COLUMN mode;",
 ];
 
 /// Brings the schema to the current version, one migration per
@@ -161,13 +166,9 @@ pub struct Rom {
     pub size: u64,
     pub crc32: String,
     pub sha1: String,
-    pub verified: bool,
     pub dat: Identification,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rel_path: Option<PathBuf>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_path: Option<PathBuf>,
-    pub mode: ImportMode,
+    /// The managed copy, relative to the library root.
+    pub rel_path: PathBuf,
 }
 
 /// Inserts (or finds) a game and returns its id.
@@ -191,16 +192,15 @@ pub struct NewRom<'a> {
     pub size: u64,
     pub crc32: &'a str,
     pub sha1: &'a str,
+    /// A DAT vouched for the file at import: it starts out matched.
     pub verified: bool,
-    pub rel_path: Option<&'a str>,
-    pub source_path: Option<&'a str>,
-    pub mode: ImportMode,
+    pub rel_path: &'a str,
 }
 
 pub fn insert_rom(conn: &Connection, rom: &NewRom<'_>) -> Result<i64> {
     conn.execute(
-        "INSERT INTO roms (game_id, name, size, crc32, sha1, verified, rel_path, source_path, mode, added_at, dat_status, dat_game_name, dat_rom_name, dat_source)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+        "INSERT INTO roms (game_id, name, size, crc32, sha1, rel_path, added_at, dat_status, dat_game_name, dat_rom_name, dat_source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?7, ?8,
              CASE WHEN ?6 THEN 'matched' ELSE 'unchecked' END,
              CASE WHEN ?6 THEN (SELECT name FROM games WHERE id=?1) END,
              CASE WHEN ?6 THEN ?2 END, CASE WHEN ?6 THEN 'manual' END)",
@@ -212,8 +212,6 @@ pub fn insert_rom(conn: &Connection, rom: &NewRom<'_>) -> Result<i64> {
             rom.sha1,
             rom.verified,
             rom.rel_path,
-            rom.source_path,
-            rom.mode.as_str(),
             fsutil::now_secs()
         ],
     )
@@ -229,7 +227,6 @@ fn rom_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Rom> {
         size: get_u64(r, "size")?,
         crc32: r.get("crc32")?,
         sha1: r.get("sha1")?,
-        verified: r.get("verified")?,
         dat: Identification {
             status: Status::parse(&r.get::<_, String>("dat_status")?)?,
             game_name: r.get("dat_game_name")?,
@@ -239,26 +236,13 @@ fn rom_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Rom> {
             checked_at: r.get("dat_checked_at")?,
             error: r.get("dat_error")?,
         },
-        rel_path: r.get::<_, Option<String>>("rel_path")?.map(PathBuf::from),
-        source_path: r
-            .get::<_, Option<String>>("source_path")?
-            .map(PathBuf::from),
-        mode: {
-            let raw: String = r.get("mode")?;
-            ImportMode::parse(&raw).ok_or_else(|| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    r.as_ref().column_index("mode").unwrap_or(0),
-                    rusqlite::types::Type::Text,
-                    format!("unknown import mode {raw:?}").into(),
-                )
-            })?
-        },
+        rel_path: PathBuf::from(r.get::<_, String>("rel_path")?),
     })
 }
 
-const ROM_COLS: &str = "id, game_id, name, size, crc32, sha1, verified, rel_path, source_path, mode, dat_status, dat_game_name, dat_rom_name, dat_revision, dat_source, dat_checked_at, dat_error";
+const ROM_COLS: &str = "id, game_id, name, size, crc32, sha1, rel_path, dat_status, dat_game_name, dat_rom_name, dat_revision, dat_source, dat_checked_at, dat_error";
 /// [`ROM_COLS`] qualified with the `r` alias used in joins.
-const ROM_COLS_R: &str = "r.id, r.game_id, r.name, r.size, r.crc32, r.sha1, r.verified, r.rel_path, r.source_path, r.mode, r.dat_status, r.dat_game_name, r.dat_rom_name, r.dat_revision, r.dat_source, r.dat_checked_at, r.dat_error";
+const ROM_COLS_R: &str = "r.id, r.game_id, r.name, r.size, r.crc32, r.sha1, r.rel_path, r.dat_status, r.dat_game_name, r.dat_rom_name, r.dat_revision, r.dat_source, r.dat_checked_at, r.dat_error";
 
 /// A ROM on this platform whose `column` (`sha1` or `name`) equals `value`.
 fn find_rom_by(
@@ -390,12 +374,7 @@ pub fn find_roms_by_spec(
     )
 }
 
-pub fn rename_rom(
-    conn: &Connection,
-    rom_id: i64,
-    name: &str,
-    rel_path: Option<&str>,
-) -> Result<()> {
+pub fn rename_rom(conn: &Connection, rom_id: i64, name: &str, rel_path: &str) -> Result<()> {
     conn.execute(
         "UPDATE roms SET name = ?2, rel_path = ?3 WHERE id = ?1",
         params![rom_id, name, rel_path],
@@ -460,7 +439,7 @@ pub fn platform_stats(conn: &Connection) -> Result<Vec<PlatformStats>> {
         "SELECT p.id, p.name,
                 (SELECT COUNT(*) FROM games g WHERE g.platform = p.id),
                 (SELECT COUNT(*) FROM roms r JOIN games g ON g.id = r.game_id WHERE g.platform = p.id),
-                (SELECT COUNT(*) FROM roms r JOIN games g ON g.id = r.game_id WHERE g.platform = p.id AND r.verified = 1),
+                (SELECT COUNT(*) FROM roms r JOIN games g ON g.id = r.game_id WHERE g.platform = p.id AND r.dat_status = 'matched'),
                 (SELECT COALESCE(SUM(r.size), 0) FROM roms r JOIN games g ON g.id = r.game_id WHERE g.platform = p.id)
          FROM platforms p ORDER BY p.id",
         [],
@@ -538,40 +517,6 @@ const MIGRATION_RENAMES: &str = "
 ";
 
 // ---------------------------------------------------------------------------
-// Import mode
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ImportMode {
-    /// Copy the file into `roms/<platform>/`.
-    Copy,
-    /// Index the file where it is; nothing is copied.
-    Reference,
-    /// Hard-link into the library (falls back to copy across volumes).
-    Link,
-}
-
-impl ImportMode {
-    /// The string stored in the `roms.mode` column (same as the serde form).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ImportMode::Copy => "copy",
-            ImportMode::Reference => "reference",
-            ImportMode::Link => "link",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<ImportMode> {
-        match s {
-            "copy" => Some(ImportMode::Copy),
-            "reference" => Some(ImportMode::Reference),
-            "link" => Some(ImportMode::Link),
-            _ => None,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Identification (DAT results per ROM)
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -635,9 +580,8 @@ pub fn save_identification(conn: &Connection, rom: &Rom, state: &Identification)
     let changed = conn
         .execute(
             "UPDATE roms SET dat_status = ?2, dat_game_name = ?3, dat_rom_name = ?4,
-                 dat_revision = ?5, dat_source = ?6, dat_checked_at = ?7, dat_error = ?8,
-                 verified = ?9
-             WHERE id = ?1 AND sha1 = ?10 AND size = ?11",
+                 dat_revision = ?5, dat_source = ?6, dat_checked_at = ?7, dat_error = ?8
+             WHERE id = ?1 AND sha1 = ?9 AND size = ?10",
             params![
                 rom.id,
                 state.status.as_str(),
@@ -647,7 +591,6 @@ pub fn save_identification(conn: &Connection, rom: &Rom, state: &Identification)
                 state.source,
                 state.checked_at,
                 state.error,
-                state.status == Status::Matched,
                 rom.sha1,
                 rom.size as i64,
             ],
@@ -1018,7 +961,7 @@ mod tests {
     /// appending one means adding its checksum to the list.
     #[test]
     fn released_migrations_are_frozen() {
-        const PINNED: [u32; 9] = [
+        const PINNED: [u32; 10] = [
             0xb785_fcea,
             0x7e87_79a0,
             0x5aef_96de,
@@ -1028,6 +971,7 @@ mod tests {
             0x0d89_5ce4,
             0xf329_8add,
             0xd144_9ef5,
+            0x6b50_7141,
         ];
         let actual: Vec<u32> = MIGRATIONS
             .iter()
@@ -1072,9 +1016,7 @@ mod tests {
                 crc32: "0d4a1185",
                 sha1: "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed",
                 verified: true,
-                rel_path: Some("roms/gba/Hello (USA).gba"),
-                source_path: None,
-                mode: ImportMode::Copy,
+                rel_path: "roms/gba/Hello (USA).gba",
             },
         )
         .unwrap();
@@ -1096,7 +1038,7 @@ mod tests {
 
         let games = list_games(&c, None, None).unwrap();
         assert_eq!(games.len(), 1);
-        assert!(games[0].roms[0].verified);
+        assert_eq!(games[0].roms[0].dat.status, Status::Matched);
         assert_eq!(list_games(&c, Some("gb"), None).unwrap().len(), 0);
         assert_eq!(list_games(&c, None, Some("hello")).unwrap().len(), 1);
         assert_eq!(

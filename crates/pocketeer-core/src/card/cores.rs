@@ -111,7 +111,7 @@ pub fn list_installed(pocket: &Pocket) -> Result<CoreList> {
 }
 
 /// Reads `<core folder>/core.json`, distinguishing "missing" from "invalid".
-pub fn read_core_json(core_dir: &std::path::Path) -> Result<CoreJson> {
+fn read_core_json(core_dir: &std::path::Path) -> Result<CoreJson> {
     let core_json = core_dir.join("core.json");
     if !core_json.exists() {
         return Err(Error::CoreJsonMissing {

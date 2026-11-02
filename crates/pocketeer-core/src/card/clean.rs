@@ -14,7 +14,7 @@ use crate::{
 
 /// Volume-level folders macOS creates on every card. Harmless to delete
 /// (macOS recreates them), but only removed on request.
-pub const SYSTEM_DIRS: [&str; 4] = [
+const SYSTEM_DIRS: [&str; 4] = [
     ".Spotlight-V100",
     ".fseventsd",
     ".Trashes",

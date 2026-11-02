@@ -285,13 +285,13 @@ fn cleanup_staging(staging: &Path) {
 // here after an operation finishes: the library is the backup, the card is
 // just a card.
 
-pub fn staging_root(pocket: &Pocket) -> PathBuf {
+fn staging_root(pocket: &Pocket) -> PathBuf {
     pocket.pocketeer_dir().join("staging")
 }
 
 /// Where files displaced by one operation wait until it succeeds (then the
 /// folder is deleted) or fails (then they are moved back).
-pub fn new_undo_dir(pocket: &Pocket, label: &str) -> PathBuf {
+fn new_undo_dir(pocket: &Pocket, label: &str) -> PathBuf {
     staging_root(pocket).join(format!(
         "{}-{}-{}-undo",
         fsutil::timestamp(),
@@ -301,7 +301,7 @@ pub fn new_undo_dir(pocket: &Pocket, label: &str) -> PathBuf {
 }
 
 /// A new, unique staging directory path for an operation (not yet created).
-pub fn new_staging_dir(pocket: &Pocket, label: &str) -> PathBuf {
+fn new_staging_dir(pocket: &Pocket, label: &str) -> PathBuf {
     staging_root(pocket).join(format!(
         "{}-{}-{}",
         fsutil::timestamp(),

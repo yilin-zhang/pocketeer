@@ -17,7 +17,8 @@
 - One shape for all plans: `data.mode` is `dry_run` or `applied`; the plan's own
   fields follow; `data.result` appears only after an apply and holds what was done (counts
   plus a `failed` list where items can fail one by one). Batches (`cores install|update|remove`)
-  carry `outcomes[]`, each with `plan?`, `result?`, `error?`.
+  carry `items[]`, each with `target` (what was named) and `state`: `unplanned` (with
+  `error`), `planned` (`plan`), `applied` (`plan`, `result`) or `failed` (`plan`, `error`).
 - `removed` counts files or ROMs taken off the card or out of the library; `deleted` counts
   files explicitly deleted. Names asked for that don't exist
   are listed under `not_found` and count as failures (`SOME_FAILED`).

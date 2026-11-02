@@ -20,15 +20,14 @@ pub struct RenamePlan {
     pub old_game_name: String,
     /// Follows the file name when the game has one ROM; multi-ROM games keep theirs.
     pub new_game_name: String,
-    /// Managed file move, relative to the library root (`None` for references).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub library_file: Option<FileRename>,
+    /// The file move, relative to the library root.
+    pub library_file: FileRename,
 }
 
 impl Plan for RenamePlan {
-    /// File moves plus the index update.
+    /// The file move plus the index update.
     fn changes(&self) -> usize {
-        1 + self.library_file.is_some() as usize
+        2
     }
 }
 
@@ -72,19 +71,14 @@ pub fn plan(
         return Err(taken("another game"));
     }
 
-    let library_file = match &rom.rel_path {
-        Some(rel) => {
-            let to = Library::rom_rel_path(&game.platform, &new_name);
-            if lib.root().join(&to).exists() {
-                return Err(taken("a file in the library"));
-            }
-            Some(FileRename {
-                from: rel.clone(),
-                to,
-                kind: RenameKind::Rom,
-            })
-        }
-        None => None,
+    let to = Library::rom_rel_path(&game.platform, &new_name);
+    if lib.root().join(&to).exists() {
+        return Err(taken("a file in the library"));
+    }
+    let library_file = FileRename {
+        from: rom.rel_path.clone(),
+        to,
+        kind: RenameKind::Rom,
     };
     Ok(RenamePlan {
         rom_id: rom.id,
@@ -121,14 +115,14 @@ pub fn apply(lib: &mut Library, plan: &RenamePlan) -> Result<RenameResult> {
             what: format!("ROM {}", plan.old_name),
         });
     }
-    let moves: Vec<_> = plan.library_file.iter().cloned().collect();
+    let moves = [plan.library_file.clone()];
     let renamed = apply_renames(&root, &moves)?;
     let updated = (|| -> Result<()> {
         db::rename_rom(
             &tx,
             plan.rom_id,
             &plan.new_name,
-            plan.library_file.as_ref().and_then(|f| f.to.to_str()),
+            &plan.library_file.to.to_string_lossy(),
         )?;
         if plan.new_game_name != plan.old_game_name {
             db::rename_game(&tx, plan.game_id, &plan.new_game_name)?;
@@ -177,7 +171,7 @@ pub fn standardize_plan(
             } else {
                 // Once a DAT has been consulted, do not guess a different
                 // version from a similar filename.
-                if rom.dat.status != super::identify::Status::Unchecked || rom.verified {
+                if rom.dat.status != super::identify::Status::Unchecked {
                     continue;
                 }
                 let list = lists

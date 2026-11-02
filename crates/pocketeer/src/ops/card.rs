@@ -13,8 +13,8 @@ use pocketeer_core::{
         roms::{CardRom, Index},
     },
     catalog::inventory::{Inventory, Platforms},
-    fsutil::names::RenameKind,
     library::{covers::FetchReport, import::ImportOptions},
+    names::RenameKind,
     net::{Policy, Source},
     plan::Event,
     transfer::{
@@ -28,7 +28,7 @@ use serde::Serialize;
 use super::{
     Mode, Staged, apply_actions,
     context::Context,
-    library::{metadata_after_import, suggest_standard_names},
+    library::{ImportSettings, metadata_after_import, suggest_standard_names},
     load_dat, stage, stage_if, verdict,
 };
 use crate::output::Outcome;
@@ -208,30 +208,13 @@ pub fn apply_rename(
 // Importing card ROMs into the library.
 
 /// What `card import` was asked to do.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ImportRequest {
     /// Only this platform.
     pub platform: Option<String>,
     /// Card-relative ROM paths; empty means every unmatched file.
     pub paths: Vec<PathBuf>,
-    pub dat: Option<PathBuf>,
-    pub dat_only: bool,
-    pub standard_names: bool,
-    /// Fetch covers for the new games afterwards (when online).
-    pub covers: bool,
-}
-
-impl Default for ImportRequest {
-    fn default() -> Self {
-        ImportRequest {
-            platform: None,
-            paths: Vec::new(),
-            dat: None,
-            dat_only: false,
-            standard_names: false,
-            covers: true,
-        }
-    }
+    pub settings: ImportSettings,
 }
 
 #[derive(Debug, Serialize)]
@@ -265,7 +248,7 @@ pub fn plan_import(
 ) -> Result<(CardImportPlan, Vec<PathBuf>)> {
     let lib = ctx.library()?;
     let pocket = ctx.pocket()?;
-    let dat = load_dat(req.dat.as_deref())?;
+    let dat = load_dat(req.settings.dat.as_deref())?;
     let all = from_card::list(&lib, &pocket, req.platform.as_deref())?;
     let (roms, not_found) = if req.paths.is_empty() {
         (all, Vec::new())
@@ -291,19 +274,13 @@ pub fn plan_import(
         &|id| ImportOptions {
             platform: id.into(),
             platform_name: ctx.platform_name(id),
-            dat_only: req.dat_only,
+            dat_only: req.settings.dat_only,
         },
         &mut ctx.hash_cache(),
         progress,
     )?;
     for part in &mut plan.parts {
-        suggest_standard_names(
-            ctx,
-            &lib,
-            &part.platform,
-            &mut part.plan,
-            req.standard_names,
-        )?;
+        suggest_standard_names(ctx, &lib, part, req.settings.standard_names)?;
     }
     Ok((plan, not_found))
 }
@@ -331,8 +308,8 @@ pub fn import(
         .result
         .as_ref()
         .map_or(0, |r| r.iter().map(|p| p.result.added).sum());
-    let metadata =
-        metadata_after_import(ctx, None, (added, req.covers), progress).unwrap_or_default();
+    let metadata = metadata_after_import(ctx, None, (added, req.settings.covers), progress)
+        .unwrap_or_default();
     Ok(ImportReport {
         staged,
         not_found,

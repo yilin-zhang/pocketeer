@@ -138,6 +138,12 @@ pub struct Inventory {
 }
 
 impl Inventory {
+    pub fn status(&self) -> InventoryStatus {
+        InventoryStatus::Loaded {
+            source: self.source.clone(),
+        }
+    }
+
     pub fn load(http: &Http, cache: &Cache, policy: Policy) -> Result<Self> {
         let fetched = cache.fetch(http, "cores.json", CORES_URL, "core inventory", policy)?;
         let parsed: CoresJson =
@@ -188,28 +194,29 @@ impl InventoryLoad {
 
     pub fn status(&self) -> InventoryStatus {
         match self {
-            InventoryLoad::Loaded(inv) => InventoryStatus {
-                available: true,
-                source: Some(inv.source.clone()),
-                error: None,
-            },
-            InventoryLoad::Unavailable(err) => InventoryStatus {
-                available: false,
-                source: None,
-                error: Some(err.clone()),
+            InventoryLoad::Loaded(inv) => inv.status(),
+            InventoryLoad::Unavailable(error) => InventoryStatus::Unavailable {
+                error: error.clone(),
             },
         }
     }
 }
 
-/// Serializable summary of where inventory data came from, for reports.
+/// Whether a report had the inventory, and where it came from.
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct InventoryStatus {
-    pub available: bool,
-    #[serde(flatten, skip_serializing_if = "Option::is_none")]
-    pub source: Option<Source>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<ErrorInfo>,
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum InventoryStatus {
+    Loaded {
+        #[serde(flatten)]
+        source: Source,
+    },
+    Unavailable { error: ErrorInfo },
+}
+
+impl InventoryStatus {
+    pub fn is_loaded(&self) -> bool {
+        matches!(self, InventoryStatus::Loaded { .. })
+    }
 }
 
 #[derive(Debug, Clone)]

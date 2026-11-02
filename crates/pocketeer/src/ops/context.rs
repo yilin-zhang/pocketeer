@@ -10,11 +10,10 @@ use std::{
 use serde::Serialize;
 
 use pocketeer_core::{
-    Error, Pocket, Result,
+    Error, HashCache, Pocket, Result,
     card::install::Installer,
     catalog::inventory::{Inventory, InventoryLoad, Platforms},
     config::Config,
-    fsutil::hash::HashCache,
     library::{self, Library},
     net::{Cache, Http, Policy},
 };

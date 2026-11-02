@@ -1,6 +1,5 @@
 mod common;
-use common::Harness;
-use pocketeer_core::fsutil::set_mtime;
+use common::{Harness, set_mtime};
 use std::fs;
 
 #[test]
@@ -9,16 +8,16 @@ fn backup_conflict_choice_and_explicit_history_restore() {
     assert_eq!(env.json(&["library", "init"]).1, 0);
     let rel = "Saves/gba/common/game.sav";
     env.write(rel, "AP first");
-    set_mtime(&env.sd.join(rel), 100).unwrap();
+    set_mtime(&env.sd.join(rel), 100);
     let (result, code) = env.json(&["saves", "backup"]);
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["data"]["result"]["pulled"], 1);
     env.write(rel, "AP second");
-    set_mtime(&env.sd.join(rel), 200).unwrap();
+    set_mtime(&env.sd.join(rel), 200);
     assert_eq!(env.json(&["saves", "backup"]).1, 0);
     let backup = env.lib.join("saves").join(rel);
     fs::write(&backup, "PC version").unwrap();
-    set_mtime(&backup, 300).unwrap();
+    set_mtime(&backup, 300);
     let (conflict, code) = env.json(&["saves", "backup"]);
     assert_eq!(code, 1, "{conflict}");
     assert_eq!(conflict["data"]["summary"]["conflicts"], 1);
@@ -104,7 +103,7 @@ fn memories_list_back_up_and_trash_with_the_files_beside_them() {
     assert_eq!(found.as_array().unwrap().len(), 1);
     assert_eq!(found[0]["game"], "KIRB");
     assert_eq!(found[0]["cartridge"], true);
-    assert_eq!(found[0]["backed_up"], false);
+    assert_eq!(found[0]["place"], "card");
 
     // Only Memories: the cartridge save stays out of it.
     let (backup, code) = env.json(&["memories", "backup"]);
@@ -112,8 +111,8 @@ fn memories_list_back_up_and_trash_with_the_files_beside_them() {
     assert_eq!(backup["data"]["result"]["pulled"], 2);
     assert!(!env.lib.join("saves/Saves/gba/common/game.sav").exists());
     assert_eq!(
-        env.json(&["memories", "list"]).0["data"]["memories"][0]["backed_up"],
-        true
+        env.json(&["memories", "list"]).0["data"]["memories"][0]["place"],
+        "backed_up"
     );
 
     let (trash, code) = env.json(&["memories", "trash", sta, "--card"]);

@@ -29,6 +29,13 @@ pub fn dat() -> String {
     fixture("roms/test.dat")
 }
 
+/// Sets a file's modification time to `secs` after the epoch.
+pub fn set_mtime(path: &Path, secs: u64) {
+    let f = fs::File::options().write(true).open(path).unwrap();
+    f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+        .unwrap();
+}
+
 pub fn copy_dir(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap();
     for entry in fs::read_dir(from).unwrap() {

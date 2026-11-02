@@ -5,9 +5,8 @@ use super::*;
 use pocketeer_core::transfer::saves::SaveAction;
 
 use crate::{
-    ops::memories::MemoryEntry,
-    text::memories::{memory_game, memory_where},
-    tui::app::{GameRef, SaveLine, SaveMark, memory_game as library_game, save_status},
+    ops::memories::{MemoryEntry, Place},
+    tui::app::{GameRef, SaveLine, SaveMark, save_status},
 };
 
 /// The SAVE column of a Games row.
@@ -180,19 +179,18 @@ pub(super) fn draw_memories(frame: &mut Frame, app: &mut App, area: Rect) {
         .filter_map(|i| app.session().saves().memories.get(*i))
         .map(|m| {
             let h = &m.memory.header;
-            let where_ = memory_where(m);
-            let color = match (m.on_card, m.backed_up) {
-                (true, false) => Palette::Warn,
-                (true, true) => Palette::Good,
-                _ => Palette::Muted,
+            let color = match m.place {
+                Place::Card | Place::Changed => Palette::Warn,
+                Place::BackedUp => Palette::Good,
+                Place::Library => Palette::Muted,
             };
             let mut cells = vec![
                 match &h.platform {
                     Some(p) => platform_cell(p),
                     None => Cell::from("CART").style(Palette::Muted.style()),
                 },
-                Cell::from(memory_game(m)),
-                Cell::from(where_).style(color.style()),
+                Cell::from(m.game()),
+                Cell::from(m.place.label()).style(color.style()),
                 Cell::from(h.core.clone().unwrap_or_default()).style(Style::new().dim()),
                 Cell::from(text::time_ago(m.memory.mtime)).style(Style::new().dim()),
                 Cell::from(text::bytes(m.memory.size)).style(Style::new().dim()),
@@ -208,7 +206,7 @@ pub(super) fn draw_memories(frame: &mut Frame, app: &mut App, area: Rect) {
         .saves()
         .memories
         .iter()
-        .filter(|m| m.on_card && !m.backed_up)
+        .filter(|m| m.place.needs_backup())
         .count();
     let title = if new > 0 {
         format!("MEMORIES  ·  {new} not backed up")
@@ -266,10 +264,15 @@ pub(super) fn draw_memories(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn memory_details(app: &App, m: &MemoryEntry) -> Vec<Line<'static>> {
     let h = &m.memory.header;
-    let game = memory_game(m);
+    let game = m.game();
     let mut lines = vec![kv_text("Game", game.clone())];
-    if let Some(name) = library_game(app.session(), m).filter(|n| *n != game) {
-        lines.push(kv_text("Library", name));
+    if let Some(found) = app
+        .session()
+        .library()
+        .and_then(|l| l.game_of(h))
+        .filter(|g| g.name != game)
+    {
+        lines.push(kv_text("Library", found.name.clone()));
     }
     if h.cartridge {
         lines.push(kv_text("Made with", "a cartridge"));

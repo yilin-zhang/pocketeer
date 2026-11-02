@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use pocketeer_core::{fsutil::names, library::rename::RenamePlan};
+use pocketeer_core::{library::rename::RenamePlan, names};
 
 use super::{
     Cx,

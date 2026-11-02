@@ -12,7 +12,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 /// Folders that hold Memories, relative to the card root.
-pub const ROOTS: [&str; 2] = ["Memories/Save States", "Memories/Beta"];
+const ROOTS: [&str; 2] = ["Memories/Save States", "Memories/Beta"];
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Memory {
@@ -50,7 +50,7 @@ const HEADER_BYTES: usize = CORE_HEADER + CORE_HEADER_LEN;
 
 /// Reads the header of a state. `cartridge` says which layout to expect:
 /// the Pocket keeps cartridge states at the top of the folder.
-pub fn read_header(bytes: &[u8], cartridge: bool) -> Header {
+fn read_header(bytes: &[u8], cartridge: bool) -> Header {
     let field =
         |range: std::ops::Range<usize>| bytes.get(range).map(decode_text).filter(|s| !s.is_empty());
     if cartridge {

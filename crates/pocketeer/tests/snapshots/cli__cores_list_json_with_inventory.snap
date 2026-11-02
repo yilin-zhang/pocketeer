@@ -70,8 +70,8 @@ expression: json_of(&out)
     ],
     "inventory": {
       "age_secs": "[age]",
-      "available": true,
-      "source": "cache"
+      "source": "cache",
+      "status": "loaded"
     }
   },
   "ok": true,

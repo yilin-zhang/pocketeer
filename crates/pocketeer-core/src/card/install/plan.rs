@@ -153,7 +153,7 @@ pub fn plan_install(
     let ids = zip.core_ids();
     if ids.is_empty() {
         return Err(Error::NotACoreZip {
-            origin: zip.describe(),
+            origin: zip.source.to_string(),
         });
     }
     let core_id = match &opts.requested_id {

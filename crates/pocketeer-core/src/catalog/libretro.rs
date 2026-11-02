@@ -133,7 +133,7 @@ struct Entry {
 }
 
 /// GitHub API URL of a system's thumbnail repository tree.
-pub fn names_tree_url(system: &str) -> String {
+fn names_tree_url(system: &str) -> String {
     format!(
         "https://api.github.com/repos/libretro-thumbnails/{}/git/trees/master?recursive=1",
         system.replace(' ', "_")

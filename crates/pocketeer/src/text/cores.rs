@@ -4,12 +4,13 @@ use std::fmt::Write;
 
 use pocketeer_core::card::{
     cores::{CoreInfo, CoreListReport},
-    install::{InstallPlan, UninstallPlan},
+    install::{Changes, InstallPlan, UninstallPlan},
 };
+use pocketeer_core::catalog::inventory::InventoryStatus;
 
-use super::{install_plan, inventory_footer, mode_footer, remove_plan, table};
+use super::{actions, bytes, mode_footer, source, table};
 use crate::ops::{
-    Mode,
+    Batch, BatchState, Mode,
     cores::{InstallReport, RemoveReport, SearchReport},
 };
 
@@ -28,7 +29,7 @@ pub fn core_list(report: &CoreListReport) -> String {
                     (Some(l), _) if c.update_available => (l.version.clone(), "update available"),
                     (Some(l), _) => (l.version.clone(), "up to date"),
                     (None, true) => ("-".into(), "no release in inventory"),
-                    (None, false) if report.inventory.available => ("-".into(), "not in inventory"),
+                    (None, false) if report.inventory.is_loaded() => ("-".into(), "not in inventory"),
                     (None, false) => ("?".into(), ""),
                 };
                 [
@@ -152,7 +153,7 @@ pub fn core_info(info: &CoreInfo) -> String {
                 let _ = writeln!(out, "  Releases    {}", versions.join(", "));
             }
         }
-        None if info.inventory_status.available => {
+        None if info.inventory_status.is_loaded() => {
             let _ = writeln!(out, "  Inventory   not listed");
         }
         None => {}
@@ -162,61 +163,58 @@ pub fn core_info(info: &CoreInfo) -> String {
 }
 
 pub fn install_report(r: &InstallReport) -> String {
-    let mut out = String::new();
-    for (i, o) in r.outcomes.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
+    batch_report(r, install_plan, |a| {
+        let mut parts = vec![format!("{} file(s) written", a.installed)];
+        if a.removed > 0 {
+            parts.push(format!("{} removed", a.removed));
         }
-        match (&o.plan, &o.error) {
-            (None, Some(err)) => {
-                let _ = writeln!(out, "{}: error [{}] {}", o.spec, err.code, err.message);
-                if let Some(hint) = &err.hint {
-                    let _ = writeln!(out, "  hint: {hint}");
-                }
-            }
-            (Some(plan), err) => {
-                install_plan(&mut out, plan, r.mode);
-                if let Some(a) = &o.result {
-                    let mut parts = vec![format!("{} file(s) written", a.installed)];
-                    if a.removed > 0 {
-                        parts.push(format!("{} removed", a.removed));
-                    }
-                    if a.moved_files > 0 {
-                        parts.push(format!("{} moved", a.moved_files));
-                    }
-                    let _ = writeln!(out, "  ✓ done: {}", parts.join(", "));
-                }
-                if let Some(err) = err {
-                    let _ = writeln!(out, "  ✗ failed [{}] {}", err.code, err.message);
-                }
-            }
-            (None, None) => {}
+        if a.moved_files > 0 {
+            parts.push(format!("{} moved", a.moved_files));
         }
-    }
-    mode_footer(&mut out, r.mode);
-    out
+        parts.join(", ")
+    })
 }
 
 pub fn remove_report(r: &RemoveReport) -> String {
+    batch_report(
+        r,
+        |out, plan, _| remove_plan(out, plan),
+        |a| format!("{} item(s) removed", a.removed),
+    )
+}
+
+/// Each item's plan (`plan`), then how applying it went (`done` sums up
+/// the changes).
+fn batch_report<P>(
+    r: &Batch<P>,
+    plan: impl Fn(&mut String, &P, Mode),
+    done: impl Fn(&Changes) -> String,
+) -> String {
     let mut out = String::new();
-    for (i, o) in r.outcomes.iter().enumerate() {
+    for (i, item) in r.items.iter().enumerate() {
         if i > 0 {
             out.push('\n');
         }
-        match (&o.plan, &o.error) {
-            (None, Some(err)) => {
-                let _ = writeln!(out, "{}: error [{}] {}", o.id, err.code, err.message);
-            }
-            (Some(plan), err) => {
-                remove_plan(&mut out, plan);
-                if let Some(a) = &o.result {
-                    let _ = writeln!(out, "  ✓ done: {} item(s) removed", a.removed);
-                }
-                if let Some(err) = err {
-                    let _ = writeln!(out, "  ✗ failed [{}] {}", err.code, err.message);
+        match &item.state {
+            BatchState::Unplanned { error } => {
+                let _ = writeln!(
+                    out,
+                    "{}: error [{}] {}",
+                    item.target, error.code, error.message
+                );
+                if let Some(hint) = &error.hint {
+                    let _ = writeln!(out, "  hint: {hint}");
                 }
             }
-            (None, None) => {}
+            BatchState::Planned { plan: p } => plan(&mut out, p, r.mode),
+            BatchState::Applied { plan: p, result } => {
+                plan(&mut out, p, r.mode);
+                let _ = writeln!(out, "  ✓ done: {}", done(result));
+            }
+            BatchState::Failed { plan: p, error } => {
+                plan(&mut out, p, r.mode);
+                let _ = writeln!(out, "  ✗ failed [{}] {}", error.code, error.message);
+            }
         }
     }
     mode_footer(&mut out, r.mode);
@@ -235,4 +233,117 @@ pub fn remove_plan_text(plan: &UninstallPlan) -> String {
     let mut s = String::new();
     remove_plan(&mut s, plan);
     s
+}
+
+fn inventory_footer(out: &mut String, status: &InventoryStatus) {
+    match status {
+        InventoryStatus::Loaded { source: src } => {
+            let _ = writeln!(out, "\nInventory: {}", source(src));
+        }
+        InventoryStatus::Unavailable { error } => {
+            let _ = writeln!(out, "\nwarning: inventory unavailable: {}", error.message);
+            if let Some(hint) = &error.hint {
+                let _ = writeln!(out, "hint: {hint}");
+            }
+        }
+    }
+}
+
+fn install_plan(out: &mut String, plan: &InstallPlan, mode: Mode) {
+    let transition = match &plan.installed_version {
+        Some(cur) if !plan.changed => format!("{cur} (already installed)"),
+        Some(cur) => format!("{cur} → {}", plan.version),
+        None => format!("install {}", plan.version),
+    };
+    let _ = writeln!(out, "{}: {transition}", plan.core_id);
+    if !plan.changed {
+        let _ = writeln!(
+            out,
+            "  nothing to do{}",
+            if mode == Mode::Interactive {
+                ""
+            } else {
+                " (use --force to reinstall)"
+            }
+        );
+        return;
+    }
+    let s = &plan.summary;
+    let _ = writeln!(
+        out,
+        "  {} file(s), {} ({} new, {} replaced){}",
+        s.install,
+        bytes(s.bytes),
+        s.install - s.overwrite,
+        s.overwrite,
+        if s.skip > 0 {
+            format!(", {} skipped", s.skip)
+        } else {
+            String::new()
+        }
+    );
+    if !plan.also_installs.is_empty() {
+        let _ = writeln!(out, "  also installs: {}", plan.also_installs.join(", "));
+    }
+    if !plan.replaces.is_empty() {
+        let _ = writeln!(out, "  replaces: {}", plan.replaces.join(", "));
+    }
+    if plan.requires_license {
+        let _ = writeln!(
+            out,
+            "  note: this core needs a license file; see the author's instructions"
+        );
+    }
+    actions(out, &plan.actions);
+}
+
+fn remove_plan(out: &mut String, plan: &UninstallPlan) {
+    let _ = writeln!(
+        out,
+        "{}: remove {}{}",
+        plan.core_id,
+        plan.installed_version,
+        if plan.purge {
+            " (with assets and saves)"
+        } else {
+            ""
+        }
+    );
+    if plan.actions.is_empty() {
+        let _ = writeln!(out, "  nothing to remove");
+    }
+    actions(out, &plan.actions);
+}
+
+#[cfg(test)]
+mod tests {
+    use pocketeer_core::card::install::{InstallPlan, plan::Summary, zipfile::ZipSource};
+
+    use super::*;
+
+    fn unchanged_plan() -> InstallPlan {
+        InstallPlan {
+            core_id: "a.B".into(),
+            version: "1.0".into(),
+            installed_version: Some("1.0".into()),
+            source: ZipSource::Url { url: String::new() },
+            requires_license: false,
+            also_installs: vec![],
+            replaces: vec![],
+            changed: false,
+            summary: Summary::default(),
+            actions: vec![],
+        }
+    }
+
+    #[test]
+    fn interactive_text_names_no_cli_flags() {
+        let plan = unchanged_plan();
+        let mut cli = String::new();
+        install_plan(&mut cli, &plan, Mode::DryRun);
+        assert!(cli.contains("--force"), "{cli}");
+        let tui = install_plan_text(&plan);
+        assert!(!tui.contains("--"), "{tui}");
+        assert!(tui.contains("nothing to do"), "{tui}");
+    }
 }

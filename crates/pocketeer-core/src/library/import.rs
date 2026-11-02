@@ -18,7 +18,7 @@ use crate::{
     fsutil,
     fsutil::{
         hash::{HashCache, Hashes, copy_and_hash},
-        scan::{Candidate, hash_candidate, scan_source},
+        scan::{Candidate, hash_candidate},
     },
     plan::{Applied, Event, Plan, Progress},
 };
@@ -28,7 +28,7 @@ use super::{
     db::{self, NewRom},
 };
 
-pub use super::db::ImportMode;
+pub use crate::fsutil::scan::scan_source;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportOptions {
@@ -104,6 +104,9 @@ pub struct ImportSummary {
 pub struct ImportPlan {
     pub dir: PathBuf,
     pub platform: String,
+    /// Display name for the platform, if known (from the inventory).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform_name: Option<String>,
     pub actions: Vec<ImportAction>,
     pub summary: ImportSummary,
 }
@@ -111,6 +114,20 @@ pub struct ImportPlan {
 impl Plan for ImportPlan {
     fn changes(&self) -> usize {
         self.summary.add
+    }
+}
+
+impl ImportPlan {
+    /// Every (current name, suggested standard name) among the planned adds.
+    pub fn suggestions(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.actions.iter().filter_map(|a| match a {
+            ImportAction::Add {
+                rom,
+                suggested: Some(s),
+                ..
+            } => Some((rom.as_str(), s.as_str())),
+            _ => None,
+        })
     }
 }
 
@@ -134,7 +151,8 @@ pub fn plan_import(
 }
 
 /// Plans importing specific files, given relative to `dir` (the card's root
-/// when importing from a device).
+/// when importing from a device). `opts` only shapes the plan: applying it
+/// needs nothing else.
 pub fn plan_import_candidates(
     lib: &Library,
     dir: &Path,
@@ -153,6 +171,7 @@ pub fn plan_import_candidates(
     let mut plan = ImportPlan {
         dir: dir.to_path_buf(),
         platform: opts.platform.clone(),
+        platform_name: opts.platform_name.clone(),
         actions: Vec::new(),
         summary: ImportSummary::default(),
     };
@@ -365,7 +384,6 @@ pub struct ImportFailure {
 
 pub fn apply_import(
     lib: &mut Library,
-    opts: &ImportOptions,
     plan: &ImportPlan,
     progress: Progress<'_>,
 ) -> Result<ImportResult> {
@@ -374,7 +392,7 @@ pub fn apply_import(
     progress(Event::Status(format!("Importing {total} file(s)")));
     let mut result = ImportResult::default();
 
-    db::ensure_platform(lib.conn(), &opts.platform, opts.platform_name.as_deref())?;
+    db::ensure_platform(lib.conn(), &plan.platform, plan.platform_name.as_deref())?;
     let mut done = 0;
     for action in &plan.actions {
         let ImportAction::Add {
@@ -415,10 +433,10 @@ pub fn apply_import(
                 .conn_mut()
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(|e| Error::db(e, "begin import"))?;
-            if let Some(existing) = db::find_rom_by_sha1(&tx, &opts.platform, &hashes.sha1)? {
+            if let Some(existing) = db::find_rom_by_sha1(&tx, &plan.platform, &hashes.sha1)? {
                 return Ok(Indexed::Duplicate(existing.name));
             }
-            let game_id = db::upsert_game(&tx, &opts.platform, game)?;
+            let game_id = db::upsert_game(&tx, &plan.platform, game)?;
             db::insert_rom(
                 &tx,
                 &NewRom {
@@ -428,9 +446,8 @@ pub fn apply_import(
                     crc32: &hashes.crc32_hex(),
                     sha1: &hashes.sha1,
                     verified: *verified,
-                    rel_path: dest.to_str(),
-                    source_path: None,
-                    mode: ImportMode::Copy,
+                    // Built from the platform id and the ROM name: UTF-8.
+                    rel_path: &dest.to_string_lossy(),
                 },
             )?;
             tx.commit().map_err(|e| Error::db(e, "commit import"))?;
@@ -577,7 +594,7 @@ mod tests {
         assert_eq!(plan.summary.verified, 3);
         assert_eq!(plan.summary.unverified, 1);
 
-        let r = apply_import(&mut lib, &o, &plan, &mut |_| {}).unwrap();
+        let r = apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
         assert_eq!(r.added, 4);
         assert!(r.failed.is_empty());
         assert_eq!(
@@ -647,7 +664,7 @@ mod tests {
             "{k:?}"
         );
 
-        let r = apply_import(&mut lib, &o, &plan, &mut |_| {}).unwrap();
+        let r = apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
         assert_eq!(r.added, 3);
         assert!(
             lib.root().join("roms/fkh/Hello World (USA).fkh").exists(),
@@ -655,7 +672,6 @@ mod tests {
         );
         let games = db::list_games(lib.conn(), Some("fkh"), Some("hello")).unwrap();
         let rom = &games[0].roms[0];
-        assert_eq!(rom.mode, ImportMode::Copy);
         assert_eq!(
             lib.rom_abs_path(rom),
             lib.root().join("roms/fkh/Hello World (USA).fkh")
@@ -689,7 +705,7 @@ mod tests {
                 ..
             }
         )));
-        let r = apply_import(&mut lib, &o, &plan, &mut |_| {}).unwrap();
+        let r = apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
         assert_eq!(r.added, 1);
         assert_eq!(r.duplicates.len(), 1);
         assert_eq!(r.duplicates[0].existing, "a.fkh");
@@ -714,7 +730,7 @@ mod tests {
             &mut |_| {},
         )
         .unwrap();
-        apply_import(&mut lib, &o, &plan, &mut |_| {}).unwrap();
+        apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
         let managed = lib.root().join("roms/fkh/random.fkh");
         fs::write(src.path().join("random.fkh"), "changed source").unwrap();
         assert_eq!(fs::read_to_string(&managed).unwrap(), "not in dat");
@@ -772,7 +788,7 @@ mod tests {
         )
         .unwrap();
         write(lib.root(), "roms/fkh/a.fkh", "existing bytes");
-        let result = apply_import(&mut lib, &options, &plan, &mut |_| {}).unwrap();
+        let result = apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
         assert_eq!(result.failed.len(), 1);
         assert_eq!(
             fs::read(lib.root().join("roms/fkh/a.fkh")).unwrap(),
@@ -781,7 +797,7 @@ mod tests {
         assert!(lib.list_games(None, None).unwrap().is_empty());
         fs::remove_file(lib.root().join("roms/fkh/a.fkh")).unwrap();
         lib.conn().execute_batch("CREATE TRIGGER reject_import BEFORE INSERT ON roms BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
-        let result = apply_import(&mut lib, &options, &plan, &mut |_| {}).unwrap();
+        let result = apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
         assert_eq!(result.failed.len(), 1);
         assert!(!lib.root().join("roms/fkh/a.fkh").exists());
         assert!(lib.list_games(None, None).unwrap().is_empty());
@@ -806,7 +822,7 @@ mod tests {
         .unwrap();
         assert_eq!(plan.changes(), 1);
         write(&source, "Hello World (USA).fkh", "changed ROM");
-        let result = apply_import(&mut lib, &options, &plan, &mut |_| {}).unwrap();
+        let result = apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
         assert_eq!(result.failed.len(), 1);
         assert_eq!(result.added, 0);
         assert!(lib.list_games(None, None).unwrap().is_empty());

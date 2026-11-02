@@ -6,9 +6,8 @@ use std::path::{Path, PathBuf};
 use pocketeer_core::{
     Error, ErrorInfo, Result,
     library::{
-        self, Library,
+        self, Game, Library,
         covers::{self, CoverStats, FetchOptions, FetchReport},
-        db::Game,
         import::{self, ImportOptions, ImportPlan, ImportResult},
         remove::{self, RemovePlan, RemoveResult},
         rename::{self, RenamePlan, RenameResult},
@@ -58,18 +57,38 @@ impl Outcome for ImportReport {
     }
 }
 
-/// What `library import` was asked to do.
+/// How an import treats its files, wherever they come from (a folder or
+/// the card).
 #[derive(Debug, Clone)]
-pub struct ImportRequest {
-    /// A folder of ROMs (scanned recursively) or one ROM / zip.
-    pub source: PathBuf,
-    pub platform: String,
+pub struct ImportSettings {
+    /// A DAT to verify and name the files with.
     pub dat: Option<PathBuf>,
+    /// With a DAT: skip files it doesn't know instead of importing them unverified.
     pub dat_only: bool,
     /// Import files under the standard name they match (needs the network).
     pub standard_names: bool,
     /// Fetch covers for the new games afterwards (when online).
     pub covers: bool,
+}
+
+impl Default for ImportSettings {
+    fn default() -> Self {
+        ImportSettings {
+            dat: None,
+            dat_only: false,
+            standard_names: false,
+            covers: true,
+        }
+    }
+}
+
+/// What `library import --platform` was asked to do.
+#[derive(Debug, Clone)]
+pub struct ImportRequest {
+    /// A folder of ROMs (scanned recursively) or one ROM / zip.
+    pub source: PathBuf,
+    pub platform: String,
+    pub settings: ImportSettings,
 }
 
 /// What re-checking the library's metadata did: DAT identification, then
@@ -157,11 +176,10 @@ pub fn names_for(ctx: &Context, platform: &str) -> Option<Vec<String>> {
 pub fn suggest_standard_names(
     ctx: &Context,
     lib: &Library,
-    platform: &str,
     plan: &mut ImportPlan,
     take: bool,
 ) -> Result<()> {
-    if let Some(names) = names_for(ctx, platform)
+    if let Some(names) = names_for(ctx, &plan.platform)
         && import::suggest_names(plan, &names) > 0
         && take
     {
@@ -176,13 +194,13 @@ pub fn plan_import(
     ctx: &Context,
     req: &ImportRequest,
     progress: &mut dyn FnMut(Event),
-) -> Result<(ImportOptions, ImportPlan)> {
+) -> Result<ImportPlan> {
     let lib = ctx.library()?;
-    let dat = load_dat(req.dat.as_deref())?;
+    let dat = load_dat(req.settings.dat.as_deref())?;
     let opts = ImportOptions {
         platform: req.platform.clone(),
         platform_name: ctx.platform_name(&req.platform),
-        dat_only: req.dat_only,
+        dat_only: req.settings.dat_only,
     };
     let mut plan = import::plan_import(
         &lib,
@@ -192,14 +210,14 @@ pub fn plan_import(
         &mut ctx.hash_cache(),
         progress,
     )?;
-    suggest_standard_names(ctx, &lib, &req.platform, &mut plan, req.standard_names)?;
-    Ok((opts, plan))
+    suggest_standard_names(ctx, &lib, &mut plan, req.settings.standard_names)?;
+    Ok(plan)
 }
 
 /// What a folder holds, sorted by platform: one import plan per platform
 /// the file extensions name, and the files whose platform they don't.
 pub struct SortedImport {
-    pub parts: Vec<(ImportOptions, ImportPlan)>,
+    pub parts: Vec<ImportPlan>,
     /// Files no extension rule recognised, relative to the folder.
     pub unknown: Vec<String>,
 }
@@ -216,7 +234,7 @@ pub fn plan_import_sorted(
     progress: &mut dyn FnMut(Event),
 ) -> Result<SortedImport> {
     let lib = ctx.library()?;
-    let (dir, candidates) = pocketeer_core::fsutil::scan::scan_source(source)?;
+    let (dir, candidates) = pocketeer_core::library::import::scan_source(source)?;
     let mut groups: std::collections::BTreeMap<String, Vec<_>> = Default::default();
     let mut unknown = Vec::new();
     for c in candidates {
@@ -243,19 +261,18 @@ pub fn plan_import_sorted(
             &mut ctx.hash_cache(),
             progress,
         )?;
-        suggest_standard_names(ctx, &lib, &platform, &mut plan, standard_names)?;
-        parts.push((opts, plan));
+        suggest_standard_names(ctx, &lib, &mut plan, standard_names)?;
+        parts.push(plan);
     }
     Ok(SortedImport { parts, unknown })
 }
 
 pub fn apply_import(
     ctx: &Context,
-    options: &ImportOptions,
     plan: &ImportPlan,
     progress: &mut dyn FnMut(Event),
 ) -> Result<ImportResult> {
-    import::apply_import(&mut ctx.library()?, options, plan, progress)
+    import::apply_import(&mut ctx.library()?, plan, progress)
 }
 
 pub fn import(
@@ -264,11 +281,16 @@ pub fn import(
     mode: Mode,
     progress: &mut dyn FnMut(Event),
 ) -> Result<ImportReport> {
-    let (opts, plan) = plan_import(ctx, req, progress)?;
-    let staged = stage(mode, plan, |plan| apply_import(ctx, &opts, plan, progress))?;
+    let plan = plan_import(ctx, req, progress)?;
+    let staged = stage(mode, plan, |plan| apply_import(ctx, plan, progress))?;
     let added = staged.result.as_ref().map_or(0, |r| r.added);
-    let metadata = metadata_after_import(ctx, Some(&req.platform), (added, req.covers), progress)
-        .unwrap_or_default();
+    let metadata = metadata_after_import(
+        ctx,
+        Some(&req.platform),
+        (added, req.settings.covers),
+        progress,
+    )
+    .unwrap_or_default();
     Ok(ImportReport {
         staged,
         warnings: metadata.problems().map(str::to_owned).collect(),
@@ -309,10 +331,11 @@ pub fn import_sorted(
         .collect();
     let sorted = plan_import_sorted(ctx, source, &known, None, standard_names, progress)?;
     let mut parts = Vec::new();
-    for (opts, plan) in sorted.parts {
-        let staged = stage(mode, plan, |plan| apply_import(ctx, &opts, plan, progress))?;
+    for plan in sorted.parts {
+        let platform = plan.platform.clone();
+        let staged = stage(mode, plan, |plan| apply_import(ctx, plan, progress))?;
         let added = staged.result.as_ref().map_or(0, |r| r.added);
-        let metadata = metadata_after_import(ctx, Some(&opts.platform), (added, covers), progress)
+        let metadata = metadata_after_import(ctx, Some(&platform), (added, covers), progress)
             .unwrap_or_default();
         parts.push(ImportReport {
             staged,
@@ -537,7 +560,7 @@ pub fn covers_status(ctx: &Context) -> Result<CoversStatusReport> {
 mod tests {
     use super::*;
     use clap::Parser;
-    use pocketeer_core::fsutil::hash::HashCache;
+    use pocketeer_core::HashCache;
 
     #[test]
     fn standardize_reports_partial_success_and_continues_after_a_collision() {
@@ -562,7 +585,7 @@ mod tests {
             &mut |_| {},
         )
         .unwrap();
-        import::apply_import(&mut lib, &options, &import, &mut |_| {}).unwrap();
+        import::apply_import(&mut lib, &import, &mut |_| {}).unwrap();
         let renames: Vec<_> = ["one", "two", "three"]
             .into_iter()
             .map(|name| rename::plan(&lib, Some("gba"), name, &format!("new {name}")).unwrap())

@@ -9,7 +9,7 @@ use std::{collections::VecDeque, path::PathBuf, sync::atomic::Ordering};
 
 use pocketeer_core::{Error, ErrorInfo, Pocket, card::install, library::identify, plan::Event};
 
-use crate::{cli::Global, ops::context::Context, tui::pending::Pending};
+use crate::{cli::Global, ops::context::Context, tui::pending::Preview};
 
 use super::super::worker::{CardSnapshot, Job, LibraryView, Msg, SavesView, Snapshot, Worker};
 
@@ -37,7 +37,7 @@ pub enum Update {
     /// The side worker read the saves and Memories.
     Saves,
     /// A plan came back and needs its dialog.
-    Planned(Pending),
+    Planned(Preview),
     /// Core installs were prepared.
     Prepared(Vec<(String, Result<install::Prepared, Error>)>),
     Info {
@@ -426,7 +426,7 @@ impl Session {
                 Msg::Planned(result) => {
                     self.clear_busy();
                     updates.push(match result {
-                        Ok(pending) => Update::Planned(pending),
+                        Ok(preview) => Update::Planned(preview),
                         Err(error) => Update::Error {
                             title: "Couldn't plan that",
                             error,

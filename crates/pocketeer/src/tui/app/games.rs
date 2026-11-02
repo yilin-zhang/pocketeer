@@ -5,13 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent};
-use pocketeer_core::{
-    card::{install, roms::CardRom},
-    catalog,
-    fsutil::names,
-    library::Library,
-    transfer::Presence,
-};
+use pocketeer_core::{card::roms::CardRom, catalog, library::Library, names, transfer::Presence};
 use ratatui::layout::Size;
 use ratatui_image::picker::Picker;
 
@@ -418,12 +412,9 @@ impl Games {
             cx.dialog.confirm(
                 format!("Delete {} from the card?", o.name),
                 vec!["The library has no copy; i copies it there first.".into()],
-                Pending::Files {
-                    label: format!("delete {}", o.name),
-                    actions: vec![install::Action::Remove {
-                        path: o.rel_path,
-                        reason: install::plan::RemoveReason::Uninstall,
-                    }],
+                Pending::DeleteCardRom {
+                    name: o.name,
+                    path: o.rel_path,
                 },
             );
             return;

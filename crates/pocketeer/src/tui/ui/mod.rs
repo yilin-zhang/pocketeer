@@ -1,5 +1,5 @@
 //! Drawing. A pure function of `App`, except that it records where things
-//! were drawn (`App::hit`) so clicks can be mapped back.
+//! were drawn (in `Layout`) so clicks can be mapped back.
 
 use pocketeer_core::card::bios::FileStatus;
 use ratatui::{
@@ -14,7 +14,7 @@ use ratatui::{
 };
 use ratatui_image::{StatefulImage, protocol::StatefulProtocol};
 
-use super::app::{App, BiosFilter, Cycle, Modal, Splitter, Tab, missing_files};
+use super::app::{App, BiosFilter, Cycle, Modal, Splitter, Tab};
 use crate::text;
 
 mod card_tabs;

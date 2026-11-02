@@ -8,7 +8,7 @@ pub mod card;
 pub mod catalog;
 pub mod config;
 pub mod error;
-pub mod fsutil;
+pub(crate) mod fsutil;
 pub mod library;
 pub mod net;
 pub mod plan;
@@ -19,3 +19,6 @@ pub(crate) mod testutil;
 
 pub use card::Pocket;
 pub use error::{Error, ErrorInfo, Result};
+pub use fsutil::hash::HashCache;
+/// File-name rules (stems, rename kinds) the front ends show.
+pub use fsutil::names;

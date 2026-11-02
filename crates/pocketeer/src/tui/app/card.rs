@@ -7,7 +7,7 @@ use pocketeer_core::{
     Error,
     card::{
         bios,
-        cores::{self, CoreList, SearchFilter},
+        cores::{self, SearchFilter},
         install,
     },
 };
@@ -125,7 +125,7 @@ impl Cores {
                     update: c.update_available,
                     in_inventory: c.in_inventory,
                     license: c.latest.as_ref().is_some_and(|l| l.requires_license),
-                    missing_files: missing_files(snap, &c.core.id).len(),
+                    missing_files: snap.missing_files(&c.core.id).len(),
                     date: c.latest.as_ref().and_then(|l| l.date_release.clone()),
                     repo: snap
                         .inventory
@@ -140,7 +140,7 @@ impl Cores {
         {
             for h in cores::search(
                 inv,
-                &installed(snap),
+                &snap.installed(),
                 &SearchFilter {
                     query: None,
                     platform: None,
@@ -209,7 +209,7 @@ impl Cores {
             return;
         }
         let id = row.id.clone();
-        let list = cx.session.card().map(installed).unwrap_or_default();
+        let list = cx.session.card().map(CardSnapshot::installed).unwrap_or_default();
         match install::plan_remove(&pocket, &list, &id, false) {
             Ok(plan) if plan.actions.is_empty() => cx
                 .session
@@ -272,24 +272,6 @@ pub fn prepared(cx: &mut Cx, results: Vec<(String, Result<install::Prepared, Err
         }
     }
     cx.planned(Pending::Install { preps, errors });
-}
-
-fn installed(snap: &CardSnapshot) -> CoreList {
-    CoreList {
-        cores: snap.cores.cores.iter().map(|c| c.core.clone()).collect(),
-        broken: Vec::new(),
-    }
-}
-
-/// Required files one core is missing or has wrong.
-pub fn missing_files<'s>(snap: &'s CardSnapshot, core_id: &str) -> Vec<&'s bios::RequiredFile> {
-    snap.bios
-        .cores
-        .iter()
-        .filter(|c| c.core_id == core_id)
-        .flat_map(|c| c.files.iter())
-        .filter(|f| !matches!(f.status, bios::FileStatus::Present))
-        .collect()
 }
 
 // ---------------------------------------------------------------------------

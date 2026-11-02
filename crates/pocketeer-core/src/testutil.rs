@@ -94,6 +94,6 @@ pub(crate) fn library_on(platform: &str, files: &[(&str, &str)]) -> (tempfile::T
         &mut |_| {},
     )
     .unwrap();
-    import::apply_import(&mut lib, &opts, &plan, &mut |_| {}).unwrap();
+    import::apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
     (tmp, lib)
 }

@@ -79,7 +79,7 @@ impl Stamp {
 
 /// Modification time of already-fetched metadata, in seconds since the
 /// epoch (0 if unknown).
-pub fn mtime_of(meta: &std::fs::Metadata) -> i64 {
+fn mtime_of(meta: &std::fs::Metadata) -> i64 {
     meta.modified()
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())

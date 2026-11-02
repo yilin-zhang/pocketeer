@@ -20,11 +20,12 @@ use pocketeer_core::{
     Error, Pocket, Result,
     card::Status,
     card::bios::{self, BiosReport},
-    card::cores::{self, CoreListReport},
+    card::cores::{self, CoreList, CoreListReport},
     card::install::{PlanOptions, Prepared},
+    card::memories::Header,
     card::roms::{CardRom, Index},
     catalog::inventory::{Inventory, InventoryLoad},
-    library::{Library, covers, db::Game},
+    library::{Game, Library, covers},
     plan::Event,
     transfer::{
         self, LocalMatch, Presence,
@@ -32,7 +33,7 @@ use pocketeer_core::{
     },
 };
 
-use super::pending::{Pending, Request, text_lines};
+use super::pending::{Pending, Preview, Request, text_lines};
 use crate::{
     ops::{
         Mode,
@@ -93,6 +94,50 @@ pub struct GameRow {
     pub matches: Vec<LocalMatch>,
 }
 
+impl CardSnapshot {
+    pub fn installed(&self) -> CoreList {
+        CoreList {
+            cores: self.cores.cores.iter().map(|c| c.core.clone()).collect(),
+            broken: Vec::new(),
+        }
+    }
+
+    /// Required files one core is missing or has wrong.
+    pub fn missing_files(&self, core_id: &str) -> Vec<&bios::RequiredFile> {
+        self.bios
+            .cores
+            .iter()
+            .filter(|c| c.core_id == core_id)
+            .flat_map(|c| c.files.iter())
+            .filter(|f| !matches!(f.status, bios::FileStatus::Present))
+            .collect()
+    }
+}
+
+impl LibraryView {
+    /// The game a Memory was made with: the header names the ROM file and
+    /// platform; the library may know the ROM by that name, or the card copy
+    /// may carry it.
+    pub fn game_of(&self, memory: &Header) -> Option<&Game> {
+        let platform = memory.platform.as_deref()?;
+        self.games
+            .iter()
+            .find(|g| {
+                g.game.platform.eq_ignore_ascii_case(platform)
+                    && (g
+                        .game
+                        .roms
+                        .iter()
+                        .any(|r| r.name.eq_ignore_ascii_case(&memory.game))
+                        || g.matches
+                            .iter()
+                            .flat_map(|x| &x.copies)
+                            .any(|c| c.name.eq_ignore_ascii_case(&memory.game)))
+            })
+            .map(|g| &g.game)
+    }
+}
+
 impl GameRow {
     pub fn on_card(&self) -> bool {
         self.matches.iter().any(|m| m.presence == Presence::Both)
@@ -140,7 +185,7 @@ pub enum Msg {
         epoch: u64,
     },
     Loaded(Result<Box<Snapshot>>),
-    Planned(Result<Pending>),
+    Planned(Result<Preview>),
     Progress(Event),
     Prepared(Vec<(String, Result<Prepared>)>),
     /// A main-worker job finished.

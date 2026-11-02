@@ -29,13 +29,12 @@ mod rename;
 mod saves;
 mod session;
 
-pub use card::{BiosFilter, missing_files};
+pub use card::BiosFilter;
 pub use dialog::{Modal, SUGGESTIONS_SHOWN, Suggestion};
 #[cfg(test)]
 pub use games::CoverStep;
 pub use games::GameRef;
 pub use layout::{Layout, Splitter};
-pub use memories::library_game as memory_game;
 pub use pane::{Cycle, PaneOps};
 pub use saves::{SaveLine, SaveMark, status as save_status};
 pub use session::Session;
@@ -105,16 +104,20 @@ struct Cx<'a> {
 }
 
 impl Cx<'_> {
-    /// A plan came back: open the dialog it asks for.
+    /// A plan is ready: open the dialog it asks for.
     fn planned(&mut self, pending: Pending) {
-        match pending.preview() {
+        self.show(pending.preview());
+    }
+
+    fn show(&mut self, preview: Preview) {
+        match preview {
             Preview::Notice(line) => self.session.notice(line),
             Preview::Info { title, lines } => self.dialog.info(title, lines),
             Preview::Confirm {
                 title,
                 lines,
                 pending,
-            } => self.dialog.confirm(title, lines, pending),
+            } => self.dialog.confirm(title, lines, *pending),
             Preview::SaveConflict { plan, games, index } => {
                 saves::ask_conflict(self, plan, games, index)
             }
@@ -239,7 +242,7 @@ impl App {
                     self.games.index_saves(&self.session);
                     self.rebuild_keeping(keep.as_ref());
                 }
-                Update::Planned(pending) => self.cx().planned(pending),
+                Update::Planned(preview) => self.cx().show(preview),
                 Update::Prepared(results) => card::prepared(&mut self.cx(), results),
                 Update::Info { title, lines } => self.dialog.info(title, lines),
                 Update::Error { title, error } => self.dialog.error(title, &error),
@@ -474,7 +477,7 @@ mod tests {
     use crate::tui::worker::{GameRow, LibraryView, Snapshot};
     use pocketeer_core::{
         card::roms::Confidence,
-        library::db::Game,
+        library::Game,
         transfer::{CardMatch, LocalMatch, Presence},
     };
     use std::path::PathBuf;

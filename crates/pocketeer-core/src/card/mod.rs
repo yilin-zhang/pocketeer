@@ -28,8 +28,8 @@ pub const ASSETS_DIR: &str = "Assets";
 pub const CORES_DIR: &str = "Cores";
 pub const SAVES_DIR: &str = "Saves";
 pub const PLATFORMS_DIR: &str = "Platforms";
-pub const SETTINGS_DIR: &str = "Settings";
-pub const PRESETS_DIR: &str = "Presets";
+const SETTINGS_DIR: &str = "Settings";
+const PRESETS_DIR: &str = "Presets";
 pub const MEMORIES_DIR: &str = "Memories";
 /// GB Studio games live at the root, not under `Assets/`.
 pub const GB_STUDIO_DIR: &str = "GB Studio";
@@ -38,7 +38,7 @@ pub const GB_STUDIO_PLATFORM: &str = "gbstudio";
 pub const POCKET_JSON: &str = "Analogue_Pocket.json";
 
 /// Entries that must exist at the root of a Pocket SD card.
-pub const ROOT_MARKERS: [&str; 3] = [POCKET_JSON, ASSETS_DIR, CORES_DIR];
+const ROOT_MARKERS: [&str; 3] = [POCKET_JSON, ASSETS_DIR, CORES_DIR];
 
 /// pocketeer's folder for disposable ROM cache and install staging.
 pub const POCKETEER_DIR: &str = ".pocketeer";
@@ -121,7 +121,7 @@ pub fn save_dir_for(rom_rel: &Path) -> Option<PathBuf> {
 
 /// Where removable volumes show up, per OS. Each entry is a folder whose
 /// direct children are mount points (`/Volumes/POCKET`, `/media/me/POCKET`).
-pub fn mount_dirs() -> Vec<PathBuf> {
+fn mount_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if cfg!(target_os = "macos") {
         dirs.push(PathBuf::from("/Volumes"));
@@ -150,7 +150,7 @@ fn drive_roots() -> Vec<PathBuf> {
 }
 
 /// Returns the [`ROOT_MARKERS`] missing from `path`; empty means it looks like a Pocket.
-pub fn missing_markers(path: &Path) -> Vec<String> {
+fn missing_markers(path: &Path) -> Vec<String> {
     ROOT_MARKERS
         .iter()
         .filter(|marker| !path.join(marker).exists())

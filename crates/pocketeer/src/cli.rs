@@ -32,6 +32,7 @@ pub struct Cli {
 }
 
 #[derive(Debug, Args, Clone, Default)]
+#[command(next_help_heading = "Global options")]
 pub struct Global {
     /// Print machine-readable JSON to stdout instead of human output.
     #[arg(long, global = true)]
@@ -329,7 +330,17 @@ pub struct ImportArgs {
     /// platform comes from its extension, and files it can't tell are left out.
     #[arg(long, value_name = "ID")]
     pub platform: Option<String>,
-    /// Optional XML/clrmamepro DAT to verify and name files with.
+    #[command(flatten)]
+    pub flags: ImportFlags,
+    #[command(flatten)]
+    pub apply: ApplyArgs,
+}
+
+/// How `library import` and `card import` treat the files they import.
+#[derive(Debug, Args, Clone, Default)]
+pub struct ImportFlags {
+    /// XML/clrmamepro DAT to verify and name the files with (one platform's,
+    /// so it needs --platform).
     #[arg(long, value_name = "FILE", requires = "platform")]
     pub dat: Option<PathBuf>,
     /// Skip files the DAT doesn't know (default: import them as unverified).
@@ -342,8 +353,6 @@ pub struct ImportArgs {
     /// didn't name them. Needs the libretro name list (network, cached a week).
     #[arg(long)]
     pub standard_names: bool,
-    #[command(flatten)]
-    pub apply: ApplyArgs,
 }
 
 #[derive(Debug, Subcommand)]
@@ -381,18 +390,8 @@ pub struct CardImportArgs {
     /// Card-relative ROM paths (default: every unmatched file).
     #[arg(value_name = "PATH")]
     pub paths: Vec<PathBuf>,
-    /// Optional XML/clrmamepro DAT to verify and name the files with.
-    #[arg(long, value_name = "FILE")]
-    pub dat: Option<PathBuf>,
-    /// Skip files the DAT doesn't know (default: import them as unverified).
-    #[arg(long, requires = "dat")]
-    pub dat_only: bool,
-    /// Don't fetch covers for the imported games afterwards.
-    #[arg(long)]
-    pub no_covers: bool,
-    /// Import files under the standard (No-Intro) name they match.
-    #[arg(long)]
-    pub standard_names: bool,
+    #[command(flatten)]
+    pub flags: ImportFlags,
     #[command(flatten)]
     pub apply: ApplyArgs,
 }
@@ -533,17 +532,14 @@ impl From<ApplyArgs> for ops::Mode {
     }
 }
 
-impl ImportArgs {
-    /// The request for one platform; `None` without `--platform`.
-    pub fn request(self) -> Option<ops::library::ImportRequest> {
-        Some(ops::library::ImportRequest {
-            source: self.dir,
-            platform: self.platform?,
-            dat: self.dat,
-            dat_only: self.dat_only,
-            standard_names: self.standard_names,
-            covers: !self.no_covers,
-        })
+impl From<ImportFlags> for ops::library::ImportSettings {
+    fn from(f: ImportFlags) -> Self {
+        ops::library::ImportSettings {
+            dat: f.dat,
+            dat_only: f.dat_only,
+            standard_names: f.standard_names,
+            covers: !f.no_covers,
+        }
     }
 }
 
@@ -552,10 +548,7 @@ impl From<CardImportArgs> for ops::card::ImportRequest {
         ops::card::ImportRequest {
             platform: a.platform,
             paths: a.paths,
-            dat: a.dat,
-            dat_only: a.dat_only,
-            standard_names: a.standard_names,
-            covers: !a.no_covers,
+            settings: a.flags.into(),
         }
     }
 }

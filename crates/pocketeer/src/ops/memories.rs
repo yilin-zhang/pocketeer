@@ -24,10 +24,36 @@ use super::{
 pub struct MemoryEntry {
     #[serde(flatten)]
     pub memory: Memory,
-    pub on_card: bool,
-    pub in_library: bool,
-    /// The library's copy has the card's size and time (backups keep it).
-    pub backed_up: bool,
+    pub place: Place,
+}
+
+/// Where a Memory is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Place {
+    /// Only on the card: never backed up.
+    Card,
+    /// Only in the library.
+    Library,
+    /// On both, the library's copy with the card's size and time.
+    BackedUp,
+    /// On both, but the card's copy changed since the backup.
+    Changed,
+}
+
+impl Place {
+    pub fn on_card(self) -> bool {
+        self != Place::Library
+    }
+
+    pub fn in_library(self) -> bool {
+        self != Place::Card
+    }
+
+    /// The card has bytes the library doesn't.
+    pub fn needs_backup(self) -> bool {
+        matches!(self, Place::Card | Place::Changed)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -49,22 +75,19 @@ pub fn list(ctx: &Context) -> Result<MemoriesReport> {
     let mut entries: Vec<MemoryEntry> = on_card
         .into_iter()
         .map(|m| {
-            let copy = backed.iter().find(|b| b.rel_path == m.rel_path);
-            MemoryEntry {
-                in_library: copy.is_some(),
-                backed_up: copy.is_some_and(|b| b.size == m.size && b.mtime == m.mtime),
-                on_card: true,
-                memory: m,
-            }
+            let place = match backed.iter().find(|b| b.rel_path == m.rel_path) {
+                None => Place::Card,
+                Some(b) if b.size == m.size && b.mtime == m.mtime => Place::BackedUp,
+                Some(_) => Place::Changed,
+            };
+            MemoryEntry { memory: m, place }
         })
         .collect();
     for b in backed {
         if !entries.iter().any(|e| e.memory.rel_path == b.rel_path) {
             entries.push(MemoryEntry {
                 memory: b,
-                on_card: false,
-                in_library: true,
-                backed_up: true,
+                place: Place::Library,
             });
         }
     }
