@@ -286,7 +286,7 @@ pub fn ask_conflict(cx: &mut Cx, backup: Box<SaveSync>, index: usize) {
         card,
         computer,
         ..
-    } = &backup.plan.actions[index]
+    } = &backup.plan.actions()[index]
     else {
         return;
     };

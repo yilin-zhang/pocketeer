@@ -71,13 +71,13 @@ pub fn saves_sync_by_game(
             &mut text,
             report
                 .plan
-                .actions
+                .actions()
                 .iter()
                 .filter_map(|a| action_line(a, &a.path().display().to_string())),
         );
     } else {
         let mut groups: BTreeMap<(bool, &str), Vec<String>> = BTreeMap::new();
-        for a in &report.plan.actions {
+        for a in report.plan.actions() {
             let rel = a.path();
             let name = rel.file_name().unwrap_or_default().to_string_lossy();
             let (key, shown) = match games.get(rel) {
@@ -95,7 +95,7 @@ pub fn saves_sync_by_game(
                 .flat_map(|((_, game), lines)| std::iter::once(game.to_string()).chain(lines)),
         );
     }
-    let s = &report.plan.summary;
+    let s = report.plan.summary();
     let _ = writeln!(
         text,
         "{} backup(s), {} restore(s), {} conflict(s), {} identical, {} retained",
@@ -246,7 +246,7 @@ pub fn saves_dialog(
     games: &BTreeMap<PathBuf, String>,
 ) -> Vec<String> {
     let mut groups: BTreeMap<(bool, String), Vec<String>> = BTreeMap::new();
-    for a in &plan.actions {
+    for a in plan.actions() {
         let what = match a {
             SaveAction::Pull {
                 reason: SaveReason::OnlyOnCard,

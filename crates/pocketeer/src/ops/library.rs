@@ -88,7 +88,7 @@ impl<P: ImportsRoms> Imported<P> {
         // Only the platforms that get games need identifying afterwards.
         let platforms: Vec<String> = plan
             .import()
-            .actions
+            .actions()
             .iter()
             .filter(|a| matches!(a, ImportAction::Add { .. }))
             .map(|a| a.platform().to_owned())

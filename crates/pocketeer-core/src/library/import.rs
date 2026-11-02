@@ -108,9 +108,10 @@ pub struct ImportSummary {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ImportPlan {
     pub dir: PathBuf,
+    // Private: `summary` counts `actions`; only this module changes them.
     /// Every file's action, grouped by platform.
-    pub actions: Vec<ImportAction>,
-    pub summary: ImportSummary,
+    actions: Vec<ImportAction>,
+    summary: ImportSummary,
     /// Files whose platform their extension doesn't say, left out.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unknown: Vec<String>,
@@ -128,6 +129,14 @@ impl Plan for ImportPlan {
 }
 
 impl ImportPlan {
+    pub fn actions(&self) -> &[ImportAction] {
+        &self.actions
+    }
+
+    pub fn summary(&self) -> &ImportSummary {
+        &self.summary
+    }
+
     /// The platforms the plan has files for, in order.
     pub fn platforms(&self) -> BTreeSet<&str> {
         self.actions.iter().map(ImportAction::platform).collect()

@@ -189,7 +189,7 @@ impl<P: ImportsRoms> Text for Imported<P> {
         );
         let mut skipped = BTreeMap::new();
         for platform in p.platforms() {
-            let actions = p.actions.iter().filter(|a| a.platform() == platform);
+            let actions = p.actions().iter().filter(|a| a.platform() == platform);
             // Platforms with nothing new show up only in the skipped count.
             if actions
                 .clone()
@@ -201,7 +201,7 @@ impl<P: ImportsRoms> Text for Imported<P> {
                 *skipped.entry(reason).or_default() += n;
             }
         }
-        let s = &p.summary;
+        let s = p.summary();
         if s.add + s.skip > 0 {
             let _ = writeln!(
                 out,
@@ -230,7 +230,7 @@ impl<P: ImportsRoms> Text for Imported<P> {
             plan_lines(&mut out, p.unknown.iter().map(|u| format!("  {u}")));
         }
         if r.staged.result.is_none() && p.changes() > 0 {
-            suggestion_footer(&mut out, reader, p.actions.iter());
+            suggestion_footer(&mut out, reader, p.actions().iter());
         }
         // Nothing is applied while a name is missing, so no footer then either.
         let changes = if not_found.is_empty() { p.changes() } else { 0 };
@@ -529,7 +529,7 @@ pub fn import_brief(plan: &ImportPlan) -> Vec<String> {
     for platform in plan.platforms() {
         let mut new = Vec::new();
         let (mut there, mut other) = (0, 0);
-        for a in plan.actions.iter().filter(|a| a.platform() == platform) {
+        for a in plan.actions().iter().filter(|a| a.platform() == platform) {
             match a {
                 ImportAction::Add { rom, .. } => new.push(rom.as_str()),
                 ImportAction::Skip {

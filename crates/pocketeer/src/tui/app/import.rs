@@ -118,7 +118,7 @@ fn plan(cx: &mut Cx, source: PathBuf, platform: Option<String>) {
             settings: Default::default(),
         };
         let plan = library_cmd::plan_import(ctx, &req, progress)?;
-        if plan.actions.is_empty() && !plan.unknown.is_empty() {
+        if plan.actions().is_empty() && !plan.unknown.is_empty() {
             // None of the files says its platform: ask which.
             return Ok(Preview::AskPlatform {
                 source,

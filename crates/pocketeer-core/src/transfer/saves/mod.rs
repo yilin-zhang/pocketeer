@@ -139,8 +139,9 @@ struct Observed {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SavesPlan {
-    pub actions: Vec<SaveAction>,
-    pub summary: SavesSummary,
+    // Private: `summary` counts `actions`, and `recount` keeps it so.
+    actions: Vec<SaveAction>,
+    summary: SavesSummary,
     #[serde(skip)]
     observed: BTreeMap<PathBuf, Observed>,
     #[serde(skip)]
@@ -159,6 +160,14 @@ impl Plan for SavesPlan {
 }
 
 impl SavesPlan {
+    pub fn actions(&self) -> &[SaveAction] {
+        &self.actions
+    }
+
+    pub fn summary(&self) -> &SavesSummary {
+        &self.summary
+    }
+
     pub fn resolve(&mut self, i: usize, choice: ConflictChoice) {
         let SaveAction::Conflict {
             rel,

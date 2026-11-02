@@ -305,7 +305,7 @@ impl Pending for SaveSync {
     fn preview(self: Box<Self>) -> Preview {
         let conflict = self
             .plan
-            .actions
+            .actions()
             .iter()
             .position(|a| matches!(a, SaveAction::Conflict { .. }));
         if let Some(index) = conflict {
@@ -314,7 +314,7 @@ impl Pending for SaveSync {
                 index,
             };
         }
-        let s = &self.plan.summary;
+        let s = self.plan.summary();
         let title = match (s.pull, s.push) {
             (0, 0) => return Preview::Notice("Saves are already backed up.".into()),
             (n, 0) => format!("Back up {n} save(s)?"),
