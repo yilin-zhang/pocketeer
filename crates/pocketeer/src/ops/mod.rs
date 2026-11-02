@@ -35,9 +35,6 @@ pub enum Mode {
     DryRun,
     /// The default: plans applied.
     Applied,
-    /// A TUI dialog: the plan body only, no CLI footers (the buttons say
-    /// what happens next). Never produced by the CLI.
-    Interactive,
 }
 
 /// The one rule behind every command's exit status: any failure is an
@@ -81,7 +78,7 @@ impl<P: Apply> Staged<P> {
 
     /// A plan shown in a TUI dialog before it is applied.
     pub fn preview(plan: P) -> Self {
-        Self::new(Mode::Interactive, plan)
+        Self::new(Mode::DryRun, plan)
     }
 
     pub fn changes(&self) -> usize {

@@ -11,6 +11,8 @@ use std::{
 use pocketeer_core::{Error, ErrorInfo, plan::Event};
 use serde::Serialize;
 
+use crate::text::{Reader, Text};
+
 /// Bump when a released JSON shape changes incompatibly.
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -33,16 +35,31 @@ pub trait Outcome: Serialize {
     }
 }
 
-/// Wrapper giving any plain `Serialize` value the `Outcome` trait.
-struct Plain<T>(T);
+// Reports that only describe something and never carry a failure of their
+// own. A new read-only report goes on this list.
+mod read_only {
+    use super::Outcome;
+    use crate::{cli::DocsReport, ops};
+    use pocketeer_core::{card, library};
 
-impl<T: Serialize> Serialize for Plain<T> {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize(s)
-    }
+    impl Outcome for card::Status {}
+    impl Outcome for card::bios::BiosReport {}
+    impl Outcome for card::cores::CoreListReport {}
+    impl Outcome for card::cores::CoreInfo {}
+    impl Outcome for library::Status {}
+    impl Outcome for library::covers::FetchReport {}
+    impl Outcome for ops::card::RefreshReport {}
+    impl Outcome for ops::cores::SearchReport {}
+    impl Outcome for ops::library::InitReport {}
+    impl Outcome for ops::library::ListReport {}
+    impl Outcome for ops::library::CoversStatusReport {}
+    impl Outcome for ops::saves::ListReport {}
+    impl Outcome for ops::saves::VersionsReport {}
+    impl Outcome for ops::memories::MemoriesReport {}
+    impl Outcome for ops::context::ConfigPathReport {}
+    impl Outcome for ops::context::ConfigShowReport {}
+    impl Outcome for DocsReport {}
 }
-
-impl<T: Serialize> Outcome for Plain<T> {}
 
 pub struct Output {
     json: bool,
@@ -74,21 +91,24 @@ impl Output {
         ExitCode::from(2)
     }
 
-    /// Plain results: data on success, error otherwise.
-    pub fn emit<T: Serialize>(
-        &self,
-        result: Result<T, Error>,
-        human: impl FnOnce(&T) -> String,
-    ) -> ExitCode {
-        self.emit_outcome(result.map(Plain), |p| human(&p.0))
+    /// A command that failed before it had anything to report.
+    pub fn fail(&self, error: Error) -> ExitCode {
+        if self.json {
+            print_json(&Envelope::<()> {
+                schema_version: SCHEMA_VERSION,
+                ok: false,
+                data: None,
+                error: Some(error.to_info()),
+            });
+        } else {
+            print_error(&error.to_info());
+        }
+        ExitCode::FAILURE
     }
 
-    /// Results whose data may itself report a failure.
-    pub fn emit_outcome<T: Outcome>(
-        &self,
-        result: Result<T, Error>,
-        human: impl FnOnce(&T) -> String,
-    ) -> ExitCode {
+    /// A command's result: its data (JSON, or text for people) and its
+    /// failure, if the data reports one or the command failed outright.
+    pub fn emit<T: Outcome + Text>(&self, result: Result<T, Error>) -> ExitCode {
         let (data, error) = match &result {
             Ok(data) => (Some(data), data.error().map(|e| e.to_info())),
             Err(err) => (None, Some(err.to_info())),
@@ -103,14 +123,11 @@ impl Output {
             });
         } else {
             if let Some(data) = data {
-                print!("{}", human(data));
+                print!("{}", data.text(Reader::Cli));
                 let _ = std::io::stdout().flush();
             }
             if let Some(err) = &error {
-                eprintln!("error: {}", err.message);
-                if let Some(hint) = &err.hint {
-                    eprintln!("hint: {hint}");
-                }
+                print_error(err);
             }
         }
 
@@ -152,6 +169,13 @@ impl Output {
             }
             Event::Step { .. } => {}
         })
+    }
+}
+
+fn print_error(err: &ErrorInfo) {
+    eprintln!("error: {}", err.message);
+    if let Some(hint) = &err.hint {
+        eprintln!("hint: {hint}");
     }
 }
 

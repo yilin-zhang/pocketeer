@@ -7,7 +7,7 @@ use pocketeer_core::{
     transfer::saves::{SaveAction, SaveReason, SaveSkip, TrashTarget},
 };
 
-use super::{bytes, plan_lines, staged_footer, table, time_ago};
+use super::{Reader, Text, bytes, plan_lines, staged_footer, table, time_ago};
 use crate::ops::saves::{ListReport, SyncReport, TrashReport, VersionsReport};
 
 fn save_reason(reason: SaveReason) -> &'static str {
@@ -50,14 +50,21 @@ fn action_line(action: &SaveAction, shown: &str) -> Option<String> {
     })
 }
 
-pub fn saves_sync(report: &SyncReport) -> String {
-    saves_sync_by_game(report, &BTreeMap::new())
+impl Text for SyncReport {
+    fn text(&self, reader: Reader) -> String {
+        let report = self;
+        saves_sync_by_game(report, &BTreeMap::new(), reader)
+    }
 }
 
 /// A backup plan with its saves listed under the game each belongs to
 /// (`games`: card path → game name); the rest come last as "Other saves".
 /// With no names it lists card paths, as the CLI prints.
-pub fn saves_sync_by_game(report: &SyncReport, games: &BTreeMap<PathBuf, String>) -> String {
+pub fn saves_sync_by_game(
+    report: &SyncReport,
+    games: &BTreeMap<PathBuf, String>,
+    reader: Reader,
+) -> String {
     let mut text = String::new();
     if games.is_empty() {
         plan_lines(
@@ -97,6 +104,7 @@ pub fn saves_sync_by_game(report: &SyncReport, games: &BTreeMap<PathBuf, String>
     staged_footer(
         &mut text,
         report.mode,
+        reader,
         report.result.as_ref(),
         report.plan.changes(),
         "No file changes requested.",
@@ -119,119 +127,129 @@ pub fn saves_sync_by_game(report: &SyncReport, games: &BTreeMap<PathBuf, String>
     text
 }
 
-pub fn saves_list(r: &ListReport) -> String {
-    let mut out = String::new();
-    if r.saves.is_empty() {
+impl Text for ListReport {
+    fn text(&self, _: Reader) -> String {
+        let r = self;
+        let mut out = String::new();
+        if r.saves.is_empty() {
+            let _ = writeln!(
+                out,
+                "No saves in the library yet. Run `pocketeer saves backup` with a card mounted."
+            );
+            return out;
+        }
+        let rows: Vec<[String; 4]> = r
+            .saves
+            .iter()
+            .map(|s| {
+                [
+                    s.rel_path.display().to_string(),
+                    bytes(s.size),
+                    time_ago(s.mtime),
+                    s.versions.to_string(),
+                ]
+            })
+            .collect();
+        table(&mut out, ["SAVE", "SIZE", "MODIFIED", "VERSIONS"], &rows);
+        let _ = writeln!(out, "\n{} save file(s), {}", r.saves.len(), bytes(r.bytes));
+        out
+    }
+}
+
+impl Text for VersionsReport {
+    fn text(&self, _: Reader) -> String {
+        let r = self;
+        let mut out = String::new();
+        if r.versions.is_empty() {
+            let _ = writeln!(out, "No older versions of {}.", r.rel_path.display());
+            return out;
+        }
+        let rows: Vec<[String; 4]> = r
+            .versions
+            .iter()
+            .map(|v| {
+                [
+                    v.id.to_string(),
+                    time_ago(v.mtime),
+                    bytes(v.size),
+                    v.sha1[..8.min(v.sha1.len())].to_string(),
+                ]
+            })
+            .collect();
+        table(&mut out, ["ID", "MODIFIED", "SIZE", "SHA1"], &rows);
         let _ = writeln!(
             out,
-            "No saves in the library yet. Run `pocketeer saves backup` with a card mounted."
+            "\nRestore one with: pocketeer saves restore <PATH> --version <ID>"
         );
-        return out;
+        out
     }
-    let rows: Vec<[String; 4]> = r
-        .saves
-        .iter()
-        .map(|s| {
-            [
-                s.rel_path.display().to_string(),
-                bytes(s.size),
-                time_ago(s.mtime),
-                s.versions.to_string(),
-            ]
-        })
-        .collect();
-    table(&mut out, ["SAVE", "SIZE", "MODIFIED", "VERSIONS"], &rows);
-    let _ = writeln!(out, "\n{} save file(s), {}", r.saves.len(), bytes(r.bytes));
-    out
 }
 
-pub fn saves_versions(r: &VersionsReport) -> String {
-    let mut out = String::new();
-    if r.versions.is_empty() {
-        let _ = writeln!(out, "No older versions of {}.", r.rel_path.display());
-        return out;
-    }
-    let rows: Vec<[String; 4]> = r
-        .versions
-        .iter()
-        .map(|v| {
-            [
-                v.id.to_string(),
-                time_ago(v.mtime),
-                bytes(v.size),
-                v.sha1[..8.min(v.sha1.len())].to_string(),
-            ]
-        })
-        .collect();
-    table(&mut out, ["ID", "MODIFIED", "SIZE", "SHA1"], &rows);
-    let _ = writeln!(
-        out,
-        "\nRestore one with: pocketeer saves restore <PATH> --version <ID>"
-    );
-    out
-}
-
-pub fn saves_trash(report: &TrashReport) -> String {
-    let mut text = String::new();
-    let plan = &report.plan;
-    plan_lines(
-        &mut text,
-        plan.files.iter().map(|f| match plan.target {
-            TrashTarget::Card if f.archive_first => format!(
-                "- delete from AP {} (archived into the library first)",
-                f.path.display()
-            ),
-            TrashTarget::Card => format!(
-                "- delete from AP {} (the library has these bytes)",
-                f.path.display()
-            ),
-            TrashTarget::Version(_) => {
-                format!(
-                    "→ trash older version of {} ({})",
-                    f.save.display(),
-                    bytes(f.size)
-                )
-            }
-            _ if f.path.starts_with("saves/.history") => {
-                format!(
-                    "→ trash older version of {} ({})",
-                    f.save.display(),
-                    bytes(f.size)
-                )
-            }
-            _ => format!("→ trash backup {} ({})", f.save.display(), bytes(f.size)),
-        }),
-    );
-    if plan.target != TrashTarget::Card && !plan.files.is_empty() {
-        let _ = writeln!(
-            text,
-            "Files go to {} inside the library.",
-            plan.trash.display()
+impl Text for TrashReport {
+    fn text(&self, reader: Reader) -> String {
+        let report = self;
+        let mut text = String::new();
+        let plan = &report.plan;
+        plan_lines(
+            &mut text,
+            plan.files.iter().map(|f| match plan.target {
+                TrashTarget::Card if f.archive_first => format!(
+                    "- delete from AP {} (archived into the library first)",
+                    f.path.display()
+                ),
+                TrashTarget::Card => format!(
+                    "- delete from AP {} (the library has these bytes)",
+                    f.path.display()
+                ),
+                TrashTarget::Version(_) => {
+                    format!(
+                        "→ trash older version of {} ({})",
+                        f.save.display(),
+                        bytes(f.size)
+                    )
+                }
+                _ if f.path.starts_with("saves/.history") => {
+                    format!(
+                        "→ trash older version of {} ({})",
+                        f.save.display(),
+                        bytes(f.size)
+                    )
+                }
+                _ => format!("→ trash backup {} ({})", f.save.display(), bytes(f.size)),
+            }),
         );
-    }
-    staged_footer(
-        &mut text,
-        report.mode,
-        report.result.as_ref(),
-        plan.changes(),
-        "Nothing to throw away.",
-        |text, result| {
+        if plan.target != TrashTarget::Card && !plan.files.is_empty() {
             let _ = writeln!(
                 text,
-                "Trashed {}, archived {}",
-                result.trashed, result.archived
+                "Files go to {} inside the library.",
+                plan.trash.display()
             );
-            for failure in &result.failed {
+        }
+        staged_footer(
+            &mut text,
+            report.mode,
+            reader,
+            report.result.as_ref(),
+            plan.changes(),
+            "Nothing to throw away.",
+            |text, result| {
                 let _ = writeln!(
                     text,
-                    "✗ {}: {}",
-                    failure.rel.display(),
-                    failure.error.message
+                    "Trashed {}, archived {}",
+                    result.trashed, result.archived
                 );
-            }
-        },
-    );
-    text
+                for failure in &result.failed {
+                    let _ = writeln!(
+                        text,
+                        "✗ {}: {}",
+                        failure.rel.display(),
+                        failure.error.message
+                    );
+                }
+            },
+        );
+        text
+    }
 }
 
 /// A backup or restore plan as the TUI's dialog shows it: saves under the

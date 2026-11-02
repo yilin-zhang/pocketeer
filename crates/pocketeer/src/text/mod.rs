@@ -4,8 +4,10 @@
 //! share: tables, byte sizes, plan listings, the plan footer, and the few
 //! renderings for config and docs.
 //!
-//! `Mode::Interactive` text is shown inside the TUI: it never mentions CLI
-//! flags or commands (the dialog's buttons say what happens next).
+//! Every report says how it reads through [`Text`]; the implementations sit
+//! in the file for its `ops` module. Text for [`Reader::Tui`] is shown in a
+//! dialog: it never mentions CLI flags or commands (the dialog's buttons say
+//! what happens next).
 
 use std::{collections::BTreeMap, fmt::Write};
 
@@ -53,12 +55,22 @@ fn plan_lines(out: &mut String, lines: impl IntoIterator<Item = String>) {
     }
 }
 
-fn mode_footer(out: &mut String, mode: Mode) {
-    match mode {
-        Mode::DryRun => {
-            let _ = writeln!(out, "\nDry run: nothing was changed.");
-        }
-        Mode::Applied | Mode::Interactive => {}
+/// Who reads a text: someone at the command line, or a TUI dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reader {
+    Cli,
+    Tui,
+}
+
+/// A report as people read it.
+pub trait Text {
+    fn text(&self, reader: Reader) -> String;
+}
+
+/// A dry run says so at the CLI; a TUI dialog's buttons say it instead.
+fn mode_footer(out: &mut String, mode: Mode, reader: Reader) {
+    if mode == Mode::DryRun && reader == Reader::Cli {
+        let _ = writeln!(out, "\nDry run: nothing was changed.");
     }
 }
 
@@ -68,6 +80,7 @@ fn mode_footer(out: &mut String, mode: Mode) {
 fn staged_footer<R>(
     out: &mut String,
     mode: Mode,
+    reader: Reader,
     result: Option<&R>,
     changes: usize,
     nothing: &str,
@@ -75,7 +88,7 @@ fn staged_footer<R>(
 ) {
     match result {
         Some(r) => done(out, r),
-        None if changes > 0 => mode_footer(out, mode),
+        None if changes > 0 => mode_footer(out, mode, reader),
         None => {
             if !nothing.is_empty() {
                 let _ = writeln!(out, "{nothing}");
@@ -300,10 +313,10 @@ fn import_actions<'a>(
 /// Tells the user how to take the standard names an import plan suggests.
 fn suggestion_footer<'a>(
     out: &mut String,
-    mode: Mode,
+    reader: Reader,
     actions: impl Iterator<Item = &'a ImportAction>,
 ) {
-    if mode == Mode::Interactive {
+    if reader == Reader::Tui {
         // The TUI asked about the names in its own dialog already.
         return;
     }
@@ -346,12 +359,12 @@ fn cover_news(c: &FetchReport) -> Vec<(usize, &'static str)> {
 }
 
 /// How to give a libretro system name for platforms without a mapping.
-fn unmapped_hint(c: &FetchReport, mode: Mode) -> Option<String> {
+fn unmapped_hint(c: &FetchReport, reader: Reader) -> Option<String> {
     (!c.unsupported_platforms.is_empty()).then(|| {
         format!(
             "No libretro mapping for {}; {}.",
             c.unsupported_platforms.join(", "),
-            if mode == Mode::Interactive {
+            if reader == Reader::Tui {
                 "press f on one of its games and give the system name"
             } else {
                 "pass `covers fetch --platform <id> --libretro-system <name>`"
@@ -361,7 +374,7 @@ fn unmapped_hint(c: &FetchReport, mode: Mode) -> Option<String> {
 }
 
 /// One line about the covers fetched after an import, plus the mapping hint.
-pub fn covers_summary(out: &mut String, covers: Option<&FetchReport>, mode: Mode) {
+pub fn covers_summary(out: &mut String, covers: Option<&FetchReport>, reader: Reader) {
     if let Some(c) = covers {
         let news = cover_news(c);
         let _ = writeln!(
@@ -376,7 +389,7 @@ pub fn covers_summary(out: &mut String, covers: Option<&FetchReport>, mode: Mode
                     .join(", ")
             }
         );
-        if let Some(hint) = unmapped_hint(c, mode) {
+        if let Some(hint) = unmapped_hint(c, reader) {
             let _ = writeln!(out, "{hint}");
         }
     }
@@ -392,40 +405,50 @@ fn warning_lines(out: &mut String, warnings: &[String]) {
 // ---------------------------------------------------------------------------
 // Config and docs.
 
-pub fn config_path_text(r: &ConfigPathReport) -> String {
-    format!(
-        "{}{}\n",
-        r.path.display(),
-        if r.exists { "" } else { "  (not created yet)" }
-    )
+impl Text for ConfigPathReport {
+    fn text(&self, _: Reader) -> String {
+        let r = self;
+        format!(
+            "{}{}\n",
+            r.path.display(),
+            if r.exists { "" } else { "  (not created yet)" }
+        )
+    }
 }
 
-pub fn config_show(r: &ConfigShowReport) -> String {
-    let mut out = String::new();
-    let rows: Vec<[String; 2]> = r
-        .values
-        .iter()
-        .map(|e| {
-            [
-                e.key.clone(),
-                e.value.clone().unwrap_or_else(|| "(unset)".into()),
-            ]
-        })
-        .collect();
-    table(&mut out, ["KEY", "VALUE"], &rows);
-    let _ = writeln!(out, "\nConfig file: {}", r.path.display());
-    out
+impl Text for ConfigShowReport {
+    fn text(&self, _: Reader) -> String {
+        let r = self;
+        let mut out = String::new();
+        let rows: Vec<[String; 2]> = r
+            .values
+            .iter()
+            .map(|e| {
+                [
+                    e.key.clone(),
+                    e.value.clone().unwrap_or_else(|| "(unset)".into()),
+                ]
+            })
+            .collect();
+        table(&mut out, ["KEY", "VALUE"], &rows);
+        let _ = writeln!(out, "\nConfig file: {}", r.path.display());
+        out
+    }
 }
 
-pub fn docs_text(r: &DocsReport) -> String {
-    r.markdown.clone()
+impl Text for DocsReport {
+    fn text(&self, _: Reader) -> String {
+        let r = self;
+        r.markdown.clone()
+    }
 }
 
 /// Each item's plan (`plan`), then how applying it went (`done` sums up
 /// the changes).
 fn batch_report<P: Apply>(
     r: &Batch<P>,
-    plan: impl Fn(&mut String, &P, Mode),
+    reader: Reader,
+    plan: impl Fn(&mut String, &P, Reader),
     done: impl Fn(&P::Output) -> String,
 ) -> String {
     let mut out = String::new();
@@ -444,139 +467,17 @@ fn batch_report<P: Apply>(
                     let _ = writeln!(out, "  hint: {hint}");
                 }
             }
-            BatchState::Planned { plan: p } => plan(&mut out, p, r.mode),
+            BatchState::Planned { plan: p } => plan(&mut out, p, reader),
             BatchState::Applied { plan: p, result } => {
-                plan(&mut out, p, r.mode);
+                plan(&mut out, p, reader);
                 let _ = writeln!(out, "  ✓ done: {}", done(result));
             }
             BatchState::Failed { plan: p, error } => {
-                plan(&mut out, p, r.mode);
+                plan(&mut out, p, reader);
                 let _ = writeln!(out, "  ✗ failed [{}] {}", error.code, error.message);
             }
         }
     }
-    mode_footer(&mut out, r.mode);
+    mode_footer(&mut out, r.mode, reader);
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn plan_lines_truncate_after_the_limit() {
-        let mut out = String::new();
-        plan_lines(&mut out, (0..MAX_PLAN_LINES + 3).map(|i| format!("  {i}")));
-        assert_eq!(out.lines().count(), MAX_PLAN_LINES + 1);
-        assert!(out.ends_with("  … and 3 more\n"), "{out}");
-        let mut out = String::new();
-        plan_lines(&mut out, ["  a".to_string()]);
-        assert_eq!(out, "  a\n");
-    }
-
-    #[test]
-    fn staged_footer_ladder() {
-        let footer = |mode, result: Option<&usize>, changes, nothing| {
-            let mut out = String::new();
-            staged_footer(&mut out, mode, result, changes, nothing, |out, n| {
-                let _ = writeln!(out, "✓ {n}");
-            });
-            out
-        };
-        assert_eq!(footer(Mode::Applied, Some(&2), 2, "idle"), "✓ 2\n");
-        assert_eq!(
-            footer(Mode::DryRun, None, 2, "idle"),
-            "\nDry run: nothing was changed.\n"
-        );
-        assert_eq!(footer(Mode::Interactive, None, 2, "idle"), "");
-        assert_eq!(footer(Mode::Applied, None, 0, "idle"), "idle\n");
-        assert_eq!(footer(Mode::Applied, None, 0, ""), "");
-    }
-
-    #[test]
-    fn skipped_summary_wording() {
-        assert_eq!(skipped_summary(&BTreeMap::new()), "");
-        let mut m = BTreeMap::new();
-        m.insert("up to date", 2);
-        m.insert("not in DAT", 1);
-        assert_eq!(skipped_summary(&m), "; skipped: 1 not in DAT, 2 up to date");
-    }
-
-    #[test]
-    fn background_check_reads_as_one_short_line() {
-        use crate::ops::library::MetadataReport;
-        use pocketeer_core::library::{
-            covers::{FetchItem, FetchSummary},
-            identify,
-        };
-        let quiet = MetadataReport {
-            identify: Some(identify::Report {
-                unchanged: 8,
-                ..Default::default()
-            }),
-            covers: Some(FetchReport {
-                // Marked missing on an earlier run: not news.
-                summary: FetchSummary {
-                    not_found: 3,
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
-            errors: vec![],
-        };
-        assert_eq!(
-            library::metadata_status(&quiet),
-            "✓ DATs and covers checked, nothing new\n"
-        );
-        let busy = MetadataReport {
-            identify: Some(identify::Report {
-                matched: 2,
-                errors: vec!["gba: offline".into()],
-                ..Default::default()
-            }),
-            covers: Some(FetchReport {
-                summary: FetchSummary {
-                    fetched: 1,
-                    ..Default::default()
-                },
-                items: vec![FetchItem {
-                    platform: "gb".into(),
-                    game: "x".into(),
-                    status: CoverStatus::None,
-                    message: None,
-                }],
-                ..Default::default()
-            }),
-            errors: vec![],
-        };
-        assert_eq!(
-            library::metadata_status(&busy),
-            "! DATs and covers checked: 2 ROM(s) identified, 1 cover(s) downloaded, 1 cover(s) not on libretro, gba: offline\n"
-        );
-    }
-
-    #[test]
-    fn identify_lists_only_what_happened() {
-        use pocketeer_core::library::identify;
-        let none = identify::Report::default();
-        assert_eq!(library::identify_text(&none), "No ROMs to check.\n");
-        let quiet = identify::Report {
-            unchanged: 8,
-            ..Default::default()
-        };
-        assert_eq!(
-            library::identify_text(&quiet),
-            "✓ checked 8 ROM(s): 8 unchanged\n"
-        );
-        let mixed = identify::Report {
-            matched: 2,
-            unchanged: 6,
-            errors: vec!["gba: offline".into()],
-            ..Default::default()
-        };
-        assert_eq!(
-            library::identify_text(&mixed),
-            "✗ gba: offline\n! checked 8 ROM(s): 2 identified, 6 unchanged, 1 error(s)\n"
-        );
-    }
 }

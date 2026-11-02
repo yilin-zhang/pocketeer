@@ -36,12 +36,11 @@ use pocketeer_core::{
 use super::pending::{Pending, Preview, Request, text_lines};
 use crate::{
     ops::{
-        Mode,
         context::Context,
         cores as cores_cmd, library as library_cmd,
         memories::{self as memories_cmd, MemoryEntry},
     },
-    text,
+    text::{self, Reader, Text},
 };
 
 /// Everything the screens show, loaded in one go.
@@ -278,7 +277,7 @@ fn run(ctx: &Context, job: Job, progress: &mut dyn FnMut(Event)) -> Msg {
         Job::Identify => {
             let report = library_cmd::refresh_metadata(ctx, None, true, progress);
             Msg::Applied(Outcome {
-                lines: text_lines(&text::library::metadata_status(&report)),
+                lines: text_lines(&report.text(Reader::Tui)),
                 // Background work: problems go to the log, not a dialog.
                 failed: 0,
                 changed: report.changed(),
@@ -387,7 +386,7 @@ fn fetch_covers(
     let changed = report.summary.fetched > 0;
     let mut text = String::new();
     if !(quiet && !changed && report.summary.errors == 0) {
-        text::covers_summary(&mut text, Some(&report), Mode::Interactive);
+        text::covers_summary(&mut text, Some(&report), Reader::Tui);
     }
     Msg::Applied(Outcome {
         lines: text_lines(&text),

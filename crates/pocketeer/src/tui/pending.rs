@@ -36,7 +36,7 @@ use crate::{
         library::{self as library_cmd, ImportsRoms},
         memories as memories_cmd, saves as saves_cmd,
     },
-    text,
+    text::{self, Reader, Text},
 };
 
 /// Something to plan on the worker; the plan comes back as a [`Pending`]
@@ -277,29 +277,29 @@ impl Pending {
         match self {
             Pending::ImportCover(mut plan) => {
                 let result = plan.apply(ctx, progress);
-                shown(plan, result, |s| text::library::cover_import(&s))
+                shown(plan, result, |s| s.text(Reader::Tui))
             }
             Pending::CardRename(mut plan) => {
                 let result = plan.apply(ctx, progress);
-                shown(plan, result, |s| text::card::rename_report(&s))
+                shown(plan, result, |s| s.text(Reader::Tui))
             }
             Pending::Install { preps, .. } => {
                 let prepared = preps.into_iter().map(|p| (p.plan.core_id.clone(), Ok(p)));
                 let report = Batch::stage(ctx, Mode::Applied, prepared, progress);
-                applied(text::cores::install_report(&report), report.failed())
+                applied(report.text(Reader::Tui), report.failed())
             }
             Pending::Remove(plans) => {
                 let plans = plans.into_iter().map(|p| (p.core_id.clone(), Ok(p)));
                 let report = Batch::stage(ctx, Mode::Applied, plans, progress);
-                applied(text::cores::remove_report(&report), report.failed())
+                applied(report.text(Reader::Tui), report.failed())
             }
             Pending::Place(mut plan) => {
                 let result = plan.apply(ctx, progress);
-                shown(plan, result, |s| text::card::place_report(&s))
+                shown(plan, result, |s| s.text(Reader::Tui))
             }
             Pending::Clean(mut plan) => {
                 let result = plan.apply(ctx, progress);
-                shown(plan, result, |s| text::card::clean_report(&s))
+                shown(plan, result, |s| s.text(Reader::Tui))
             }
             Pending::DeleteCardRom { name, path } => {
                 let label = format!("delete {name}");
@@ -318,30 +318,30 @@ impl Pending {
             }
             Pending::Copy(mut plan) => {
                 let result = plan.apply(ctx, progress);
-                shown(plan, result, |s| text::card::copy_report(&s))
+                shown(plan, result, |s| s.text(Reader::Tui))
             }
             Pending::Saves(mut plan, games) => {
                 let result = plan.apply(ctx, progress);
                 shown(*plan, result, |s| {
-                    text::saves::saves_sync_by_game(&s, &games)
+                    text::saves::saves_sync_by_game(&s, &games, Reader::Tui)
                 })
             }
             Pending::Trash(mut plan) => {
                 let result = plan.apply(ctx, progress);
-                shown(*plan, result, |s| text::saves::saves_trash(&s))
+                shown(*plan, result, |s| s.text(Reader::Tui))
             }
             Pending::Rename(mut plan) => {
                 let result = plan.apply(ctx, progress);
-                shown(*plan, result, |s| text::library::library_rename(&s))
+                shown(*plan, result, |s| s.text(Reader::Tui))
             }
             Pending::Standardize(renames) => {
                 let plans = renames.into_iter().map(|p| (p.old_name.clone(), Ok(p)));
                 let report = Batch::stage(ctx, Mode::Applied, plans, progress);
-                applied(text::library::library_standardize(&report), report.failed())
+                applied(report.text(Reader::Tui), report.failed())
             }
             Pending::LibraryRemove(mut plan) => {
                 let result = plan.apply(ctx, progress);
-                shown(*plan, result, |s| text::library::library_remove(&s))
+                shown(*plan, result, |s| s.text(Reader::Tui))
             }
             Pending::Import(import) => match *import {
                 Import::Card(plan) => imported(ctx, plan, progress),
@@ -372,12 +372,12 @@ impl Pending {
                 } else {
                     "Import this game's cover?".into()
                 },
-                text_lines(&text::library::cover_import(&Staged::preview(plan.clone()))),
+                text_lines(&Staged::preview(plan.clone()).text(Reader::Tui)),
                 Pending::ImportCover(plan),
             ),
             Pending::CardRename(plan) => confirm(
                 "Rename this AP ROM and its saves?".into(),
-                text_lines(&text::card::rename_report(&Staged::preview(plan.clone()))),
+                text_lines(&Staged::preview(plan.clone()).text(Reader::Tui)),
                 Pending::CardRename(plan),
             ),
             Pending::Install { preps, errors } => {
@@ -417,7 +417,7 @@ impl Pending {
             ),
             Pending::Place(plan) => confirm(
                 format!("Move {} file(s) into place?", plan.actions.len()),
-                text_lines(&text::card::place_report(&Staged::preview(plan.clone()))),
+                text_lines(&Staged::preview(plan.clone()).text(Reader::Tui)),
                 Pending::Place(plan),
             ),
             Pending::Clean(plan) if plan.entries.is_empty() => {
@@ -429,7 +429,7 @@ impl Pending {
                     plan.entries.len(),
                     text::bytes(plan.bytes)
                 ),
-                text_lines(&text::card::clean_report(&Staged::preview(plan.clone()))),
+                text_lines(&Staged::preview(plan.clone()).text(Reader::Tui)),
                 Pending::Clean(plan),
             ),
             Pending::DeleteCardRom { name, path } => confirm(
@@ -438,7 +438,7 @@ impl Pending {
                 Pending::DeleteCardRom { name, path },
             ),
             Pending::Copy(plan) => {
-                let lines = text_lines(&text::card::copy_report(&Staged::preview(plan.clone())));
+                let lines = text_lines(&Staged::preview(plan.clone()).text(Reader::Tui));
                 match plan.changes() {
                     0 => info("Already on this card", lines),
                     n => confirm(
@@ -479,9 +479,7 @@ impl Pending {
             ),
             Pending::Rename(plan) => confirm(
                 format!("Rename to {}?", plan.new_name),
-                text_lines(&text::library::library_rename(&Staged::preview(
-                    (*plan).clone(),
-                ))),
+                text_lines(&Staged::preview((*plan).clone()).text(Reader::Tui)),
                 Pending::Rename(plan),
             ),
             Pending::Standardize(plans) if plans.is_empty() => info(
@@ -558,19 +556,20 @@ pub(super) fn text_lines(text: &str) -> Vec<String> {
     text.lines().map(str::to_owned).collect()
 }
 
-/// A plan and what applying it produced, rendered like the CLI would.
 /// Applies an import and says what happened the way `library import` does.
 fn imported<P: ImportsRoms>(ctx: &Context, mut plan: P, progress: &mut dyn FnMut(Event)) -> Msg {
     let result = plan.apply(ctx, progress);
     shown(plan, result, |staged| {
-        text::library::import_report(&library_cmd::Imported {
+        let imported = library_cmd::Imported {
             staged,
             covers: None,
             warnings: Vec::new(),
-        })
+        };
+        imported.text(Reader::Tui)
     })
 }
 
+/// A plan and what applying it produced, rendered like the CLI would.
 fn shown<P: Apply>(
     plan: P,
     result: Result<P::Output>,
@@ -579,7 +578,7 @@ fn shown<P: Apply>(
     match result {
         Ok(r) => {
             let staged = Staged {
-                mode: Mode::Interactive,
+                mode: Mode::Applied,
                 plan,
                 result: Some(r),
             };

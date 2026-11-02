@@ -55,19 +55,16 @@ fn main() -> ExitCode {
         Command::Docs { .. } | Command::Config(ConfigCommand::Path)
     );
     if needs_config && let Err(e) = ctx.config() {
-        return out.emit::<()>(Err(e), |_| String::new());
+        return out.fail(e);
     }
 
     match command {
-        Command::Status => out.emit(card::status(&ctx), text::card::status_text),
-        Command::Inventory(InventoryCommand::Refresh) => {
-            out.emit(card::inventory_refresh(&ctx), text::card::refresh_text)
-        }
+        Command::Status => out.emit(card::status(&ctx)),
+        Command::Inventory(InventoryCommand::Refresh) => out.emit(card::inventory_refresh(&ctx)),
         Command::Bios(cmd) => run_bios(&ctx, &out, cmd, &mut progress),
-        Command::Clean { system, apply } => out.emit_outcome(
-            card::clean(&ctx, system, apply.into(), &mut progress),
-            text::card::clean_report,
-        ),
+        Command::Clean { system, apply } => {
+            out.emit(card::clean(&ctx, system, apply.into(), &mut progress))
+        }
         Command::Cores(cmd) => run_cores(&ctx, &out, cmd, &mut progress),
         Command::Library(cmd) => run_library(&ctx, &out, cmd, &mut progress),
         Command::Covers(cmd) => run_covers(&ctx, &out, cmd, &mut progress),
@@ -75,7 +72,7 @@ fn main() -> ExitCode {
         Command::Saves(cmd) => run_saves(&ctx, &out, cmd, &mut progress),
         Command::Memories(cmd) => run_memories(&ctx, &out, cmd, &mut progress),
         Command::Config(cmd) => run_config(&ctx, &out, cmd),
-        Command::Docs { path } => out.emit(cli::docs(&path), text::docs_text),
+        Command::Docs { path } => out.emit(cli::docs(&path)),
     }
 }
 
@@ -86,14 +83,8 @@ fn run_bios(
     progress: &mut dyn FnMut(Event),
 ) -> ExitCode {
     match cmd {
-        BiosCommand::Check { ids, present } => out.emit(
-            card::bios_check(ctx, &ids, present),
-            text::card::bios_report,
-        ),
-        BiosCommand::Place { apply } => out.emit_outcome(
-            card::bios_place(ctx, apply.into(), progress),
-            text::card::place_report,
-        ),
+        BiosCommand::Check { ids, present } => out.emit(card::bios_check(ctx, &ids, present)),
+        BiosCommand::Place { apply } => out.emit(card::bios_place(ctx, apply.into(), progress)),
     }
 }
 
@@ -104,38 +95,38 @@ fn run_cores(
     progress: &mut dyn FnMut(Event),
 ) -> ExitCode {
     match cmd {
-        CoresCommand::List { outdated } => {
-            out.emit(cores::list(ctx, outdated), text::cores::core_list)
-        }
+        CoresCommand::List { outdated } => out.emit(cores::list(ctx, outdated)),
         CoresCommand::Search {
             query,
             platform,
             installed,
-        } => out.emit(
-            cores::search(ctx, query.as_deref(), platform.as_deref(), installed),
-            text::cores::search_text,
-        ),
-        CoresCommand::Info { id } => out.emit(cores::info(ctx, &id), text::cores::core_info),
+        } => out.emit(cores::search(
+            ctx,
+            query.as_deref(),
+            platform.as_deref(),
+            installed,
+        )),
+        CoresCommand::Info { id } => out.emit(cores::info(ctx, &id)),
         CoresCommand::Install(args) => {
             let mode = args.apply.into();
-            out.emit_outcome(
-                cores::install(ctx, &args.into(), mode, progress),
-                text::cores::install_report,
-            )
+            out.emit(cores::install(ctx, &args.into(), mode, progress))
         }
         CoresCommand::Update {
             ids,
             all,
             keep_platforms,
             apply,
-        } => out.emit_outcome(
-            cores::update(ctx, &ids, all, keep_platforms, apply.into(), progress),
-            text::cores::install_report,
-        ),
-        CoresCommand::Remove { ids, purge, apply } => out.emit_outcome(
-            cores::remove(ctx, &ids, purge, apply.into(), progress),
-            text::cores::remove_report,
-        ),
+        } => out.emit(cores::update(
+            ctx,
+            &ids,
+            all,
+            keep_platforms,
+            apply.into(),
+            progress,
+        )),
+        CoresCommand::Remove { ids, purge, apply } => {
+            out.emit(cores::remove(ctx, &ids, purge, apply.into(), progress))
+        }
     }
 }
 
@@ -146,48 +137,49 @@ fn run_library(
     progress: &mut dyn FnMut(Event),
 ) -> ExitCode {
     match cmd {
-        LibraryCommand::Identify { platform } => out.emit_outcome(
-            library::identify(ctx, platform.as_ref().map(std::slice::from_ref), progress),
-            text::library::identify_text,
-        ),
-        LibraryCommand::Init => out.emit(library::init(ctx), text::library::library_init),
-        LibraryCommand::Status => out.emit(library::status(ctx), text::library::library_status),
+        LibraryCommand::Identify { platform } => out.emit(library::identify(
+            ctx,
+            platform.as_ref().map(std::slice::from_ref),
+            progress,
+        )),
+        LibraryCommand::Init => out.emit(library::init(ctx)),
+        LibraryCommand::Status => out.emit(library::status(ctx)),
         LibraryCommand::Import(args) => {
             let req = library::ImportRequest {
                 source: args.dir,
                 platform: args.platform,
                 settings: args.flags.into(),
             };
-            out.emit_outcome(
-                library::import(ctx, &req, args.apply.into(), progress),
-                text::library::import_report,
-            )
+            out.emit(library::import(ctx, &req, args.apply.into(), progress))
         }
-        LibraryCommand::List { platform, query } => out.emit(
-            library::list(ctx, platform.as_deref(), query.as_deref()),
-            text::library::library_list,
-        ),
+        LibraryCommand::List { platform, query } => {
+            out.emit(library::list(ctx, platform.as_deref(), query.as_deref()))
+        }
         LibraryCommand::Rename {
             rom,
             new_name,
             platform,
             apply,
-        } => out.emit_outcome(
-            library::rename(ctx, platform.as_deref(), &rom, &new_name, apply.into()),
-            text::library::library_rename,
-        ),
+        } => out.emit(library::rename(
+            ctx,
+            platform.as_deref(),
+            &rom,
+            &new_name,
+            apply.into(),
+        )),
         LibraryCommand::Remove {
             roms,
             platform,
             apply,
-        } => out.emit_outcome(
-            library::remove(ctx, platform.as_deref(), &roms, apply.into()),
-            text::library::library_remove,
-        ),
-        LibraryCommand::Standardize { platform, apply } => out.emit_outcome(
-            library::standardize(ctx, platform.as_deref(), apply.into()),
-            text::library::library_standardize,
-        ),
+        } => out.emit(library::remove(
+            ctx,
+            platform.as_deref(),
+            &roms,
+            apply.into(),
+        )),
+        LibraryCommand::Standardize { platform, apply } => {
+            out.emit(library::standardize(ctx, platform.as_deref(), apply.into()))
+        }
     }
 }
 
@@ -203,28 +195,25 @@ fn run_covers(
             image,
             platform,
             apply,
-        } => out.emit_outcome(
-            library::import_cover(ctx, platform.as_deref(), &rom, &image, apply.into()),
-            text::library::cover_import,
-        ),
+        } => out.emit(library::import_cover(
+            ctx,
+            platform.as_deref(),
+            &rom,
+            &image,
+            apply.into(),
+        )),
         CoversCommand::Fetch {
             platform,
             retry,
             libretro_system,
-        } => out.emit(
-            library::covers_fetch(
-                ctx,
-                platform.as_ref().map(std::slice::from_ref),
-                retry,
-                libretro_system.as_deref(),
-                progress,
-            ),
-            text::library::covers_fetch_text,
-        ),
-        CoversCommand::Status => out.emit(
-            library::covers_status(ctx),
-            text::library::covers_status_text,
-        ),
+        } => out.emit(library::covers_fetch(
+            ctx,
+            platform.as_ref().map(std::slice::from_ref),
+            retry,
+            libretro_system.as_deref(),
+            progress,
+        )),
+        CoversCommand::Status => out.emit(library::covers_status(ctx)),
     }
 }
 
@@ -242,7 +231,7 @@ fn run_card(
         } => {
             let result = card::plan_rename(ctx, &path, &new_name)
                 .and_then(|plan| ops::stage(ctx, apply.into(), plan, progress));
-            out.emit_outcome(result, text::card::rename_report)
+            out.emit(result)
         }
         CardCommand::Copy {
             roms,
@@ -251,21 +240,14 @@ fn run_card(
         } => {
             let result = card::plan_copy(ctx, platform.as_deref(), &roms, progress)
                 .and_then(|plan| ops::stage(ctx, apply.into(), plan, progress));
-            out.emit_outcome(result, text::card::copy_report)
+            out.emit(result)
         }
         CardCommand::Import(args) => {
             let mode = args.apply.into();
-            out.emit_outcome(
-                card::import(ctx, &args.into(), mode, progress),
-                text::library::import_report,
-            )
+            out.emit(card::import(ctx, &args.into(), mode, progress))
         }
-        CardCommand::List => {
-            out.emit_outcome(card::roms(ctx, None, progress), text::card::roms_text)
-        }
-        CardCommand::Check { full } => {
-            out.emit_outcome(card::roms(ctx, Some(full), progress), text::card::roms_text)
-        }
+        CardCommand::List => out.emit(card::roms(ctx, None, progress)),
+        CardCommand::Check { full } => out.emit(card::roms(ctx, Some(full), progress)),
     }
 }
 
@@ -280,28 +262,20 @@ fn run_saves(
             no_states,
             conflicts,
             apply,
-        } => out.emit_outcome(
-            saves::backup(
-                ctx,
-                if no_states { Scope::Saves } else { Scope::All },
-                conflicts.map(Into::into),
-                apply.into(),
-                progress,
-            ),
-            text::saves::saves_sync,
-        ),
+        } => out.emit(saves::backup(
+            ctx,
+            if no_states { Scope::Saves } else { Scope::All },
+            conflicts.map(Into::into),
+            apply.into(),
+            progress,
+        )),
         SavesCommand::Restore {
             path,
             version,
             apply,
-        } => out.emit_outcome(
-            saves::restore(ctx, &path, version, apply.into(), progress),
-            text::saves::saves_sync,
-        ),
-        SavesCommand::List => out.emit(saves::list(ctx), text::saves::saves_list),
-        SavesCommand::Versions { path } => {
-            out.emit(saves::versions(ctx, &path), text::saves::saves_versions)
-        }
+        } => out.emit(saves::restore(ctx, &path, version, apply.into(), progress)),
+        SavesCommand::List => out.emit(saves::list(ctx)),
+        SavesCommand::Versions { path } => out.emit(saves::versions(ctx, &path)),
         SavesCommand::Trash {
             path,
             card,
@@ -315,10 +289,7 @@ fn run_saves(
                 (_, None, true) => TrashTarget::Backup,
                 _ => TrashTarget::Library,
             };
-            out.emit_outcome(
-                saves::trash(ctx, &path, target, apply.into()),
-                text::saves::saves_trash,
-            )
+            out.emit(saves::trash(ctx, &path, target, apply.into()))
         }
     }
 }
@@ -330,31 +301,29 @@ fn run_memories(
     progress: &mut dyn FnMut(Event),
 ) -> ExitCode {
     match cmd {
-        MemoriesCommand::List => out.emit(memories::list(ctx), text::memories::memories_list),
-        MemoriesCommand::Backup { conflicts, apply } => out.emit_outcome(
-            memories::backup(ctx, conflicts.map(Into::into), apply.into(), progress),
-            text::saves::saves_sync,
-        ),
-        MemoriesCommand::Restore { path, apply } => out.emit_outcome(
-            memories::restore(ctx, &path, apply.into(), progress),
-            text::saves::saves_sync,
-        ),
-        MemoriesCommand::Trash { path, card, apply } => out.emit_outcome(
-            memories::trash(ctx, &path, card, apply.into()),
-            text::saves::saves_trash,
-        ),
+        MemoriesCommand::List => out.emit(memories::list(ctx)),
+        MemoriesCommand::Backup { conflicts, apply } => out.emit(memories::backup(
+            ctx,
+            conflicts.map(Into::into),
+            apply.into(),
+            progress,
+        )),
+        MemoriesCommand::Restore { path, apply } => {
+            out.emit(memories::restore(ctx, &path, apply.into(), progress))
+        }
+        MemoriesCommand::Trash { path, card, apply } => {
+            out.emit(memories::trash(ctx, &path, card, apply.into()))
+        }
     }
 }
 
 fn run_config(ctx: &Context, out: &Output, cmd: ConfigCommand) -> ExitCode {
     use ops::context::{config_get, config_path, config_set};
     match cmd {
-        ConfigCommand::Path => out.emit(config_path(ctx), text::config_path_text),
-        ConfigCommand::Get { key } => out.emit(config_get(ctx, key.as_deref()), text::config_show),
-        ConfigCommand::Set { key, value } => {
-            out.emit(config_set(ctx, &key, Some(&value)), text::config_show)
-        }
-        ConfigCommand::Unset { key } => out.emit(config_set(ctx, &key, None), text::config_show),
+        ConfigCommand::Path => out.emit(config_path(ctx)),
+        ConfigCommand::Get { key } => out.emit(config_get(ctx, key.as_deref())),
+        ConfigCommand::Set { key, value } => out.emit(config_set(ctx, &key, Some(&value))),
+        ConfigCommand::Unset { key } => out.emit(config_set(ctx, &key, None)),
     }
 }
 
