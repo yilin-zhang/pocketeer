@@ -389,8 +389,8 @@ fn md5_of(path: &Path) -> Result<String> {
 /// What `bios place` would do: move root files into the folders that want them.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PlacePlan {
-    pub actions: Vec<Action>,
-    pub summary: install::plan::Summary,
+    #[serde(flatten)]
+    pub actions: install::plan::Actions,
     /// Zipped root files we won't unpack automatically.
     pub zipped: Vec<RequiredFile>,
     #[serde(skip)]
@@ -432,8 +432,7 @@ pub fn plan_place(pocket: &Pocket, report: &BiosReport) -> Result<PlacePlan> {
         }
     }
     Ok(PlacePlan {
-        summary: install::plan::summarize(&actions),
-        actions,
+        actions: actions.into(),
         zipped,
         identity: crate::card::CardIdentity::read(pocket)?,
     })

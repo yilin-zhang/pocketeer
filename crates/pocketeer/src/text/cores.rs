@@ -238,7 +238,7 @@ fn install_plan(out: &mut String, plan: &InstallPlan, reader: Reader) {
         );
         return;
     }
-    let s = &plan.summary;
+    let s = plan.actions.summary();
     let _ = writeln!(
         out,
         "  {} file(s), {} ({} new, {} replaced){}",
@@ -287,7 +287,7 @@ fn remove_plan(out: &mut String, plan: &UninstallPlan) {
 
 #[cfg(test)]
 mod tests {
-    use pocketeer_core::card::install::{InstallPlan, plan::Summary, zipfile::ZipSource};
+    use pocketeer_core::card::install::{InstallPlan, zipfile::ZipSource};
 
     use super::*;
 
@@ -300,8 +300,7 @@ mod tests {
             requires_license: false,
             also_installs: vec![],
             replaces: vec![],
-            summary: Summary::default(),
-            actions: vec![],
+            actions: Vec::new().into(),
         }
     }
 

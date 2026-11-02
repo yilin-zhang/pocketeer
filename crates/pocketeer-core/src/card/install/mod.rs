@@ -154,8 +154,8 @@ pub struct UninstallPlan {
     pub core_id: String,
     pub installed_version: String,
     pub purge: bool,
-    pub actions: Vec<Action>,
-    pub summary: plan::Summary,
+    #[serde(flatten)]
+    pub actions: plan::Actions,
     #[serde(skip)]
     identity: CardIdentity,
 }
@@ -196,8 +196,7 @@ pub fn plan_remove(
         core_id: core.id.clone(),
         installed_version: core.version.clone(),
         purge,
-        summary: plan::summarize(&actions),
-        actions,
+        actions: actions.into(),
         identity: CardIdentity::read(pocket)?,
     })
 }

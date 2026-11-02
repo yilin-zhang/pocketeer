@@ -92,6 +92,53 @@ pub enum SkipReason {
     ExistingDirectory,
 }
 
+/// The changes one card plan makes, with their counts. Built once from
+/// the list, so the counts can't drift from it; read it as a slice.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct Actions {
+    actions: Vec<Action>,
+    summary: Summary,
+}
+
+impl From<Vec<Action>> for Actions {
+    fn from(actions: Vec<Action>) -> Self {
+        let mut s = Summary::default();
+        for a in &actions {
+            match a {
+                Action::Install {
+                    overwrite, size, ..
+                } => {
+                    s.install += 1;
+                    if *overwrite {
+                        s.overwrite += 1;
+                    }
+                    s.bytes += size;
+                }
+                Action::Remove { .. } => s.remove += 1,
+                Action::MoveTree { .. } | Action::MoveFile { .. } => s.move_tree += 1,
+                Action::Skip { .. } => s.skip += 1,
+            }
+        }
+        Actions {
+            actions,
+            summary: s,
+        }
+    }
+}
+
+impl std::ops::Deref for Actions {
+    type Target = [Action];
+    fn deref(&self) -> &[Action] {
+        &self.actions
+    }
+}
+
+impl Actions {
+    pub fn summary(&self) -> &Summary {
+        &self.summary
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct Summary {
     pub install: usize,
@@ -116,8 +163,8 @@ pub struct InstallPlan {
     /// Older cores this install supersedes and removes.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub replaces: Vec<String>,
-    pub summary: Summary,
-    pub actions: Vec<Action>,
+    #[serde(flatten)]
+    pub actions: Actions,
 }
 
 /// One change: the core, installed or updated. Zero when it is already at
@@ -192,8 +239,7 @@ pub fn plan_install(
         requires_license: opts.requires_license,
         also_installs,
         replaces: Vec::new(),
-        summary: Summary::default(),
-        actions: Vec::new(),
+        actions: Actions::default(),
     };
 
     if !opts.force
@@ -204,12 +250,13 @@ pub fn plan_install(
     }
 
     let root = pocket.root();
+    let mut actions = Vec::new();
     let mut dests: BTreeSet<PathBuf> = BTreeSet::new();
 
     // 1. Files from the zip.
     for entry in zip.entries.clone() {
         if is_junk(&entry.path) {
-            plan.actions.push(Action::Skip {
+            actions.push(Action::Skip {
                 zip_path: entry.name,
                 reason: SkipReason::Junk,
             });
@@ -218,7 +265,7 @@ pub fn plan_install(
         let dest = redirect_platform_json(root, &entry.path);
         let full = root.join(&dest);
         if full.is_dir() {
-            plan.actions.push(Action::Skip {
+            actions.push(Action::Skip {
                 zip_path: entry.name,
                 reason: SkipReason::ExistingDirectory,
             });
@@ -226,14 +273,14 @@ pub fn plan_install(
         }
         let exists = full.exists();
         if opts.keep_platforms && exists && dest.starts_with(card::PLATFORMS_DIR) {
-            plan.actions.push(Action::Skip {
+            actions.push(Action::Skip {
                 zip_path: entry.name,
                 reason: SkipReason::KeepPlatformData,
             });
             continue;
         }
         dests.insert(dest.clone());
-        plan.actions.push(Action::Install {
+        actions.push(Action::Install {
             zip_path: entry.name,
             dest,
             overwrite: exists,
@@ -247,7 +294,7 @@ pub fn plan_install(
         for stale in find_moved_copies(root, dest) {
             if !dests.contains(&stale) {
                 removals.insert(stale.clone());
-                plan.actions.push(Action::Remove {
+                actions.push(Action::Remove {
                     path: stale,
                     reason: RemoveReason::MovedFile {
                         replaced_by: dest.clone(),
@@ -272,7 +319,7 @@ pub fn plan_install(
             plan.replaces.push(prev_id.clone());
             for (from, to) in replacement_moves(&prev, &core_id, &new_platform) {
                 if from != to && root.join(&from).exists() {
-                    plan.actions.push(Action::MoveTree {
+                    actions.push(Action::MoveTree {
                         from,
                         to,
                         reason: MoveReason::ReplacedCore {
@@ -284,7 +331,7 @@ pub fn plan_install(
             }
             let old_core_dir = card::core_rel(&prev_id);
             if !removals.contains(&old_core_dir) {
-                plan.actions.push(Action::Remove {
+                actions.push(Action::Remove {
                     path: old_core_dir,
                     reason: RemoveReason::ReplacedCore {
                         by: core_id.clone(),
@@ -294,7 +341,7 @@ pub fn plan_install(
         }
     }
 
-    plan.summary = summarize(&plan.actions);
+    plan.actions = actions.into();
     Ok(plan)
 }
 
@@ -370,27 +417,6 @@ fn replacement_moves(
     ]
 }
 
-pub fn summarize(actions: &[Action]) -> Summary {
-    let mut s = Summary::default();
-    for a in actions {
-        match a {
-            Action::Install {
-                overwrite, size, ..
-            } => {
-                s.install += 1;
-                if *overwrite {
-                    s.overwrite += 1;
-                }
-                s.bytes += size;
-            }
-            Action::Remove { .. } => s.remove += 1,
-            Action::MoveTree { .. } | Action::MoveFile { .. } => s.move_tree += 1,
-            Action::Skip { .. } => s.skip += 1,
-        }
-    }
-    s
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,10 +457,13 @@ mod tests {
         assert_eq!(p.version, "1.3.0");
         assert_eq!(p.changes(), 1);
         assert_eq!(p.installed_version, None);
-        assert_eq!(p.summary.install, 4);
-        assert_eq!(p.summary.overwrite, 0);
-        assert_eq!(p.summary.skip, 2);
-        assert_eq!(p.summary.bytes, CORE_JSON.len() as u64 + 4 + 2 + 3);
+        assert_eq!(p.actions.summary().install, 4);
+        assert_eq!(p.actions.summary().overwrite, 0);
+        assert_eq!(p.actions.summary().skip, 2);
+        assert_eq!(
+            p.actions.summary().bytes,
+            CORE_JSON.len() as u64 + 4 + 2 + 3
+        );
         assert!(
             p.actions
                 .iter()
@@ -460,7 +489,7 @@ mod tests {
             },
         );
         assert_eq!(p.changes(), 1);
-        assert_eq!(p.summary.overwrite, 1);
+        assert_eq!(p.actions.summary().overwrite, 1);
     }
 
     #[test]
@@ -601,7 +630,7 @@ mod tests {
             a,
             Action::Remove { path, reason: RemoveReason::ReplacedCore { .. } } if path == Path::new("Cores/someone.Old")
         )));
-        assert_eq!(p.summary.move_tree, 4);
+        assert_eq!(p.actions.summary().move_tree, 4);
     }
 
     #[test]
