@@ -142,41 +142,61 @@ impl From<&Release> for LatestRelease {
     }
 }
 
-/// An installed core together with what the inventory says about it.
+/// A core as pocketeer sees it: on the card, in the inventory, or both.
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct CoreReport {
-    #[serde(flatten)]
-    pub core: InstalledCore,
-    /// `false` when the inventory doesn't list this core (hand-installed or renamed).
+pub struct CoreView {
+    pub id: String,
+    pub platform_ids: Vec<String>,
+    /// What is on the card, when it's installed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed: Option<InstalledCore>,
+    /// `false` when the inventory doesn't list it (hand-installed or renamed).
     pub in_inventory: bool,
+    /// The inventory's newest release, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest: Option<LatestRelease>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_url: Option<String>,
+    /// Installed, and the latest release is newer.
     pub update_available: bool,
+}
+
+impl CoreView {
+    /// `installed` and `entry` describe the same core; at least one is there.
+    fn new(installed: Option<InstalledCore>, entry: Option<&InventoryCore>) -> Self {
+        let release = entry.and_then(InventoryCore::latest);
+        let latest = release.map(LatestRelease::from);
+        let update_available = match (&installed, &latest) {
+            (Some(i), Some(l)) => update_available(&i.version, &l.version),
+            _ => false,
+        };
+        let (id, platform_ids) = match (&installed, entry) {
+            (Some(i), _) => (i.id.clone(), i.platform_ids.clone()),
+            (None, Some(e)) => (
+                e.id.clone(),
+                release
+                    .map(|r| r.core.metadata.platform_ids.clone())
+                    .unwrap_or_default(),
+            ),
+            (None, None) => unreachable!("a core view of nothing"),
+        };
+        CoreView {
+            id,
+            platform_ids,
+            installed,
+            in_inventory: entry.is_some(),
+            latest,
+            repo_url: entry.map(InventoryCore::repo_url),
+            update_available,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CoreListReport {
-    pub cores: Vec<CoreReport>,
+    pub cores: Vec<CoreView>,
     pub broken: Vec<BrokenCore>,
     pub inventory: InventoryStatus,
-}
-
-impl CoreReport {
-    pub fn new(core: InstalledCore, inventory: Option<&Inventory>) -> Self {
-        let entry = inventory.and_then(|inv| inv.get(&core.id));
-        let latest = entry
-            .and_then(InventoryCore::latest)
-            .map(LatestRelease::from);
-        let update = latest
-            .as_ref()
-            .is_some_and(|l| update_available(&core.version, &l.version));
-        CoreReport {
-            in_inventory: entry.is_some(),
-            latest,
-            update_available: update,
-            core,
-        }
-    }
 }
 
 /// Installed cores annotated with inventory data (when available).
@@ -192,30 +212,15 @@ impl CoreList {
             cores: self
                 .cores
                 .into_iter()
-                .map(|c| CoreReport::new(c, inv))
+                .map(|c| {
+                    let entry = inv.and_then(|inv| inv.get(&c.id));
+                    CoreView::new(Some(c), entry)
+                })
                 .collect(),
             broken: self.broken,
             inventory: inventory.status(),
         }
     }
-}
-
-/// One row of `cores search`.
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct SearchHit {
-    pub id: String,
-    pub author: String,
-    pub shortname: String,
-    pub platform_ids: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub date_release: Option<String>,
-    pub requires_license: bool,
-    pub repo_url: String,
-    pub installed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub installed_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -230,11 +235,8 @@ pub struct SearchFilter<'a> {
     pub include_unreleased: bool,
 }
 
-pub fn search(
-    inventory: &Inventory,
-    installed: &CoreList,
-    filter: &SearchFilter,
-) -> Vec<SearchHit> {
+/// Inventory cores matching `filter`, with what is installed of them.
+pub fn search(inventory: &Inventory, installed: &CoreList, filter: &SearchFilter) -> Vec<CoreView> {
     let query = filter.query.map(str::to_ascii_lowercase);
     inventory
         .cores
@@ -261,18 +263,7 @@ pub fn search(
             if local.is_some() && !filter.include_installed {
                 return None;
             }
-            Some(SearchHit {
-                id: c.id.clone(),
-                author: c.author().to_string(),
-                shortname: c.shortname().to_string(),
-                platform_ids,
-                version: latest.map(|r| r.core.metadata.version.clone()),
-                date_release: latest.and_then(|r| r.core.metadata.date_release.clone()),
-                requires_license: latest.is_some_and(|r| r.requires_license),
-                repo_url: c.repo_url(),
-                installed: local.is_some(),
-                installed_version: local.map(|l| l.version.clone()),
-            })
+            Some(CoreView::new(local.cloned(), Some(c)))
         })
         .collect()
 }
@@ -280,14 +271,11 @@ pub fn search(
 /// Everything known about one core id.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CoreInfo {
-    pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub installed: Option<InstalledCore>,
+    #[serde(flatten)]
+    pub core: CoreView,
+    /// The inventory's whole entry, every release included.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inventory: Option<InventoryCore>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repo_url: Option<String>,
-    pub update_available: bool,
     pub inventory_status: InventoryStatus,
 }
 
@@ -304,24 +292,12 @@ pub fn info(pocket: &Pocket, inventory: &InventoryLoad, id: &str) -> Result<Core
                 .or_else(|| inv.get_ci(id))
         })
         .cloned();
-
-    let canonical = installed
-        .as_ref()
-        .map(|i| i.id.clone())
-        .or_else(|| entry.as_ref().map(|e| e.id.clone()))
-        .ok_or_else(|| Error::CoreNotFound { id: id.to_string() })?;
-
-    let update = match (&installed, entry.as_ref().and_then(InventoryCore::latest)) {
-        (Some(i), Some(l)) => update_available(&i.version, &l.core.metadata.version),
-        _ => false,
-    };
-
+    if installed.is_none() && entry.is_none() {
+        return Err(Error::CoreNotFound { id: id.to_string() });
+    }
     Ok(CoreInfo {
-        id: canonical,
-        repo_url: entry.as_ref().map(InventoryCore::repo_url),
-        installed,
+        core: CoreView::new(installed, entry.as_ref()),
         inventory: entry,
-        update_available: update,
         inventory_status: inventory.status(),
     })
 }

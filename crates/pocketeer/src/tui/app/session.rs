@@ -210,7 +210,7 @@ impl Session {
             .unwrap_or_default();
         if let Some(s) = self.card() {
             for c in &s.cores.cores {
-                ids.extend(c.core.platform_ids.iter().cloned());
+                ids.extend(c.platform_ids.iter().cloned());
             }
         }
         ids.sort();

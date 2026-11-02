@@ -6,17 +6,19 @@ expression: json_of(&out)
   "data": {
     "hits": [
       {
-        "author": "jotego",
-        "date_release": "2024-01-01",
         "id": "jotego.jtbeta",
-        "installed": false,
+        "in_inventory": true,
+        "latest": {
+          "date_release": "2024-01-01",
+          "download_url": "https://github.com/jotego/jtbin/releases/download/beta/jotego.jtbeta.zip",
+          "requires_license": true,
+          "version": "20240101"
+        },
         "platform_ids": [
           "jtbeta"
         ],
         "repo_url": "https://github.com/jotego/jtbin",
-        "requires_license": true,
-        "shortname": "jtbeta",
-        "version": "20240101"
+        "update_available": false
       }
     ],
     "inventory": {

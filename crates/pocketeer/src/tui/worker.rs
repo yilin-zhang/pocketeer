@@ -116,7 +116,12 @@ impl CardSnapshot {
 
     pub fn installed(&self) -> CoreList {
         CoreList {
-            cores: self.cores.cores.iter().map(|c| c.core.clone()).collect(),
+            cores: self
+                .cores
+                .cores
+                .iter()
+                .filter_map(|c| c.installed.clone())
+                .collect(),
             broken: Vec::new(),
         }
     }

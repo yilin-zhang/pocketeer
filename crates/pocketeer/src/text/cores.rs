@@ -35,9 +35,10 @@ impl Text for CoreListReport {
                         }
                         (None, false) => ("?".into(), ""),
                     };
+                    let installed = c.installed.as_ref().map(|i| i.version.clone());
                     [
-                        c.core.id.clone(),
-                        c.core.version.clone(),
+                        c.id.clone(),
+                        installed.unwrap_or_default(),
                         latest,
                         state.into(),
                     ]
@@ -70,18 +71,16 @@ impl Text for SearchReport {
                 .iter()
                 .map(|h| {
                     let mut notes = Vec::new();
-                    if h.installed {
-                        notes.push(format!(
-                            "installed {}",
-                            h.installed_version.as_deref().unwrap_or("?")
-                        ));
+                    if let Some(i) = &h.installed {
+                        notes.push(format!("installed {}", i.version));
                     }
-                    if h.requires_license {
+                    if h.latest.as_ref().is_some_and(|l| l.requires_license) {
                         notes.push("needs license".to_string());
                     }
+                    let version = h.latest.as_ref().map(|l| l.version.clone());
                     [
                         h.id.clone(),
-                        h.version.clone().unwrap_or_else(|| "-".into()),
+                        version.unwrap_or_else(|| "-".into()),
                         h.platform_ids.join(", "),
                         notes.join(", "),
                     ]
@@ -98,8 +97,8 @@ impl Text for CoreInfo {
     fn text(&self, _: Reader) -> String {
         let info = self;
         let mut out = String::new();
-        let _ = writeln!(out, "{}", info.id);
-        match &info.installed {
+        let _ = writeln!(out, "{}", info.core.id);
+        match &info.core.installed {
             Some(i) => {
                 let _ = writeln!(out, "  Installed   {}  ({})", i.version, i.path.display());
                 let _ = writeln!(out, "  Platforms   {}", i.platform_ids.join(", "));
@@ -113,12 +112,12 @@ impl Text for CoreInfo {
         }
         match &info.inventory {
             Some(inv) => {
-                if let Some(url) = &info.repo_url {
+                if let Some(url) = &info.core.repo_url {
                     let _ = writeln!(out, "  Repository  {url}");
                 }
                 match inv.latest() {
                     Some(latest) => {
-                        let flag = if info.update_available {
+                        let flag = if info.core.update_available {
                             "  ← update available"
                         } else {
                             ""

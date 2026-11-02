@@ -25,7 +25,7 @@ fn cores_list_json_with_inventory() {
         String::from_utf8_lossy(&out.stderr)
     );
     insta::assert_json_snapshot!(json_of(&out), {
-        ".data.cores[].path" => "[path]",
+        ".data.cores[].installed.path" => "[path]",
         ".data.broken[].path" => "[path]",
         ".data.broken[].error.message" => "[message]",
         ".data.broken[].error.details.path" => "[path]",
@@ -144,9 +144,11 @@ fn info_json_and_case_insensitive() {
     let h = Harness::new().with_card().with_inventory();
     let out = h.raw(&["cores", "info", "SPIRITUALIZED.gba", "--json"]);
     assert!(out.status.success());
+    // The inventory entry is the upstream record passed through as is.
     insta::assert_json_snapshot!(json_of(&out), {
         ".data.installed.path" => "[path]",
         ".data.inventory_status.age_secs" => "[age]",
+        ".data.inventory" => "[upstream record]",
     });
 }
 

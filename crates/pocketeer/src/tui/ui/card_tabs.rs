@@ -11,18 +11,24 @@ pub(super) fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
     let (filter_row, table_area, right) = split_tab(app, area);
     let snap = app.session().card().expect("checked above");
     let inventory_known = snap.inventory.is_some();
-    let rows: Vec<Row> = app
+    // Every column but the id is as wide as its widest cell, and the id
+    // takes the rest. Platform lists and a few odd version strings run long,
+    // so those two columns stop at 12 (the details pane has them in full).
+    let cells: Vec<[(String, Style); 6]> = app
         .cores()
         .pane()
         .rows()
         .iter()
         .map(|r| {
             let installed = match &r.installed {
-                Some(v) => Cell::from(v.clone()).style(Palette::Good.style()),
-                None => Cell::from(""),
+                Some(i) => (i.version.clone(), Palette::Good.style()),
+                None => (String::new(), Style::new()),
             };
-            let (status, style) = match (&r.installed, &r.latest) {
-                (Some(_), Some(l)) if r.update => (format!("→ {l}"), Palette::Warn.style()),
+            let latest = r.latest.as_ref().map(|l| &l.version);
+            let status = match (&r.installed, latest) {
+                (Some(_), Some(l)) if r.update_available => {
+                    (format!("→ {l}"), Palette::Warn.style())
+                }
                 (Some(_), Some(_)) => ("✓".to_string(), Palette::Good.style()),
                 (Some(_), None) if r.in_inventory => ("no release".to_string(), Style::new().dim()),
                 (Some(_), None) if inventory_known => {
@@ -32,25 +38,41 @@ pub(super) fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
                 (None, Some(l)) => (l.clone(), Style::new()),
                 (None, None) => ("-".to_string(), Style::new().dim()),
             };
-            let files = if r.missing_files > 0 {
-                Cell::from(format!("{} missing", r.missing_files)).style(Palette::Bad.style())
-            } else {
-                Cell::from("")
+            let missing = snap.missing_files(&r.id).len();
+            let files = match missing {
+                0 => (String::new(), Style::new()),
+                n => (format!("{n} missing"), Palette::Bad.style()),
             };
-            let license = if r.license {
-                Cell::from("license").style(Palette::Warn.style())
-            } else {
-                Cell::from("")
+            let license = match r.latest.as_ref().is_some_and(|l| l.requires_license) {
+                true => ("license".to_string(), Palette::Warn.style()),
+                false => (String::new(), Style::new()),
             };
-            Row::new(vec![
-                Cell::from(r.id.clone()),
-                Cell::from(r.platforms.join(", ")).style(Style::new().dim()),
+            [
+                (r.id.clone(), Style::new()),
+                (r.platform_ids.join(", "), Style::new().dim()),
                 installed,
-                Cell::from(status).style(style),
+                status,
                 files,
                 license,
-            ])
+            ]
         })
+        .collect();
+    let header = ["CORE", "PLATFORMS", "INSTALLED", "LATEST", "BIOS", ""];
+    let width = |col: usize| {
+        let widest = cells.iter().map(|c| c[col].0.chars().count()).max();
+        widest.unwrap_or(0).max(header[col].len()) as u16
+    };
+    let widths = [
+        Constraint::Fill(1),
+        Constraint::Length(width(1).min(12)),
+        Constraint::Length(width(2)),
+        Constraint::Length(width(3).min(12)),
+        Constraint::Length(width(4)),
+        Constraint::Length(width(5)),
+    ];
+    let rows: Vec<Row> = cells
+        .into_iter()
+        .map(|c| Row::new(c.map(|(text, style)| Cell::from(text).style(style))))
         .collect();
     let title = format!(
         "CORES  ·  {}",
@@ -59,20 +81,7 @@ pub(super) fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
             .map(|i| format!("{} in inventory", i.cores.len()))
             .unwrap_or_else(|| "inventory offline".into())
     );
-    let table = styled_table(
-        rows,
-        [
-            Constraint::Min(24),
-            Constraint::Length(14),
-            Constraint::Length(10),
-            Constraint::Length(16),
-            Constraint::Length(10),
-            Constraint::Length(8),
-        ],
-        ["CORE", "PLATFORMS", "INSTALLED", "LATEST", "BIOS", ""],
-        title,
-        table_area.width,
-    );
+    let table = styled_table(rows, widths, header, title, table_area.width);
     let pane = app.cores().pane();
     let sel = (!pane.rows().is_empty()).then_some(pane.sel());
     draw_filter_bar(frame, app, filter_row);
@@ -85,26 +94,26 @@ pub(super) fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
         lines.push(Line::from(Span::styled(c.id.clone(), Style::new().bold())));
         match &c.latest {
             Some(l) => {
-                let date = c
-                    .date
+                let date = l
+                    .date_release
                     .as_deref()
                     .map(|d| format!("  ({d})"))
                     .unwrap_or_default();
-                lines.push(kv_text("Latest", format!("{l}{date}")));
+                lines.push(kv_text("Latest", format!("{}{date}", l.version)));
             }
             None if c.in_inventory => lines.push(kv_text("Latest", "no release published")),
             None => lines.push(kv("Inventory", Palette::Muted.span("not listed"))),
         }
-        if c.license {
+        if c.latest.as_ref().is_some_and(|l| l.requires_license) {
             lines.push(kv(
                 "License",
                 Palette::Warn.span("this core needs a licensed file; see its repo"),
             ));
         }
-        if let Some(repo) = &c.repo {
+        if let Some(repo) = &c.repo_url {
             lines.push(kv_text("Repo", repo.clone()));
         }
-        if let Some(d) = &c.description {
+        if let Some(d) = c.installed.as_ref().and_then(|i| i.description.as_ref()) {
             lines.push(Line::from(""));
             lines.push(Line::from(d.clone()));
         }

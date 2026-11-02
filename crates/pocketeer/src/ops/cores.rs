@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use pocketeer_core::{
     Error, Result,
-    card::cores::{self, CoreInfo, CoreListReport, SearchFilter, SearchHit},
+    card::cores::{self, CoreInfo, CoreListReport, CoreView, SearchFilter},
     card::install::{self, Changes, PlanOptions, Prepared, UninstallPlan},
     catalog::inventory::{Inventory, InventoryStatus},
     plan::{Event, Progress},
@@ -25,7 +25,7 @@ pub fn list(ctx: &Context, outdated: bool) -> Result<CoreListReport> {
 
 #[derive(Debug, Serialize)]
 pub struct SearchReport {
-    pub hits: Vec<SearchHit>,
+    pub hits: Vec<CoreView>,
     pub inventory: InventoryStatus,
 }
 

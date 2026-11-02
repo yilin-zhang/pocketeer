@@ -5,7 +5,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use pocketeer_core::card::{
     bios, clean,
-    cores::{self, SearchFilter},
+    cores::{self, CoreView, SearchFilter},
     install::{self, PlanOptions},
 };
 
@@ -52,24 +52,8 @@ impl Cycle for CoreFilter {
     }
 }
 
-/// One line of the Cores table: an installed core, an inventory core, or both.
-#[derive(Debug, Clone)]
-pub struct CoreRow {
-    pub id: String,
-    pub platforms: Vec<String>,
-    pub installed: Option<String>,
-    pub latest: Option<String>,
-    pub update: bool,
-    pub in_inventory: bool,
-    pub license: bool,
-    pub missing_files: usize,
-    pub date: Option<String>,
-    pub repo: Option<String>,
-    pub description: Option<String>,
-}
-
 pub struct Cores {
-    pane: Pane<CoreFilter, CoreRow>,
+    pane: Pane<CoreFilter, CoreView>,
 }
 
 impl Cores {
@@ -79,7 +63,7 @@ impl Cores {
         }
     }
 
-    pub fn pane(&self) -> &Pane<CoreFilter, CoreRow> {
+    pub fn pane(&self) -> &Pane<CoreFilter, CoreView> {
         &self.pane
     }
 
@@ -101,44 +85,29 @@ impl Cores {
         self.pane.set_rows(rows, |_| false);
     }
 
-    fn compute_rows(&self, snap: &CardSnapshot) -> Vec<CoreRow> {
+    fn compute_rows(&self, snap: &CardSnapshot) -> Vec<CoreView> {
         let q = self.pane.needle();
-        let hit = |id: &str, platforms: &[String]| {
-            let mut fields: Vec<&str> = vec![id];
-            fields.extend(platforms.iter().map(String::as_str));
+        let hit = |c: &CoreView| {
+            let mut fields: Vec<&str> = vec![&c.id];
+            fields.extend(c.platform_ids.iter().map(String::as_str));
             matches(q.as_deref(), &fields)
         };
         let filter = self.pane.filter();
-        let mut rows: Vec<CoreRow> = Vec::new();
+        let mut rows: Vec<CoreView> = Vec::new();
         if filter != CoreFilter::Available {
-            for c in &snap.cores.cores {
-                if !hit(&c.core.id, &c.core.platform_ids)
-                    || (filter == CoreFilter::Updates && !c.update_available)
-                {
-                    continue;
-                }
-                rows.push(CoreRow {
-                    id: c.core.id.clone(),
-                    platforms: c.core.platform_ids.clone(),
-                    installed: Some(c.core.version.clone()),
-                    latest: c.latest.as_ref().map(|l| l.version.clone()),
-                    update: c.update_available,
-                    in_inventory: c.in_inventory,
-                    license: c.latest.as_ref().is_some_and(|l| l.requires_license),
-                    missing_files: snap.missing_files(&c.core.id).len(),
-                    date: c.latest.as_ref().and_then(|l| l.date_release.clone()),
-                    repo: snap
-                        .inventory
-                        .as_ref()
-                        .and_then(|inv| inv.get(&c.core.id).map(|e| e.repo_url())),
-                    description: c.core.description.clone(),
-                });
-            }
+            rows.extend(
+                snap.cores
+                    .cores
+                    .iter()
+                    .filter(|c| filter != CoreFilter::Updates || c.update_available)
+                    .filter(|c| hit(c))
+                    .cloned(),
+            );
         }
         if matches!(filter, CoreFilter::All | CoreFilter::Available)
             && let Some(inv) = &snap.inventory
         {
-            for h in cores::search(
+            let available = cores::search(
                 inv,
                 &snap.installed(),
                 &SearchFilter {
@@ -147,24 +116,8 @@ impl Cores {
                     include_installed: false,
                     include_unreleased: false,
                 },
-            ) {
-                if !hit(&h.id, &h.platform_ids) {
-                    continue;
-                }
-                rows.push(CoreRow {
-                    id: h.id.clone(),
-                    platforms: h.platform_ids.clone(),
-                    installed: None,
-                    latest: h.version.clone(),
-                    update: false,
-                    in_inventory: true,
-                    license: h.requires_license,
-                    missing_files: 0,
-                    date: h.date_release.clone(),
-                    repo: Some(h.repo_url.clone()),
-                    description: None,
-                });
-            }
+            );
+            rows.extend(available.into_iter().filter(|c| hit(c)));
         }
         rows.sort_by_key(|r| (r.installed.is_none(), r.id.to_lowercase()));
         rows
@@ -189,7 +142,7 @@ impl Cores {
                 .notice(format!("{id} isn't in the inventory; nothing to update."));
             return;
         }
-        if row.installed.is_some() && !row.update {
+        if row.installed.is_some() && !row.update_available {
             cx.session
                 .notice(format!("{id} is already at its latest release."));
             return;
@@ -233,7 +186,7 @@ fn update_all(cx: &mut Cx) {
                 .cores
                 .iter()
                 .filter(|c| c.update_available)
-                .map(|c| c.core.id.clone())
+                .map(|c| c.id.clone())
                 .collect()
         })
         .unwrap_or_default();
