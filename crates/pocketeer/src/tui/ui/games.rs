@@ -1,7 +1,10 @@
 //! The Games tab: library and card-only ROMs, cover and details.
 
 use super::*;
-use crate::tui::app::GameRef;
+use crate::tui::app::{
+    GameRef,
+    covers::{self, Cover},
+};
 use pocketeer_core::{card::roms::Confidence, transfer::Presence};
 
 pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -186,13 +189,16 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
             let block = panel(truncate(&game.name, 40));
             let inner = block.inner(cover_area);
             frame.render_widget(block, cover_area);
-            match app.cover_for(cover_path) {
-                Some(proto) => frame.render_stateful_widget(
-                    StatefulImage::<StatefulProtocol>::new(),
+            match app.cover(cover_path, inner.as_size()) {
+                Cover::Ready(proto) => frame.render_stateful_widget(
+                    StatefulImage::<StatefulProtocol>::new().resize(covers::RESIZE),
                     inner,
                     proto,
                 ),
-                None => frame.render_widget(
+                Cover::Loading => {
+                    frame.render_widget(Paragraph::new(dim("loading cover…")).centered(), inner)
+                }
+                Cover::Unreadable => frame.render_widget(
                     Paragraph::new(dim("cover file unreadable")).centered(),
                     inner,
                 ),

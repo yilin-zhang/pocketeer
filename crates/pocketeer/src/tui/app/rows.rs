@@ -283,22 +283,16 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Decoded cover for a game, cached per path.
-    pub fn cover_for(&mut self, path: &Path) -> Option<&mut StatefulProtocol> {
-        if !self.covers.contains_key(path) {
-            if self.covers.len() > 24 {
-                self.covers.clear();
-            }
-            let img = image::ImageReader::open(path)
-                .ok()?
-                .with_guessed_format()
-                .ok()?
-                .decode()
-                .ok()?;
-            let proto = self.picker.new_resize_protocol(img);
-            self.covers.insert(path.to_path_buf(), proto);
-        }
-        self.covers.get_mut(path)
+    /// The selected game's cover, and the ones a step or two away started
+    /// ahead so moving onto them finds them ready.
+    pub fn cover(&mut self, path: &Path, size: ratatui::layout::Size) -> covers::Cover<'_> {
+        let sel = self.games.sel;
+        let near: Vec<PathBuf> = [sel + 1, sel.wrapping_sub(1), sel + 2]
+            .into_iter()
+            .filter_map(|i| self.games.rows.get(i))
+            .filter_map(|r| self.game_row(*r)?.cover.clone())
+            .collect();
+        self.covers.show(path, &near, size)
     }
 
     pub fn library_view(&self) -> Option<&LibraryView> {

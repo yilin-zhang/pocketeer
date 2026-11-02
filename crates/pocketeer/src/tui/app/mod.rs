@@ -6,11 +6,12 @@
 //! files, games) with a text filter and a "what to show" filter, rather than
 //! one tab per source. Row lists are computed once per change
 //! (`rebuild_rows`), not per frame. Everything that touches the card or the
-//! network runs on the worker threads in `worker.rs`; the app only submits
-//! jobs and reacts to their messages.
+//! network runs on the worker threads in `worker.rs`, and covers are decoded
+//! on their own thread in `covers.rs`; the app only submits jobs and reacts
+//! to their messages, so a frame never waits on disk, network or images.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     path::{Path, PathBuf},
     sync::atomic::Ordering,
 };
@@ -25,7 +26,7 @@ use pocketeer_core::{
     plan::Event,
 };
 use ratatui::layout::Rect;
-use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
+use ratatui_image::picker::Picker;
 
 mod actions;
 mod dialogs;
@@ -33,6 +34,7 @@ mod keys;
 mod model;
 mod path_input;
 pub use path_input::Suggestion;
+pub mod covers;
 mod rows;
 
 pub use keys::SUGGESTIONS_SHOWN;
@@ -63,8 +65,8 @@ pub struct App {
     /// Rows are (core index, file index) into `Snapshot::bios`.
     pub bios: Pane<BiosFilter, (usize, usize)>,
     pub games: Pane<GameFilter, GameRef>,
-    pub picker: Picker,
-    covers: HashMap<PathBuf, StatefulProtocol>,
+    /// Covers live in the library, so a reload keeps them.
+    pub covers: covers::Covers,
     library_path: Option<PathBuf>,
     pub modal: Option<Modal>,
     pub busy: Busy,
@@ -144,8 +146,7 @@ impl App {
             cores: Pane::new(CoreFilter::Installed),
             bios: Pane::new(BiosFilter::All),
             games: Pane::new(GameFilter::All),
-            picker,
-            covers: HashMap::new(),
+            covers: covers::Covers::spawn(picker),
             library_path,
             modal: None,
             busy: Busy::default(),
@@ -220,6 +221,7 @@ impl App {
 
     /// Handles everything the workers sent since last time.
     pub fn pump(&mut self) {
+        self.covers.receive();
         let mut complete_input = false;
         if let Some(result) = self.path_input.latest()
             && let Some(Modal::Input {
@@ -314,7 +316,6 @@ impl App {
                             let selected = self.game_selection();
                             self.snapshot = Some(*snap);
                             self.verify.next = 0;
-                            self.covers.clear();
                             self.rebuild_rows_preserving(selected);
                             self.auto_identify();
                         }
