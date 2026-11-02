@@ -14,8 +14,7 @@ use super::{SaveInfo, current, inspect, validate_path, versions, versions_by_id}
 use crate::{
     Error, Pocket, Result,
     card::CardIdentity,
-    fsutil::timestamp,
-    library::{Library, db, remove::TRASH_DIR},
+    library::{Library, db},
     plan::{Applied, Failure, Plan},
 };
 
@@ -89,7 +88,7 @@ pub fn plan_trash(
     let mut plan = TrashPlan {
         target,
         files: Vec::new(),
-        trash: PathBuf::from(TRASH_DIR).join(timestamp()),
+        trash: Library::new_trash_dir(),
         card: None,
         library: lib.identity()?,
     };

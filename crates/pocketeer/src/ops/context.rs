@@ -27,13 +27,20 @@ use pocketeer_core::config::ConfigKey;
 #[derive(Clone)]
 pub struct Context {
     global: Arc<Global>,
-    /// The TUI tracks the card itself and sets it here (`Some(None)` = no
-    /// card); the CLI leaves this `None` and detects on demand.
-    pocket: Option<Option<Pocket>>,
+    card: CardSource,
     config: Arc<OnceLock<Result<Config>>>,
     /// Platform names from the cached inventory only (never worth a network
     /// round-trip on their own); `None` when there is no cache.
     platforms_cached: Arc<OnceLock<Option<Platforms>>>,
+}
+
+/// Where a job's card comes from: the CLI looks for one when asked; the TUI
+/// tracks the card itself and says which one (or none).
+#[derive(Clone)]
+enum CardSource {
+    Detect,
+    Known(Pocket),
+    Absent,
 }
 
 /// What talks to the network: the HTTP client and the download cache, plus
@@ -59,7 +66,7 @@ impl Context {
     pub fn new(global: Global) -> Self {
         Context {
             global: Arc::new(global),
-            pocket: None,
+            card: CardSource::Detect,
             config: Arc::default(),
             platforms_cached: Arc::default(),
         }
@@ -67,7 +74,10 @@ impl Context {
 
     /// Uses this card (or none) instead of detecting one.
     pub fn with_pocket(mut self, pocket: Option<Pocket>) -> Self {
-        self.pocket = Some(pocket);
+        self.card = match pocket {
+            Some(p) => CardSource::Known(p),
+            None => CardSource::Absent,
+        };
         self
     }
 
@@ -95,12 +105,12 @@ impl Context {
     }
 
     pub fn pocket(&self) -> Result<Pocket> {
-        match &self.pocket {
-            Some(Some(p)) => Ok(p.clone()),
-            Some(None) => Err(Error::SdNotFound {
+        match &self.card {
+            CardSource::Known(p) => Ok(p.clone()),
+            CardSource::Absent => Err(Error::SdNotFound {
                 searched: Vec::new(),
             }),
-            None => Pocket::open_or_detect(self.root_path()?.as_deref()),
+            CardSource::Detect => Pocket::open_or_detect(self.root_path()?.as_deref()),
         }
     }
 

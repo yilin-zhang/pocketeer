@@ -1,5 +1,6 @@
 //! Explicit AP ROM renames with mirrored ordinary saves and cache updates.
 
+use crate::fsutil::Stamp;
 use crate::fsutil::names::{
     FileRename, RenameKind, apply_renames, complete_name, extension, stem, validate_name,
 };
@@ -14,9 +15,9 @@ pub struct CardRenamePlan {
     pub warnings: Vec<String>,
     #[serde(skip)]
     identity: crate::card::CardIdentity,
+    /// The ROM as it was when planned.
     #[serde(skip)]
-    modified: std::time::SystemTime,
-    pub size: u64,
+    stamp: Stamp,
 }
 impl Plan for CardRenamePlan {
     fn changes(&self) -> usize {
@@ -110,16 +111,11 @@ pub fn plan_card(pocket: &crate::Pocket, path: &Path, new_name: &str) -> Result<
         "Memories stay unchanged; loading an existing save state may require the old ROM name."
             .into(),
     ];
-    let full = pocket.root().join(path);
-    let modified = std::fs::metadata(&full)
-        .and_then(|m| m.modified())
-        .map_err(|e| Error::io(&full, e))?;
     Ok(CardRenamePlan {
         moves,
         warnings,
         identity: crate::card::CardIdentity::read(pocket)?,
-        modified,
-        size: rom.size,
+        stamp: Stamp::of(&pocket.root().join(path))?,
     })
 }
 
@@ -127,10 +123,7 @@ pub fn apply_card(pocket: &crate::Pocket, plan: &CardRenamePlan) -> Result<CardR
     plan.identity.check(pocket)?;
     let rom = &plan.moves[0];
     let source = pocket.root().join(&rom.from);
-    let meta = std::fs::metadata(&source).map_err(|e| Error::io(&source, e))?;
-    if meta.len() != plan.size
-        || meta.modified().map_err(|e| Error::io(&source, e))? != plan.modified
-    {
+    if Stamp::of(&source)? != plan.stamp {
         return Err(Error::Stale {
             what: rom.from.display().to_string(),
         });

@@ -93,6 +93,12 @@ impl Library {
         &self.root
     }
 
+    /// A new folder in the library's trash, relative to its root, for one
+    /// operation's discarded files.
+    pub(crate) fn new_trash_dir() -> PathBuf {
+        PathBuf::from(".trash").join(crate::fsutil::timestamp())
+    }
+
     /// What a plan records of the library it was made against.
     pub(crate) fn identity(&self) -> Result<LibraryIdentity> {
         let db = self.root.join(DB_FILE);

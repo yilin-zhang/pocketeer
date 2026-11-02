@@ -20,6 +20,7 @@ use crate::{
     catalog::Dat,
     fsutil,
     fsutil::{
+        Stamp,
         hash::{HashCache, Hashes, copy_and_hash},
         scan::{Candidate, hash_candidate},
     },
@@ -432,8 +433,8 @@ impl Applied for ImportResult {
 pub(crate) struct VerifiedSource {
     pub path: PathBuf,
     pub sha1: String,
-    pub size: u64,
-    pub modified: std::time::SystemTime,
+    /// The file as it was hashed while being copied.
+    pub stamp: Stamp,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -479,9 +480,7 @@ pub fn apply_import(
             continue;
         };
         let source_before = if inner.is_none() {
-            std::fs::metadata(source)
-                .ok()
-                .and_then(|m| Some((m.len(), m.modified().ok()?)))
+            Stamp::of(source).ok()
         } else {
             None
         };
@@ -532,15 +531,13 @@ pub fn apply_import(
             }
         }
         if indexed.is_ok()
-            && let (Some((size, modified)), Some(sha1)) = (source_before, verified_sha1)
-            && std::fs::metadata(source)
-                .is_ok_and(|m| m.len() == size && m.modified().ok() == Some(modified))
+            && let (Some(stamp), Some(sha1)) = (source_before, verified_sha1)
+            && Stamp::of(source).ok() == Some(stamp)
         {
             result.verified_sources.push(VerifiedSource {
                 path: source.clone(),
                 sha1,
-                size,
-                modified,
+                stamp,
             });
         }
         match indexed {

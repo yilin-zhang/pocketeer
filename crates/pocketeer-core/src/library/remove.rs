@@ -8,13 +8,10 @@ use serde::Serialize;
 
 use crate::{
     Error, Result,
-    fsutil::timestamp,
     plan::{Applied, Failure, Plan},
 };
 
 use super::{Library, db};
-
-pub(crate) const TRASH_DIR: &str = ".trash";
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RemoveItem {
@@ -52,7 +49,7 @@ pub fn plan(lib: &Library, platform: Option<&str>, specs: &[String]) -> Result<R
     let mut plan = RemovePlan {
         items: Vec::new(),
         bytes: 0,
-        trash: PathBuf::from(TRASH_DIR).join(timestamp()),
+        trash: Library::new_trash_dir(),
         library: lib.identity()?,
     };
     for spec in specs {

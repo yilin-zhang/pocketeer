@@ -35,12 +35,18 @@ pub enum JunkKind {
     OldBackups,
 }
 
+impl JunkKind {
+    /// AppleDouble files and `.DS_Store` are files; the rest are folders.
+    pub fn is_dir(self) -> bool {
+        !matches!(self, JunkKind::AppleDouble | JunkKind::DsStore)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct JunkEntry {
     pub path: PathBuf,
     pub kind: JunkKind,
     pub bytes: u64,
-    pub is_dir: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -83,7 +89,6 @@ pub fn plan(pocket: &Pocket, include_system: bool) -> Result<CleanPlan> {
             path: PathBuf::from(POCKETEER_DIR).join("backup"),
             kind: JunkKind::OldBackups,
             bytes,
-            is_dir: true,
         });
     }
 
@@ -138,7 +143,6 @@ pub fn plan(pocket: &Pocket, include_system: bool) -> Result<CleanPlan> {
                 path: rel,
                 kind,
                 bytes,
-                is_dir,
             });
             if is_dir {
                 walker.skip_current_dir();
@@ -169,7 +173,7 @@ pub fn apply(pocket: &Pocket, plan: &CleanPlan) -> Result<CleanResult> {
     let mut result = CleanResult::default();
     for entry in &plan.entries {
         let full = pocket.root().join(&entry.path);
-        let outcome = if entry.is_dir {
+        let outcome = if entry.kind.is_dir() {
             std::fs::remove_dir_all(&full)
         } else {
             std::fs::remove_file(&full)

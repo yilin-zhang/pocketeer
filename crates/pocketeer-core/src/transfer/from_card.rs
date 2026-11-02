@@ -12,6 +12,7 @@ use crate::{
     card::roms::CardRom,
     catalog::Dat,
     fsutil::{
+        Stamp,
         hash::HashCache,
         scan::{Candidate, FileRef},
     },
@@ -118,8 +119,7 @@ pub fn apply_import(
         let Ok(relative) = verified.path.strip_prefix(pocket.root()) else {
             continue;
         };
-        if std::fs::metadata(&verified.path)
-            .is_ok_and(|m| m.len() == verified.size && m.modified().ok() == Some(verified.modified))
+        if Stamp::of(&verified.path).ok() == Some(verified.stamp)
             && let Err(e) = index.record_copy(pocket, relative, &verified.sha1)
         {
             result

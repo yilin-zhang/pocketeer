@@ -107,8 +107,7 @@ pub fn parse_sha1(s: &str) -> Option<[u8; 20]> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Entry {
     /// Validity stamp of the file this came from (for zip entries: the zip).
-    stamp_size: u64,
-    mtime: u64,
+    stamp: Stamp,
     /// Size of the hashed content itself.
     size: u64,
     crc32: u32,
@@ -165,8 +164,7 @@ impl HashCache {
         compute: impl FnOnce() -> Result<Hashes>,
     ) -> Result<Hashes> {
         if let Some(e) = self.store.entries.get(key)
-            && e.stamp_size == stamp.size
-            && e.mtime == stamp.seconds
+            && e.stamp == stamp
         {
             return Ok(Hashes {
                 size: e.size,
@@ -178,8 +176,7 @@ impl HashCache {
         self.store.entries.insert(
             key.to_string(),
             Entry {
-                stamp_size: stamp.size,
-                mtime: stamp.seconds,
+                stamp,
                 size: hashes.size,
                 crc32: hashes.crc32,
                 sha1: hashes.sha1.clone(),
