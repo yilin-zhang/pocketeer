@@ -2,11 +2,11 @@
 
 use crate::library::{Library, resolve_rom};
 use crate::{
-    Error, ErrorInfo, Pocket, Result,
+    Error, Pocket, Result,
     card::roms::Index,
     fsutil,
     fsutil::hash::copy_and_hash,
-    plan::{Applied, Event, Plan, Progress},
+    plan::{Applied, Event, Failure, Plan, Progress},
 };
 use serde::Serialize;
 use std::{fs::File, path::PathBuf};
@@ -36,13 +36,13 @@ impl Plan for CopyPlan {
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct CopyResult {
     pub copied: usize,
-    pub failed: Vec<ErrorInfo>,
+    pub failed: Vec<Failure>,
     pub warnings: Vec<String>,
 }
 
 impl Applied for CopyResult {
-    fn failed(&self) -> usize {
-        self.failed.len()
+    fn failures(&self) -> &[Failure] {
+        &self.failed
     }
 }
 
@@ -164,7 +164,7 @@ pub fn apply(pocket: &Pocket, plan: &CopyPlan, progress: Progress<'_>) -> Result
                         .push(format!("Copied ROM, but could not update its cache: {e}"));
                 }
             }
-            Err(e) => result.failed.push(e.to_info()),
+            Err(e) => result.failed.push(Failure::new(&file.destination, &e)),
         }
         progress(Event::Step {
             done: i + 1,

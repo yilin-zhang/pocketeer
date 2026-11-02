@@ -21,6 +21,7 @@ use pocketeer_core::{
         import::{ImportAction, ImportSkip},
     },
     net::Source,
+    plan::Failure,
 };
 
 use crate::{
@@ -392,6 +393,13 @@ pub fn covers_summary(out: &mut String, covers: Option<&FetchReport>, reader: Re
         if let Some(hint) = unmapped_hint(c, reader) {
             let _ = writeln!(out, "{hint}");
         }
+    }
+}
+
+/// One line per item that failed: which file, and why.
+fn failure_lines(out: &mut String, failures: &[Failure]) {
+    for f in failures {
+        let _ = writeln!(out, "✗ {}: {}", f.path.display(), f.error.message);
     }
 }
 

@@ -10,13 +10,13 @@ use std::{
 
 use serde::Serialize;
 
-use super::{SaveFailure, SaveInfo, current, inspect, validate_path, versions, versions_by_id};
+use super::{SaveInfo, current, inspect, validate_path, versions, versions_by_id};
 use crate::{
     Error, Pocket, Result,
     card::CardIdentity,
     fsutil::timestamp,
     library::{Library, db, remove::TRASH_DIR},
-    plan::{Applied, Plan},
+    plan::{Applied, Failure, Plan},
 };
 
 /// Which copies of a save to throw away.
@@ -69,12 +69,12 @@ pub struct TrashResult {
     /// Set when library files were moved there.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trash: Option<PathBuf>,
-    pub failed: Vec<SaveFailure>,
+    pub failed: Vec<Failure>,
 }
 
 impl Applied for TrashResult {
-    fn failed(&self) -> usize {
-        self.failed.len()
+    fn failures(&self) -> &[Failure] {
+        &self.failed
     }
 }
 
@@ -185,8 +185,8 @@ pub fn apply_trash(
                     result.trashed += 1;
                     result.archived += usize::from(archived);
                 }
-                Err(e) => result.failed.push(SaveFailure {
-                    rel: file.path.clone(),
+                Err(e) => result.failed.push(Failure {
+                    path: file.path.clone(),
                     error: e.to_info(),
                 }),
             }
@@ -203,8 +203,8 @@ pub fn apply_trash(
         });
         match moved {
             Ok(()) => result.trashed += 1,
-            Err(e) => result.failed.push(SaveFailure {
-                rel: file.path.clone(),
+            Err(e) => result.failed.push(Failure {
+                path: file.path.clone(),
                 error: e.to_info(),
             }),
         }

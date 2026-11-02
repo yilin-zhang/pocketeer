@@ -23,7 +23,7 @@ use crate::{
         hash::{HashCache, Hashes, copy_and_hash},
         scan::{Candidate, hash_candidate},
     },
-    plan::{Applied, Event, Plan, Progress},
+    plan::{Applied, Event, Failure, Plan, Progress},
 };
 
 use super::{
@@ -401,7 +401,7 @@ pub struct ImportResult {
     /// Planned adds that turned out, once hashed, to be bytes the library
     /// already had under another name; nothing was kept.
     pub duplicates: Vec<ImportDuplicate>,
-    pub failed: Vec<ImportFailure>,
+    pub failed: Vec<Failure>,
     /// Things that went wrong around the import without failing it (a card
     /// cache that couldn't be updated, say).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -411,8 +411,8 @@ pub struct ImportResult {
 }
 
 impl Applied for ImportResult {
-    fn failed(&self) -> usize {
-        self.failed.len()
+    fn failures(&self) -> &[Failure] {
+        &self.failed
     }
 }
 
@@ -433,12 +433,6 @@ pub struct ImportDuplicate {
 enum Indexed {
     Added(u64),
     Duplicate(String),
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct ImportFailure {
-    pub source: PathBuf,
-    pub error: ErrorInfo,
 }
 
 pub fn apply_import(
@@ -518,8 +512,8 @@ pub fn apply_import(
         })();
         if placed && !matches!(indexed, Ok(Indexed::Added(_))) {
             if let Err(e) = std::fs::remove_file(root.join(dest)) {
-                result.failed.push(ImportFailure {
-                    source: root.join(dest),
+                result.failed.push(Failure {
+                    path: root.join(dest),
                     error: Error::io(root.join(dest), e).to_info(),
                 });
             }
@@ -549,8 +543,8 @@ pub fn apply_import(
             }
             Err(e) => {
                 // Don't leave a managed file without an index row.
-                result.failed.push(ImportFailure {
-                    source: source.clone(),
+                result.failed.push(Failure {
+                    path: source.clone(),
                     error: e.to_info(),
                 });
             }

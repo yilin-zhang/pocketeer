@@ -7,7 +7,7 @@ use pocketeer_core::{
     plan::Plan,
 };
 
-use super::{Reader, Text, actions, bytes, source, staged_footer};
+use super::{Reader, Text, actions, bytes, failure_lines, source, staged_footer};
 use crate::ops::card::{
     CleanReport, CopyReport, PlaceReport, RefreshReport, RenameReport, RomsReport,
 };
@@ -207,9 +207,7 @@ impl Text for CleanReport {
                     res.removed,
                     bytes(res.bytes)
                 );
-                for f in &res.failed {
-                    let _ = writeln!(out, "✗ {}: {}", f.path.display(), f.error.message);
-                }
+                failure_lines(out, &res.failed);
             },
         );
         out
@@ -299,9 +297,7 @@ impl Text for CopyReport {
             "Nothing to copy.",
             |text, result| {
                 let _ = writeln!(text, "Copied {} ROM(s)", result.copied);
-                for error in &result.failed {
-                    let _ = writeln!(text, "✗ {}", error.message);
-                }
+                failure_lines(text, &result.failed);
                 for warning in &result.warnings {
                     let _ = writeln!(text, "Warning: {warning}");
                 }

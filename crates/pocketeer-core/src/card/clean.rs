@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use crate::{
-    Error, ErrorInfo, Pocket, Result,
+    Error, Pocket, Result,
     card::POCKETEER_DIR,
     fsutil,
-    plan::{Applied, Plan},
+    plan::{Applied, Failure, Plan},
 };
 
 /// Volume-level folders macOS creates on every card. Harmless to delete
@@ -147,19 +147,13 @@ pub fn plan(pocket: &Pocket, include_system: bool) -> Result<CleanPlan> {
 pub struct CleanResult {
     pub removed: usize,
     pub bytes: u64,
-    pub failed: Vec<FailedEntry>,
+    pub failed: Vec<Failure>,
 }
 
 impl Applied for CleanResult {
-    fn failed(&self) -> usize {
-        self.failed.len()
+    fn failures(&self) -> &[Failure] {
+        &self.failed
     }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct FailedEntry {
-    pub path: PathBuf,
-    pub error: ErrorInfo,
 }
 
 /// Deletes everything in the plan. Junk isn't backed up. Per-entry failures
@@ -179,7 +173,7 @@ pub fn apply(pocket: &Pocket, plan: &CleanPlan) -> Result<CleanResult> {
                 result.bytes += entry.bytes;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => result.failed.push(FailedEntry {
+            Err(e) => result.failed.push(Failure {
                 path: entry.path.clone(),
                 error: Error::io(full, e).to_info(),
             }),

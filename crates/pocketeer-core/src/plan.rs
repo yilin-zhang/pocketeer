@@ -7,7 +7,11 @@
 //! applies it on confirmation. These two traits are what those layers need
 //! from a plan and a result without knowing which operation they belong to.
 
+use std::path::PathBuf;
+
 use serde::Serialize;
+
+use crate::ErrorInfo;
 
 /// Progress events for long operations.
 ///
@@ -45,5 +49,28 @@ pub trait Plan: Serialize {
 /// What applying a plan produced.
 pub trait Applied: Serialize {
     /// Items that failed one by one while the rest went through.
-    fn failed(&self) -> usize;
+    fn failures(&self) -> &[Failure] {
+        &[]
+    }
+
+    fn failed(&self) -> usize {
+        self.failures().len()
+    }
+}
+
+/// One item that failed while the rest of a plan went through: which file,
+/// and why.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Failure {
+    pub path: PathBuf,
+    pub error: ErrorInfo,
+}
+
+impl Failure {
+    pub fn new(path: impl Into<PathBuf>, error: &crate::Error) -> Self {
+        Failure {
+            path: path.into(),
+            error: error.to_info(),
+        }
+    }
 }

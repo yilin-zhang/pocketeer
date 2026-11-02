@@ -7,7 +7,7 @@ use pocketeer_core::{
     transfer::saves::{SaveAction, SaveReason, SaveSkip, TrashTarget},
 };
 
-use super::{Reader, Text, bytes, plan_lines, staged_footer, table, time_ago};
+use super::{Reader, Text, bytes, failure_lines, plan_lines, staged_footer, table, time_ago};
 use crate::ops::saves::{ListReport, SyncReport, TrashReport, VersionsReport};
 
 fn save_reason(reason: SaveReason) -> &'static str {
@@ -114,14 +114,7 @@ pub fn saves_sync_by_game(
                 "Backed up {}, restored {}, archived {} version(s)",
                 result.pulled, result.pushed, result.versions_created
             );
-            for failure in &result.failed {
-                let _ = writeln!(
-                    text,
-                    "✗ {}: {}",
-                    failure.rel.display(),
-                    failure.error.message
-                );
-            }
+            failure_lines(text, &result.failed);
         },
     );
     text
@@ -238,14 +231,7 @@ impl Text for TrashReport {
                     "Trashed {}, archived {}",
                     result.trashed, result.archived
                 );
-                for failure in &result.failed {
-                    let _ = writeln!(
-                        text,
-                        "✗ {}: {}",
-                        failure.rel.display(),
-                        failure.error.message
-                    );
-                }
+                failure_lines(text, &result.failed);
             },
         );
         text

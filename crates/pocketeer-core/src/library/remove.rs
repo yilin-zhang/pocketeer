@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::{
     Error, Result,
     fsutil::timestamp,
-    plan::{Applied, Plan},
+    plan::{Applied, Failure, Plan},
 };
 
 use super::{Library, db};
@@ -81,19 +81,13 @@ pub struct RemoveResult {
     pub bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trash: Option<PathBuf>,
-    pub failed: Vec<RemoveFailure>,
+    pub failed: Vec<Failure>,
 }
 
 impl Applied for RemoveResult {
-    fn failed(&self) -> usize {
-        self.failed.len()
+    fn failures(&self) -> &[Failure] {
+        &self.failed
     }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct RemoveFailure {
-    pub name: String,
-    pub error: crate::ErrorInfo,
 }
 
 pub fn apply(lib: &mut Library, plan: &RemovePlan) -> Result<RemoveResult> {
@@ -118,10 +112,7 @@ pub fn apply(lib: &mut Library, plan: &RemovePlan) -> Result<RemoveResult> {
                     result.games_removed += 1;
                 }
             }
-            Err(e) => result.failed.push(RemoveFailure {
-                name: item.name.clone(),
-                error: e.to_info(),
-            }),
+            Err(e) => result.failed.push(Failure::new(&item.file, &e)),
         }
     }
     result.trash = trash.exists().then_some(plan.trash.clone());

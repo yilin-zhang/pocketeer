@@ -13,8 +13,9 @@ use pocketeer_core::{
 };
 
 use super::{
-    Reader, Text, batch_report, bytes, cover_news, covers_summary, import_actions, plan_lines,
-    skipped_summary, staged_footer, suggestion_footer, table, unmapped_hint, warning_lines,
+    Reader, Text, batch_report, bytes, cover_news, covers_summary, failure_lines, import_actions,
+    plan_lines, skipped_summary, staged_footer, suggestion_footer, table, unmapped_hint,
+    warning_lines,
 };
 use crate::ops::library::{
     CoverImportReport, CoversStatusReport, Imported, ImportsRoms, InitReport, ListReport,
@@ -255,9 +256,7 @@ impl<P: ImportsRoms> Text for Imported<P> {
                         )
                     }
                 );
-                for f in &res.failed {
-                    let _ = writeln!(out, "✗ {}: {}", f.source.display(), f.error.message);
-                }
+                failure_lines(out, &res.failed);
                 warning_lines(out, &res.warnings);
                 covers_summary(out, r.covers.as_ref(), reader);
                 warning_lines(out, &r.warnings);
@@ -376,9 +375,7 @@ impl Text for RemoveReport {
                         .map(|t| format!("; files in {}", t.display()))
                         .unwrap_or_default()
                 );
-                for f in &res.failed {
-                    let _ = writeln!(out, "✗ {}: {}", f.name, f.error.message);
-                }
+                failure_lines(out, &res.failed);
             },
         );
         out

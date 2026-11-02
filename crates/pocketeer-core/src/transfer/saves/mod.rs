@@ -4,10 +4,10 @@ use crate::library::{Library, db};
 
 pub use crate::library::db::SaveVersion;
 use crate::{
-    Error, ErrorInfo, Pocket, Result,
+    Error, Pocket, Result,
     fsutil::hash::{copy_and_hash, hash_file},
     fsutil::{self, mtime_secs, set_mtime},
-    plan::{Applied, Event, Plan, Progress},
+    plan::{Applied, Event, Failure, Plan, Progress},
 };
 use serde::Serialize;
 use std::{
@@ -513,20 +513,14 @@ pub struct SavesResult {
     pub pushed: usize,
     pub versions_created: usize,
     pub bytes: u64,
-    pub failed: Vec<SaveFailure>,
+    pub failed: Vec<Failure>,
 }
 
 impl Applied for SavesResult {
-    fn failed(&self) -> usize {
-        self.failed.len()
+    fn failures(&self) -> &[Failure] {
+        &self.failed
     }
 }
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct SaveFailure {
-    pub rel: PathBuf,
-    pub error: ErrorInfo,
-}
-
 pub fn apply(
     lib: &mut Library,
     pocket: &Pocket,
@@ -553,8 +547,8 @@ pub fn apply(
                 result.versions_created += usize::from(archived);
                 result.bytes += size;
             }
-            Err(e) => result.failed.push(SaveFailure {
-                rel: rel.to_path_buf(),
+            Err(e) => result.failed.push(Failure {
+                path: rel.to_path_buf(),
                 error: e.to_info(),
             }),
         }
