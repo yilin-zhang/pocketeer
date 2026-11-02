@@ -155,9 +155,7 @@ mod tests {
 
     #[test]
     fn tilde_expands() {
-        let p = expand_tilde("~/x");
-        assert!(p.is_absolute());
-        assert!(p.ends_with("x"));
+        assert_eq!(expand_tilde("~/x"), dirs::home_dir().unwrap().join("x"));
         assert_eq!(expand_tilde("/abs"), PathBuf::from("/abs"));
     }
 }

@@ -246,14 +246,10 @@ mod tests {
     const XML: &[u8] = include_bytes!("../../../../tests/fixtures/roms/test.dat");
 
     fn setup() -> (tempfile::TempDir, Library, Cache) {
-        let (tmp, lib) = crate::testutil::library_with(&[
-            ("my title.gba", "hello world"),
-            ("unknown.gba", "homebrew"),
-        ]);
-        db::ensure_platform(lib.conn(), "gba", None).unwrap();
-        lib.conn()
-            .execute("UPDATE games SET platform='gba'", [])
-            .unwrap();
+        let (tmp, lib) = crate::testutil::library_on(
+            "gba",
+            &[("my title.gba", "hello world"), ("unknown.gba", "homebrew")],
+        );
         let cache = Cache::new(tmp.path().join("cache"));
         (tmp, lib, cache)
     }
@@ -403,7 +399,13 @@ mod tests {
     #[test]
     fn manual_dat_match_is_preserved_when_automatic_catalog_lacks_it() {
         let (_tmp, mut lib, cache) = setup();
-        lib.conn().execute("UPDATE roms SET dat_status='matched',dat_source='manual',dat_game_name='Custom verified title',verified=1 WHERE name='unknown.gba'", []).unwrap();
+        let manual = db::Identification {
+            status: Status::Matched,
+            game_name: Some("Custom verified title".into()),
+            source: Some("manual".into()),
+            ..Default::default()
+        };
+        db::save_identification(lib.conn(), &rom(&lib, "unknown.gba"), &manual).unwrap();
         store(&cache, XML);
         let report = offline(&mut lib, &cache);
         assert_eq!(
@@ -417,7 +419,13 @@ mod tests {
     fn recognition_keeps_manual_covers_but_retries_old_automatic_titles() {
         let (tmp, mut lib, cache) = setup();
         let id = rom(&lib, "my title.gba").game_id;
-        lib.conn().execute("INSERT INTO covers (game_id,rel_path,status,fetched_at) VALUES (?1,'covers/old.png','ok',0)", [id]).unwrap();
+        db::upsert_cover(
+            lib.conn(),
+            id,
+            Some(std::path::Path::new("covers/old.png")),
+            covers::CoverStatus::Ok,
+        )
+        .unwrap();
         store(&cache, XML);
         offline(&mut lib, &cache);
         assert!(db::cover_record(lib.conn(), id).unwrap().is_none());

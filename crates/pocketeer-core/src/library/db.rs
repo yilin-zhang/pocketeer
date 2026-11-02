@@ -70,6 +70,12 @@ ALTER TABLE roms ADD COLUMN dat_source TEXT;
 ALTER TABLE roms ADD COLUMN dat_checked_at INTEGER;
 ALTER TABLE roms ADD COLUMN dat_error TEXT;
 UPDATE roms SET dat_status='matched',dat_game_name=(SELECT name FROM games WHERE games.id=roms.game_id),dat_rom_name=name,dat_source='manual' WHERE verified=1;",
+    // v9: which game a backed-up save belongs to. Kept when the game is
+    // renamed; a removed game leaves its saves unowned.
+    "CREATE TABLE save_games (
+        rel_path TEXT PRIMARY KEY,
+        game_id  INTEGER REFERENCES games(id) ON DELETE SET NULL
+    );",
 ];
 
 /// Brings the schema to the current version, one migration per
@@ -883,6 +889,80 @@ pub fn save_version_counts(conn: &Connection) -> Result<BTreeMap<String, usize>>
     .collect())
 }
 
+/// Every save path with archived versions.
+pub fn save_version_paths(conn: &Connection) -> Result<Vec<PathBuf>> {
+    query_rows(
+        conn,
+        "SELECT DISTINCT rel_path FROM save_versions ORDER BY rel_path",
+        [],
+        "list save history",
+        |r| Ok(PathBuf::from(r.get::<_, String>(0)?)),
+    )
+}
+
+pub fn delete_save_version(conn: &Connection, version_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM save_versions WHERE id = ?1",
+        params![version_id],
+    )
+    .map_err(|e| Error::db(e, "forget save version"))?;
+    Ok(())
+}
+
+/// Moves a save's history and owner from one card path to another.
+pub fn rename_save(conn: &Connection, from: &Path, to: &Path, history: &Path) -> Result<()> {
+    let (from, to) = (from.to_string_lossy(), to.to_string_lossy());
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| Error::db(e, "rename save"))?;
+    for version in save_versions(&tx, Path::new(from.as_ref()))? {
+        let file = version.stored_path.file_name().unwrap_or_default();
+        tx.execute(
+            "UPDATE save_versions SET rel_path = ?1, stored_path = ?2 WHERE id = ?3",
+            params![to, history.join(file).to_string_lossy(), version.id],
+        )
+        .map_err(|e| Error::db(e, "rename save history"))?;
+    }
+    tx.execute(
+        "UPDATE OR REPLACE save_games SET rel_path = ?1 WHERE rel_path = ?2",
+        params![to, from],
+    )
+    .map_err(|e| Error::db(e, "rename save owner"))?;
+    tx.commit().map_err(|e| Error::db(e, "rename save"))
+}
+
+/// Which game each linked save belongs to (`None` once the game is gone).
+pub fn save_games(conn: &Connection) -> Result<BTreeMap<PathBuf, Option<i64>>> {
+    Ok(query_rows(
+        conn,
+        "SELECT rel_path, game_id FROM save_games",
+        [],
+        "list save owners",
+        |r| Ok((PathBuf::from(r.get::<_, String>(0)?), r.get(1)?)),
+    )?
+    .into_iter()
+    .collect())
+}
+
+pub fn set_save_game(conn: &Connection, rel: &Path, game_id: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO save_games (rel_path, game_id) VALUES (?1, ?2)
+         ON CONFLICT(rel_path) DO UPDATE SET game_id = excluded.game_id",
+        params![rel.to_string_lossy(), game_id],
+    )
+    .map_err(|e| Error::db(e, "link save"))?;
+    Ok(())
+}
+
+pub fn forget_save_game(conn: &Connection, rel: &Path) -> Result<()> {
+    conn.execute(
+        "DELETE FROM save_games WHERE rel_path = ?1",
+        params![rel.to_string_lossy()],
+    )
+    .map_err(|e| Error::db(e, "unlink save"))?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Renames
 
@@ -914,6 +994,12 @@ mod tests {
         let mut c = conn();
         migrate(&mut c).unwrap();
         assert_eq!(user_version(&c) as usize, MIGRATIONS.len());
+    }
+
+    /// The prefixed column list is written out by hand for the SQL; it must
+    /// name the same columns.
+    #[test]
+    fn rom_column_lists_agree() {
         assert_eq!(ROM_COLS_R, format!("r.{}", ROM_COLS.replace(", ", ", r.")));
     }
 
@@ -932,7 +1018,7 @@ mod tests {
     /// appending one means adding its checksum to the list.
     #[test]
     fn released_migrations_are_frozen() {
-        const PINNED: [u32; 8] = [
+        const PINNED: [u32; 9] = [
             0xb785_fcea,
             0x7e87_79a0,
             0x5aef_96de,
@@ -941,6 +1027,7 @@ mod tests {
             0xc69f_adbb,
             0x0d89_5ce4,
             0xf329_8add,
+            0xd144_9ef5,
         ];
         let actual: Vec<u32> = MIGRATIONS
             .iter()

@@ -9,20 +9,21 @@ pub(super) fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     let (filter_row, table_area, right) = split_tab(app, area);
-    let snap = app.card_view().expect("checked above");
+    let snap = app.session().card().expect("checked above");
     let inventory_known = snap.inventory.is_some();
     let rows: Vec<Row> = app
-        .cores
-        .rows
+        .cores()
+        .pane()
+        .rows()
         .iter()
         .map(|r| {
             let installed = match &r.installed {
-                Some(v) => Cell::from(v.clone()).style(Style::new().fg(GOOD)),
+                Some(v) => Cell::from(v.clone()).style(Palette::Good.style()),
                 None => Cell::from(""),
             };
             let (status, style) = match (&r.installed, &r.latest) {
-                (Some(_), Some(l)) if r.update => (format!("→ {l}"), Style::new().fg(WARN)),
-                (Some(_), Some(_)) => ("up to date".to_string(), Style::new().fg(GOOD)),
+                (Some(_), Some(l)) if r.update => (format!("→ {l}"), Palette::Warn.style()),
+                (Some(_), Some(_)) => ("✓".to_string(), Palette::Good.style()),
                 (Some(_), None) if r.in_inventory => ("no release".to_string(), Style::new().dim()),
                 (Some(_), None) if inventory_known => {
                     ("not in inventory".to_string(), Style::new().dim())
@@ -32,12 +33,12 @@ pub(super) fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
                 (None, None) => ("-".to_string(), Style::new().dim()),
             };
             let files = if r.missing_files > 0 {
-                Cell::from(format!("{} missing", r.missing_files)).style(Style::new().fg(BAD))
+                Cell::from(format!("{} missing", r.missing_files)).style(Palette::Bad.style())
             } else {
                 Cell::from("")
             };
             let license = if r.license {
-                Cell::from("license").style(Style::new().fg(WARN))
+                Cell::from("license").style(Palette::Warn.style())
             } else {
                 Cell::from("")
             };
@@ -52,8 +53,7 @@ pub(super) fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
     let title = format!(
-        "CORES  ·  {} installed  ·  {}",
-        snap.cores.cores.len(),
+        "CORES  ·  {}",
         snap.inventory
             .as_ref()
             .map(|i| format!("{} in inventory", i.cores.len()))
@@ -73,19 +73,16 @@ pub(super) fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
         title,
         table_area.width,
     );
-    let sel = (!app.cores.rows.is_empty()).then_some(app.cores.sel);
+    let pane = app.cores().pane();
+    let sel = (!pane.rows().is_empty()).then_some(pane.sel());
     draw_filter_bar(frame, app, filter_row);
     render_table(frame, app, table_area, table, sel);
 
-    let snap = app.card_view().expect("checked above");
+    let snap = app.session().card().expect("checked above");
     let mut lines: Vec<Line> = Vec::new();
-    if let Some(c) = app.selected_core() {
+    if let Some(c) = app.cores().pane().selected() {
+        // The table has the platforms and versions; this adds the rest.
         lines.push(Line::from(Span::styled(c.id.clone(), Style::new().bold())));
-        lines.push(kv_text("Platforms", c.platforms.join(", ")));
-        match &c.installed {
-            Some(v) => lines.push(kv_text("Installed", v.clone())),
-            None => lines.push(kv("Installed", dim("no  (Enter installs it)"))),
-        }
         match &c.latest {
             Some(l) => {
                 let date = c
@@ -96,12 +93,12 @@ pub(super) fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
                 lines.push(kv_text("Latest", format!("{l}{date}")));
             }
             None if c.in_inventory => lines.push(kv_text("Latest", "no release published")),
-            None => lines.push(kv("Inventory", dim("not listed"))),
+            None => lines.push(kv("Inventory", Palette::Muted.span("not listed"))),
         }
         if c.license {
             lines.push(kv(
                 "License",
-                fg("this core needs a licensed file; see its repo", WARN),
+                Palette::Warn.span("this core needs a licensed file; see its repo"),
             ));
         }
         if let Some(repo) = &c.repo {
@@ -111,12 +108,12 @@ pub(super) fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
             lines.push(Line::from(""));
             lines.push(Line::from(d.clone()));
         }
-        let missing = app.bios_for(&c.id);
+        let missing = missing_files(snap, &c.id);
         if !missing.is_empty() {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Missing files",
-                Style::new().bold().fg(BAD),
+                Style::new().bold().fg(Palette::Bad.color()),
             )));
             for f in missing {
                 let note = match &f.status {
@@ -128,20 +125,20 @@ pub(super) fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
                 lines.push(Line::from(format!("  {}{note}", f.path.display())));
             }
         }
-    } else if snap.inventory.is_none() && app.cores.rows.is_empty() {
+    } else if snap.inventory.is_none() && app.cores().pane().rows().is_empty() {
         lines.push(
             Line::from("Inventory unavailable (offline and nothing cached?). Press r to retry.")
-                .fg(BAD),
+                .fg(Palette::Bad.color()),
         );
     } else {
         lines.push(Line::from("No cores match.").dim());
     }
     if !snap.cores.broken.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from(fg(
-            format!("{} broken core folder(s):", snap.cores.broken.len()),
-            BAD,
-        )));
+        lines.push(Line::from(Palette::Bad.span(format!(
+            "{} broken core folder(s):",
+            snap.cores.broken.len()
+        ))));
         for b in &snap.cores.broken {
             lines.push(Line::from(format!("  {}  [{}]", b.id, b.error.code)));
         }
@@ -153,12 +150,12 @@ pub(super) fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn status_cell(f: &FileStatus) -> (String, Style) {
     match f {
-        FileStatus::Present => ("present".into(), Style::new().fg(GOOD)),
-        FileStatus::Missing => ("missing".into(), Style::new().fg(BAD)),
-        FileStatus::WrongHash { .. } => ("wrong md5".into(), Style::new().fg(WARN)),
-        FileStatus::Unreadable { .. } => ("unreadable".into(), Style::new().fg(WARN)),
-        FileStatus::FoundAtRoot { .. } => ("at card root → p".into(), Style::new().fg(ACCENT)),
-        FileStatus::FoundAtRootZipped { .. } => ("zipped at root".into(), Style::new().fg(ACCENT)),
+        FileStatus::Present => ("present".into(), Palette::Good.style()),
+        FileStatus::Missing => ("missing".into(), Palette::Bad.style()),
+        FileStatus::WrongHash { .. } => ("wrong md5".into(), Palette::Warn.style()),
+        FileStatus::Unreadable { .. } => ("unreadable".into(), Palette::Warn.style()),
+        FileStatus::FoundAtRoot { .. } => ("at card root → p".into(), Palette::Ink.style()),
+        FileStatus::FoundAtRootZipped { .. } => ("zipped at root".into(), Palette::Ink.style()),
     }
 }
 
@@ -167,10 +164,11 @@ pub(super) fn draw_bios(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     let (filter_row, table_area, right) = split_tab(app, area);
-    let snap = app.card_view().expect("checked above");
+    let snap = app.session().card().expect("checked above");
     let rows: Vec<Row> = app
-        .bios
-        .rows
+        .bios()
+        .pane()
+        .rows()
         .iter()
         .filter_map(|(ci, fi)| {
             let core = snap.bios.cores.get(*ci)?;
@@ -191,10 +189,16 @@ pub(super) fn draw_bios(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
     let s = &snap.bios.summary;
-    let title = format!(
-        "REQUIRED FILES  ·  {} present  ·  {} missing  ·  {} wrong  ·  {} placeable",
-        s.present, s.missing, s.wrong_hash, s.placeable
-    );
+    let mut title = "REQUIRED FILES".to_string();
+    for (n, what) in [
+        (s.missing, "missing"),
+        (s.wrong_hash, "wrong"),
+        (s.placeable, "at the card root"),
+    ] {
+        if n > 0 {
+            title.push_str(&format!("  ·  {n} {what}"));
+        }
+    }
     let table = styled_table(
         rows,
         [
@@ -207,38 +211,26 @@ pub(super) fn draw_bios(frame: &mut Frame, app: &mut App, area: Rect) {
         title,
         table_area.width,
     );
-    let sel = (!app.bios.rows.is_empty()).then_some(app.bios.sel);
+    let pane = app.bios().pane();
+    let sel = (!pane.rows().is_empty()).then_some(pane.sel());
     draw_filter_bar(frame, app, filter_row);
     render_table(frame, app, table_area, table, sel);
 
-    let snap = app.card_view().expect("checked above");
+    let snap = app.session().card().expect("checked above");
     let mut lines: Vec<Line> = Vec::new();
-    match app.selected_bios() {
+    match app.bios().selected(app.session()) {
         Some((core, f)) => {
-            lines.push(kv_text("Core", core.core_id.clone()));
             lines.push(kv_text("Slot", f.slot.clone()));
             lines.push(kv_text("Path", f.path.display().to_string()));
-            lines.push(kv_text(
-                "Need",
-                if f.required {
-                    "required: the core won't run without it"
-                } else {
-                    "optional"
-                },
-            ));
             if let Some(md5) = &f.expected_md5 {
                 lines.push(kv_text("md5", md5.clone()));
             }
-            let (status, style) = status_cell(&f.status);
-            lines.push(kv("Status", Span::styled(status, style)));
             lines.push(Line::from(""));
             let advice: Vec<String> = match &f.status {
-                FileStatus::Present => vec!["Nothing to do.".into()],
-                FileStatus::Missing => vec![
-                    "pocketeer never downloads BIOS files. Copy yours to the root of the card \
-                     with that exact file name, then press p to move it into place."
-                        .into(),
-                ],
+                FileStatus::Present => Vec::new(),
+                FileStatus::Missing => {
+                    vec!["Copy it to the card root under this name, then press p.".into()]
+                }
                 FileStatus::WrongHash { actual_md5 } => vec![
                     format!("The file on the card has md5 {actual_md5}."),
                     "The core expects a different dump; replace the file.".into(),
@@ -263,8 +255,10 @@ pub(super) fn draw_bios(frame: &mut Frame, app: &mut App, area: Rect) {
                 lines.push(Line::from(format!("note: {n}")).dim());
             }
         }
-        None if app.bios.filter == BiosFilter::Problems && !snap.bios.cores.is_empty() => {
-            lines.push(Line::from("Every core has the files it needs.").fg(GOOD));
+        None if app.bios().pane().filter() == BiosFilter::Problems
+            && !snap.bios.cores.is_empty() =>
+        {
+            lines.push(Line::from("Every core has the files it needs.").fg(Palette::Good.color()));
         }
         None if snap.bios.cores.is_empty() => {
             lines.push(Line::from("No installed core declares extra files.").dim());
@@ -280,11 +274,8 @@ pub(super) fn draw_device(frame: &mut Frame, app: &mut App, area: Rect) {
     if !card_tab(frame, app, area) {
         return;
     }
-    let [left, right] = split_cols(app, area);
-    let [card_area, device_area] =
-        Layout::vertical([Constraint::Length(7), Constraint::Min(5)]).areas(left);
-    let [junk_area, log_area] = split_rows(app, right, Splitter::DeviceRows);
-    let snap = app.card_view().expect("checked above");
+    let [card_area, log_area] = split_cols(app, area);
+    let snap = app.session().card().expect("checked above");
 
     let st = &snap.status;
     let mut card = vec![kv_text("Root", tilde(&st.root))];
@@ -312,6 +303,7 @@ pub(super) fn draw_device(frame: &mut Frame, app: &mut App, area: Rect) {
         ));
     }
     card.push(kv_text("Cores", st.installed_cores.to_string()));
+    card.push(kv_text("ROMs", snap.card_roms.len().to_string()));
     card.push(kv_text(
         "Inventory",
         match snap.inventory.as_ref().map(|i| &i.source) {
@@ -324,42 +316,22 @@ pub(super) fn draw_device(frame: &mut Frame, app: &mut App, area: Rect) {
     ));
     frame.render_widget(Paragraph::new(card).block(panel("CARD")), card_area);
 
-    let actions = vec![
-        Line::from(format!("{} ROM file(s) on this card", snap.card_roms.len())),
-        Line::from(""),
-        key_line(&[("3", "manage ROMs on the Games tab")], usize::MAX),
-        key_line(&[("V", "review save backups")], usize::MAX),
-    ];
-    frame.render_widget(
-        Paragraph::new(actions)
-            .wrap(Wrap { trim: false })
-            .block(panel("MANAGE")),
-        device_area,
-    );
-
-    let junk = vec![
-        Line::from("Scanned only when requested.").dim(),
-        key_line(&[("c", "scan and review cleanup")], usize::MAX),
-    ];
-    frame.render_widget(Paragraph::new(junk).block(panel("MACOS JUNK")), junk_area);
-
     let room = log_area.height.saturating_sub(2) as usize;
     let mut recent: Vec<Line> = app
-        .log
-        .iter()
-        .rev()
+        .session()
+        .log()
         .take(room)
         .enumerate()
         .map(|(i, l)| {
             if i == 0 {
-                Line::from(Span::styled(l.clone(), Style::new().fg(INK)))
+                Line::from(Span::styled(l.to_string(), Palette::Ink.style()))
             } else {
-                Line::from(dim(l.clone()))
+                Line::from(Palette::Muted.span(l))
             }
         })
         .collect();
     if recent.is_empty() {
-        recent.push(Line::from(faint("nothing yet")));
+        recent.push(Line::from(Palette::Faint.span("nothing yet")));
     }
     frame.render_widget(Paragraph::new(recent).block(panel("RECENT")), log_area);
 }

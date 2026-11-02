@@ -7,6 +7,7 @@ use pocketeer_core::{
         Status as LibraryStatus,
         covers::{CoverStatus, FetchReport},
         identify,
+        import::{ImportAction, ImportPlan, ImportResult, ImportSkip},
     },
     plan::Plan,
 };
@@ -19,7 +20,7 @@ use crate::ops::{
     Mode,
     library::{
         CoverImportReport, CoversStatusReport, ImportReport, InitReport, ListReport,
-        MetadataReport, RemoveReport, RenameReport, StandardizeReport,
+        MetadataReport, RemoveReport, RenameReport, SortedImportReport, StandardizeReport,
     },
 };
 
@@ -484,5 +485,100 @@ pub fn cover_import(staged: &CoverImportReport) -> String {
             }
         },
     );
+    out
+}
+
+/// A folder import in a few lines, for the TUI's dialog: per platform how
+/// many files are new (and their names), what is already there, and the
+/// files left out because their type isn't known.
+pub fn import_brief(
+    parts: &[(pocketeer_core::library::import::ImportOptions, ImportPlan)],
+    unknown: &[String],
+) -> Vec<String> {
+    const NAMES: usize = 6;
+    let mut lines = Vec::new();
+    for (opts, plan) in parts {
+        let mut new = Vec::new();
+        let (mut there, mut other) = (0, 0);
+        for a in &plan.actions {
+            match a {
+                ImportAction::Add { rom, .. } => new.push(rom.as_str()),
+                ImportAction::Skip {
+                    reason: ImportSkip::AlreadyInLibrary { .. },
+                    ..
+                } => there += 1,
+                ImportAction::Skip { .. } => other += 1,
+            }
+        }
+        let mut counts = vec![format!("{} new", new.len())];
+        if there > 0 {
+            counts.push(format!("{there} already in the library"));
+        }
+        if other > 0 {
+            counts.push(format!("{other} skipped"));
+        }
+        lines.push(format!(
+            "{:<8}{}",
+            opts.platform.to_uppercase(),
+            counts.join(", ")
+        ));
+        for name in new.iter().take(NAMES) {
+            lines.push(format!("        {name}"));
+        }
+        if new.len() > NAMES {
+            lines.push(format!("        … and {} more", new.len() - NAMES));
+        }
+    }
+    if !unknown.is_empty() {
+        let names: Vec<&str> = unknown
+            .iter()
+            .take(3)
+            .map(|u| u.rsplit(['/', ':']).next().unwrap_or(u))
+            .collect();
+        lines.push(format!(
+            "Left out, type unknown: {}{}",
+            names.join(", "),
+            if unknown.len() > 3 {
+                format!(" and {} more", unknown.len() - 3)
+            } else {
+                String::new()
+            }
+        ));
+    }
+    lines
+}
+
+/// One platform of a finished TUI import, in a line.
+pub fn import_done(platform: &str, r: &ImportResult) -> String {
+    let mut line = format!("✓ {}: added {}", platform.to_uppercase(), r.added);
+    if !r.duplicates.is_empty() {
+        let _ = write!(line, ", {} already there", r.duplicates.len());
+    }
+    for f in &r.failed {
+        let _ = write!(line, "\n✗ {}: {}", f.source.display(), f.error.message);
+    }
+    line
+}
+
+/// `library import` without `--platform`: each platform's report in turn.
+pub fn library_import_sorted(r: &SortedImportReport) -> String {
+    let mut out = String::new();
+    if r.parts.is_empty() && r.unknown.is_empty() {
+        let _ = writeln!(out, "No ROM files found.");
+    }
+    for part in &r.parts {
+        out.push_str(&library_import(part));
+        out.push('\n');
+    }
+    if !r.unknown.is_empty() {
+        let _ = writeln!(
+            out,
+            "Left out, type unknown ({}); import them with --platform:",
+            r.unknown.len()
+        );
+        for u in &r.unknown {
+            let _ = writeln!(out, "  {u}");
+        }
+    }
     out
 }

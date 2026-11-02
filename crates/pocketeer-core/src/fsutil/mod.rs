@@ -328,7 +328,7 @@ mod tests {
     use crate::testutil::write;
 
     #[test]
-    fn temp_write_leaves_no_debris_on_failure() {
+    fn temp_writes_leave_no_debris_and_file_helpers_keep_metadata() {
         let tmp = tempfile::tempdir().unwrap();
         let dest = tmp.path().join("sub/file.bin");
         let err = write_via_temp(&dest, |_| Err(Error::NotADirectory { path: dest.clone() }))

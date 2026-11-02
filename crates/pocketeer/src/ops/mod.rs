@@ -11,6 +11,7 @@ pub mod card;
 pub mod context;
 pub mod cores;
 pub mod library;
+pub mod memories;
 pub mod saves;
 
 use std::path::Path;

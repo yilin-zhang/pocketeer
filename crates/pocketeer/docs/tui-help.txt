@@ -1,7 +1,14 @@
+Keys mean the same thing on every tab. Lowercase acts on the selected row,
+uppercase on all of them. Keys are tinted by kind: sage brings something
+into the library, slate writes to the card, mauve renames or changes
+covers, rose removes.
+
 Global
-  Tab / Shift-Tab, 1-4   switch tabs
-  j/k, arrows, PgUp/PgDn  move
+  Tab / Shift-Tab, 1-5   switch tabs (Games, Memories, Cores, BIOS, Card)
+  j/k, arrows, PgUp/PgDn  move; Emacs keys too: C-n / C-p, C-v / M-v, C-f / C-b, C-g cancels
   /                        type to filter the list (Enter/Esc to stop typing; Esc again clears it)
+  text fields              Emacs editing: C-a / C-e, C-b / C-f, M-b / M-f, C-d, M-d, C-w,
+                           M-Backspace, C-k, C-u, C-y
   l                        cycle what the list shows (or click a segment in the filter bar)
   r                        reload everything (card, inventory, library)
   ?                        this help
@@ -10,7 +17,7 @@ Global
                            drag the border between two panes to resize them
 
 Cores   (installed cores and the whole inventory in one list)
-  Enter / i / u   install the selected core, or update it to the latest release
+  u               install the selected core, or update it to the latest release (also Enter)
   U               update every installed core that has an update
   x               remove the selected core (Cores/, Presets/, Settings/ are deleted)
 
@@ -19,21 +26,39 @@ BIOS   (every file the installed cores declare, with its status)
 
 Games   (the library and the card in one list; WHERE says which)
   n     create the library (when there is none yet)
-  a     import ROMs from this computer: a folder, or one ROM / zip (→ platform → optional DAT)
+  a     import ROMs from this computer: a folder, a ROM or a zip; each file's platform
+        comes from its extension (asked only when none says)
   i/I   import the selected card-only ROM / every card-only ROM into the library
   e     choose local/AP rename, or adopt the other copy's name; preview first
   d     check cached/automatic DATs again; retry failed identification
   t     rename games to the standard (No-Intro) names they match; imports offer this too
   x     library game → .trash/ inside the library;  card-only ROM → deleted from the card
-  b     copy a PNG/JPEG/WebP cover from this computer (confirm before replacing)
-  f/F   fetch the cover for this game / for its whole platform
-  C     fetch every missing cover (missing covers are also fetched on start)
-  S     copy the selected local game to the card
-  V     back up AP saves; conflicts offer AP / computer / leave unchanged
+  f     download the cover from libretro-thumbnails (missing covers are also
+        downloaded on start and after imports)
+  c     use a PNG/JPEG/WebP image from this computer as the cover (confirm
+        before replacing)
+  s     copy the selected local game to the card
+  b     back up the selected game's saves
+  B     back up every save on AP; conflicts offer AP / computer / leave unchanged
+  Enter / →   the selected game's saves: each save, its copy on AP, the library's
+              backup and older versions. SAVE column: ✓ backed up (n older
+              versions), ← AP is newer, ! changed on both sides, · library only
+    b / B   back up this game's saves / every save on AP
+    p       put the selected backup or older version on AP (AP's copy is archived)
+    x       trash the selected copy: AP → deleted after archiving; library → .trash/;
+            on the file name → the backup and every older version
+    Esc     back to the list
+
+Memories   (save states made from the Pocket's menu, on the card and in the library)
+  b   back up the selected Memory
+  B   back up every new or changed Memory
+  p   put the library's copy back on AP
+  x   trash it: from AP (archived first) or the library's copy (asks when both exist)
+  A Memory holds the whole machine, the game's save included, and loads only in
+  the core that made it; a newer core version may not load it.
 
 Card
-  V   back up saves
-  c   scan for macOS junk in the background, then preview removal
+  x   scan for macOS junk in the background, then preview removal
       (._* files, .DS_Store, __MACOSX); never scanned on startup
 
 Every file change shows its plan first with Apply / Cancel buttons: click one, or

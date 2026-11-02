@@ -18,16 +18,39 @@ use std::{
 
 pub const ROOTS: [&str; 4] = crate::card::SAVE_ROOTS;
 const MTIME_TOLERANCE: i64 = 2;
-#[derive(Debug, Clone, Copy)]
-pub struct SavesOptions {
-    pub include_states: bool,
+mod owners;
+mod trash;
+pub use owners::{Owners, SaveKey, expected_saves, link_owners, rom_key, save_key};
+pub use trash::{TrashPlan, TrashResult, TrashTarget, apply_trash, plan_trash};
+
+/// Which save files a backup looks at.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Scope {
+    /// Cartridge saves and Memories.
+    #[default]
+    All,
+    /// Cartridge saves (`Saves/`, `GB Studio/Saves/`) only.
+    Saves,
+    /// Memories (save states) only.
+    Memories,
 }
-impl Default for SavesOptions {
-    fn default() -> Self {
-        Self {
-            include_states: true,
+
+impl Scope {
+    fn covers(self, rel: &Path) -> bool {
+        let memory = rel.starts_with(crate::card::MEMORIES_DIR);
+        match self {
+            Scope::All => true,
+            Scope::Saves => !memory,
+            Scope::Memories => memory,
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SavesOptions {
+    pub scope: Scope,
+    /// Only these card paths (one game's saves); `None` for every one.
+    pub only: Option<Vec<PathBuf>>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -202,10 +225,30 @@ fn validate_path(rel: &Path) -> Result<()> {
     Ok(())
 }
 
-fn files(root: &Path, include_states: bool) -> Result<Vec<PathBuf>> {
+/// Whether a file under one of the save roots is the Pocket's. Under
+/// `Saves/` that means `Saves/<platform>/…` with an openFPGA platform id
+/// (lowercase letters, digits and `_`). Other firmware sharing the card
+/// keeps its own folders there (Onion OS: `Saves/CurrentProfile/`,
+/// `Saves/GuestProfile/`, `Saves/Common/`) and those are left alone.
+fn is_pocket_save(rel: &Path) -> bool {
+    let Ok(rest) = rel.strip_prefix(crate::card::SAVES_DIR) else {
+        return true;
+    };
+    let mut parts = rest.components();
+    match (parts.next(), parts.next()) {
+        (Some(Component::Normal(platform)), Some(_)) => platform.to_str().is_some_and(|p| {
+            !p.is_empty()
+                && p.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        }),
+        _ => false,
+    }
+}
+
+fn files(root: &Path, scope: Scope) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for folder in ROOTS {
-        if !include_states && folder.starts_with(crate::card::MEMORIES_DIR) {
+        if !scope.covers(Path::new(folder)) {
             continue;
         }
         let dir = root.join(folder);
@@ -218,7 +261,15 @@ fn files(root: &Path, include_states: bool) -> Result<Vec<PathBuf>> {
         for entry in walkdir::WalkDir::new(&dir)
             .min_depth(1)
             .into_iter()
-            .filter_entry(|e| !fsutil::is_hidden(e.file_name()))
+            .filter_entry(|e| {
+                // A folder that isn't a platform's is never walked into.
+                let skipped_dir = e.depth() == 1
+                    && e.file_type().is_dir()
+                    && e.path()
+                        .strip_prefix(root)
+                        .is_ok_and(|rel| !is_pocket_save(&rel.join("x")));
+                !fsutil::is_hidden(e.file_name()) && !skipped_dir
+            })
         {
             let entry = entry.map_err(|e| {
                 Error::io(
@@ -226,14 +277,9 @@ fn files(root: &Path, include_states: bool) -> Result<Vec<PathBuf>> {
                     std::io::Error::other(e.to_string()),
                 )
             })?;
-            if entry.file_type().is_file() {
-                paths.push(
-                    entry
-                        .path()
-                        .strip_prefix(root)
-                        .expect("descendant")
-                        .to_path_buf(),
-                );
+            let rel = entry.path().strip_prefix(root).expect("descendant");
+            if entry.file_type().is_file() && is_pocket_save(rel) {
+                paths.push(rel.to_path_buf());
             }
         }
     }
@@ -274,10 +320,13 @@ pub fn plan(
     opts: SavesOptions,
     progress: Progress<'_>,
 ) -> Result<SavesPlan> {
-    let mut paths = files(pocket.root(), opts.include_states)?;
-    paths.extend(files(&lib.root().join("saves"), opts.include_states)?);
+    let mut paths = files(pocket.root(), opts.scope)?;
+    paths.extend(files(&lib.root().join("saves"), opts.scope)?);
     paths.sort();
     paths.dedup();
+    if let Some(only) = &opts.only {
+        paths.retain(|p| only.contains(p));
+    }
     let mut plan = SavesPlan {
         actions: Vec::new(),
         summary: SavesSummary::default(),
@@ -289,38 +338,8 @@ pub fn plan(
         progress(Event::Status(format!("Comparing {}", rel.display())));
         let card = inspect(&pocket.root().join(rel))?;
         let computer = inspect(&current(lib, rel))?;
-        let action = match (&card, &computer) {
-            (Some(c), None) => SaveAction::Pull {
-                rel: rel.clone(),
-                size: c.size,
-                reason: SaveReason::OnlyOnCard,
-            },
-            (None, Some(_)) => SaveAction::Skip {
-                rel: rel.clone(),
-                reason: SaveSkip::OnlyInLibrary,
-            },
-            (Some(c), Some(l)) if c.sha1 == l.sha1 => SaveAction::Skip {
-                rel: rel.clone(),
-                reason: SaveSkip::UpToDate,
-            },
-            (Some(c), Some(l)) if c.mtime > l.mtime.saturating_add(MTIME_TOLERANCE) => {
-                SaveAction::Pull {
-                    rel: rel.clone(),
-                    size: c.size,
-                    reason: SaveReason::CardNewer,
-                }
-            }
-            (Some(c), Some(l)) => SaveAction::Conflict {
-                rel: rel.clone(),
-                card: c.clone(),
-                computer: l.clone(),
-                reason: if l.mtime > c.mtime.saturating_add(MTIME_TOLERANCE) {
-                    SaveReason::ComputerNewer
-                } else {
-                    SaveReason::DifferentContent
-                },
-            },
-            (None, None) => continue,
+        let Some(action) = decide(rel, &card, &computer) else {
+            continue;
         };
         plan.observed
             .insert(rel.clone(), Observed { card, computer });
@@ -332,6 +351,92 @@ pub fn plan(
     }
     plan.recount();
     Ok(plan)
+}
+
+/// What a backup does with one save, given both copies.
+fn decide(rel: &Path, card: &Option<SaveInfo>, computer: &Option<SaveInfo>) -> Option<SaveAction> {
+    Some(match (&card, &computer) {
+        (Some(c), None) => SaveAction::Pull {
+            rel: rel.to_path_buf(),
+            size: c.size,
+            reason: SaveReason::OnlyOnCard,
+        },
+        (None, Some(_)) => SaveAction::Skip {
+            rel: rel.to_path_buf(),
+            reason: SaveSkip::OnlyInLibrary,
+        },
+        (Some(c), Some(l)) if c.sha1 == l.sha1 => SaveAction::Skip {
+            rel: rel.to_path_buf(),
+            reason: SaveSkip::UpToDate,
+        },
+        (Some(c), Some(l)) if c.mtime > l.mtime.saturating_add(MTIME_TOLERANCE) => {
+            SaveAction::Pull {
+                rel: rel.to_path_buf(),
+                size: c.size,
+                reason: SaveReason::CardNewer,
+            }
+        }
+        (Some(c), Some(l)) => SaveAction::Conflict {
+            rel: rel.to_path_buf(),
+            card: c.clone(),
+            computer: l.clone(),
+            reason: if l.mtime > c.mtime.saturating_add(MTIME_TOLERANCE) {
+                SaveReason::ComputerNewer
+            } else {
+                SaveReason::DifferentContent
+            },
+        },
+        (None, None) => return None,
+    })
+}
+
+/// One save as the card and the library have it, for showing (nothing is
+/// planned or changed).
+#[derive(Debug, Clone, Serialize)]
+pub struct SaveOverview {
+    pub rel_path: PathBuf,
+    pub card: Option<SaveInfo>,
+    pub backup: Option<SaveInfo>,
+    /// Older versions, newest first.
+    pub versions: Vec<SaveVersion>,
+    /// What a backup would do now.
+    pub action: SaveAction,
+}
+
+/// Every save in `scope` on the card (when given) and in the library,
+/// including saves only older versions are left of.
+pub fn overview(lib: &Library, pocket: Option<&Pocket>, scope: Scope) -> Result<Vec<SaveOverview>> {
+    let mut paths = files(&lib.root().join("saves"), scope)?;
+    if let Some(pocket) = pocket {
+        paths.extend(files(pocket.root(), scope)?);
+    }
+    paths.extend(
+        db::save_version_paths(lib.conn())?
+            .into_iter()
+            .filter(|p| scope.covers(p) && is_pocket_save(p)),
+    );
+    paths.sort();
+    paths.dedup();
+    let mut out = Vec::new();
+    for rel in paths {
+        let card = match pocket {
+            Some(p) => inspect(&p.root().join(&rel))?,
+            None => None,
+        };
+        let backup = inspect(&current(lib, &rel))?;
+        let action = decide(&rel, &card, &backup).unwrap_or(SaveAction::Skip {
+            rel: rel.clone(),
+            reason: SaveSkip::OnlyInLibrary,
+        });
+        out.push(SaveOverview {
+            versions: versions(lib, &rel)?,
+            rel_path: rel,
+            card,
+            backup,
+            action,
+        });
+    }
+    Ok(out)
 }
 
 pub fn plan_restore(
@@ -381,6 +486,23 @@ pub fn plan_restore(
         library_root: lib.root().to_path_buf(),
         card_identity: crate::card::CardIdentity::read(pocket)?,
     };
+    plan.recount();
+    Ok(plan)
+}
+
+/// Restores the library's current copy of each of `rels` (a Memory and
+/// the files beside it) in one plan.
+pub fn plan_restore_paths(lib: &Library, pocket: &Pocket, rels: &[PathBuf]) -> Result<SavesPlan> {
+    let mut plans = rels.iter().map(|rel| plan_restore(lib, pocket, rel, None));
+    let mut plan = plans.next().ok_or_else(|| Error::InvalidPath {
+        path: PathBuf::new(),
+        reason: "nothing to restore".into(),
+    })??;
+    for other in plans {
+        let other = other?;
+        plan.actions.extend(other.actions);
+        plan.observed.extend(other.observed);
+    }
     plan.recount();
     Ok(plan)
 }
@@ -570,7 +692,7 @@ pub struct SaveEntry {
 
 pub fn list(lib: &Library) -> Result<Vec<SaveEntry>> {
     let counts = db::save_version_counts(lib.conn())?;
-    files(&lib.root().join("saves"), true)?
+    files(&lib.root().join("saves"), Scope::All)?
         .into_iter()
         .map(|rel| {
             let path = current(lib, &rel);
@@ -590,6 +712,36 @@ pub fn list(lib: &Library) -> Result<Vec<SaveEntry>> {
         })
         .collect()
 }
+/// Moves the library's backup and history of saves that were renamed on
+/// the card (`from` → `to`, card paths), so the next backup still pairs
+/// them. Returns how many saves moved.
+pub fn follow_renames(lib: &Library, moves: &[(PathBuf, PathBuf)]) -> Result<usize> {
+    let mut moved = 0;
+    for (from, to) in moves {
+        validate_path(from)?;
+        validate_path(to)?;
+        let history = |rel: &Path| PathBuf::from("saves/.history").join(rel);
+        let mut any = false;
+        for (a, b) in [
+            (current(lib, from), current(lib, to)),
+            (lib.root().join(history(from)), lib.root().join(history(to))),
+        ] {
+            if a.exists() {
+                if b.exists() {
+                    return Err(Error::AlreadyExists { path: b });
+                }
+                std::fs::create_dir_all(b.parent().expect("inside the library"))
+                    .map_err(|e| Error::io(&b, e))?;
+                std::fs::rename(&a, &b).map_err(|e| Error::io(&a, e))?;
+                any = true;
+            }
+        }
+        db::rename_save(lib.conn(), from, to, &history(to))?;
+        moved += usize::from(any);
+    }
+    Ok(moved)
+}
+
 pub fn versions(lib: &Library, rel: &Path) -> Result<Vec<SaveVersion>> {
     db::save_versions(lib.conn(), rel)
 }
@@ -603,7 +755,7 @@ mod tests {
     use super::*;
     use crate::testutil::{sd, write_with_mtime as write};
     const REL: &str = "Saves/gba/common/nested/game.sav";
-    fn backup(lib: &Library, pocket: &Pocket) -> SavesPlan {
+    fn plan_backup(lib: &Library, pocket: &Pocket) -> SavesPlan {
         plan(lib, pocket, SavesOptions::default(), &mut |_| {}).unwrap()
     }
 
@@ -613,7 +765,7 @@ mod tests {
         let mut lib = Library::init(&tmp.path().join("library")).unwrap();
         write(pocket.root(), REL, "AP one", 100);
         write(lib.root(), "saves/Saves/gb/common/offline.sav", "keep", 200);
-        let plan = backup(&lib, &pocket);
+        let plan = plan_backup(&lib, &pocket);
         assert_eq!(
             (plan.summary.pull, plan.summary.push, plan.summary.retained),
             (1, 0, 1)
@@ -622,7 +774,7 @@ mod tests {
         assert_eq!(result.pulled, 1);
         assert!(!pocket.root().join("Saves/gb/common/offline.sav").exists());
         write(pocket.root(), REL, "AP two", 300);
-        let plan = backup(&lib, &pocket);
+        let plan = plan_backup(&lib, &pocket);
         apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
         let history = versions(&lib, Path::new(REL)).unwrap();
         assert_eq!(history.len(), 1);
@@ -631,7 +783,7 @@ mod tests {
             b"AP one"
         );
         write(lib.root(), &format!("saves/{REL}"), "PC new", 400);
-        let mut plan = backup(&lib, &pocket);
+        let mut plan = plan_backup(&lib, &pocket);
         assert_eq!(plan.summary.conflicts, 1);
         assert_eq!(plan.changes(), 0);
         apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
@@ -654,12 +806,167 @@ mod tests {
     }
 
     #[test]
+    fn renamed_card_saves_take_their_backup_and_history_along() {
+        let (tmp, pocket) = sd();
+        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
+        write(pocket.root(), REL, "one", 100);
+        let plan = plan_backup(&lib, &pocket);
+        apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        write(pocket.root(), REL, "two", 200);
+        let plan = plan_backup(&lib, &pocket);
+        apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        let to = PathBuf::from("Saves/gba/common/nested/renamed.sav");
+        std::fs::rename(pocket.root().join(REL), pocket.root().join(&to)).unwrap();
+        assert_eq!(
+            follow_renames(&lib, &[(REL.into(), to.clone())]).unwrap(),
+            1
+        );
+        let history = versions(&lib, &to).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            std::fs::read(lib.root().join(&history[0].stored_path)).unwrap(),
+            b"one"
+        );
+        let plan = plan_backup(&lib, &pocket);
+        assert_eq!(plan.summary.up_to_date, 1);
+        assert_eq!(plan.actions.len(), 1);
+    }
+
+    #[test]
+    fn memories_are_their_own_scope_and_restore_with_their_companions() {
+        let (tmp, pocket) = sd();
+        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
+        let sta = "Memories/Save States/cart_1.sta";
+        let sav = "Memories/Save States/cart_1.sav";
+        write(pocket.root(), REL, "game save", 100);
+        write(pocket.root(), sta, "state", 100);
+        write(pocket.root(), sav, "sram", 100);
+        let memories = SavesOptions {
+            scope: Scope::Memories,
+            only: None,
+        };
+        let planned = plan(&lib, &pocket, memories, &mut |_| {}).unwrap();
+        let paths: Vec<&Path> = planned.actions.iter().map(SaveAction::path).collect();
+        assert_eq!(paths, [Path::new(sav), Path::new(sta)]);
+        apply(&mut lib, &pocket, &planned, &mut |_| {}).unwrap();
+        // Cartridge saves alone leave Memories out.
+        let saves = SavesOptions {
+            scope: Scope::Saves,
+            only: None,
+        };
+        let plan_saves = plan(&lib, &pocket, saves, &mut |_| {}).unwrap();
+        assert_eq!(plan_saves.actions.len(), 1);
+        assert_eq!(plan_saves.actions[0].path(), Path::new(REL));
+
+        // Both files go back together; the card's copies are archived first.
+        write(pocket.root(), sta, "newer state", 200);
+        std::fs::remove_file(pocket.root().join(sav)).unwrap();
+        let rels = [PathBuf::from(sta), PathBuf::from(sav)];
+        let restore = plan_restore_paths(&lib, &pocket, &rels).unwrap();
+        assert_eq!(restore.summary.push, 2);
+        apply(&mut lib, &pocket, &restore, &mut |_| {}).unwrap();
+        assert_eq!(std::fs::read(pocket.root().join(sta)).unwrap(), b"state");
+        assert_eq!(std::fs::read(pocket.root().join(sav)).unwrap(), b"sram");
+        assert!(
+            versions(&lib, Path::new(sta))
+                .unwrap()
+                .iter()
+                .any(|v| std::fs::read(lib.root().join(&v.stored_path)).unwrap() == b"newer state")
+        );
+    }
+
+    #[test]
+    fn other_firmware_folders_under_saves_are_not_pocket_saves() {
+        // A card shared with a Miyoo Mini: Onion OS writes its profiles here.
+        let (tmp, pocket) = sd();
+        let lib = Library::init(&tmp.path().join("library")).unwrap();
+        for rel in [
+            "Saves/CurrentProfile/saves/mGBA/Zelda.srm",
+            "Saves/GuestProfile/config/mGBA/mGBA.cfg",
+            "Saves/Common/battery_logs/battery_logs.sqlite",
+            "Saves/stray.sav",
+            REL,
+            "Saves/gb_old/common/game.sav",
+            "GB Studio/Saves/demo.sav",
+        ] {
+            write(pocket.root(), rel, "x", 100);
+        }
+        let mut seen: Vec<String> = plan_backup(&lib, &pocket)
+            .actions
+            .iter()
+            .map(|a| a.path().display().to_string())
+            .collect();
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                "GB Studio/Saves/demo.sav",
+                "Saves/gb_old/common/game.sav",
+                REL,
+            ]
+        );
+    }
+
+    #[test]
+    fn overview_shows_each_save_as_both_sides_have_it() {
+        let (tmp, pocket) = sd();
+        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
+        write(pocket.root(), REL, "one", 100);
+        let plan = plan_backup(&lib, &pocket);
+        apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        write(pocket.root(), REL, "two", 300);
+        write(lib.root(), "saves/Saves/gb/common/offline.sav", "kept", 100);
+        let seen = overview(&lib, Some(&pocket), Scope::Saves).unwrap();
+        assert_eq!(seen.len(), 2);
+        let newer = seen.iter().find(|s| s.rel_path == Path::new(REL)).unwrap();
+        assert!(matches!(
+            newer.action,
+            SaveAction::Pull {
+                reason: SaveReason::CardNewer,
+                ..
+            }
+        ));
+        assert_eq!(newer.card.as_ref().unwrap().mtime, 300);
+        assert_eq!(newer.backup.as_ref().unwrap().mtime, 100);
+        // Without a card everything is library-only, and nothing is read from it.
+        let offline = overview(&lib, None, Scope::Saves).unwrap();
+        assert!(offline.iter().all(|s| s.card.is_none()
+            && matches!(
+                s.action,
+                SaveAction::Skip {
+                    reason: SaveSkip::OnlyInLibrary,
+                    ..
+                }
+            )));
+    }
+
+    #[test]
+    fn a_swapped_card_is_refused_between_plan_and_apply() {
+        let (_card, pocket) = sd();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let mut lib = Library::init(&elsewhere.path().join("library")).unwrap();
+        write(pocket.root(), REL, "one", 100);
+        let plan = plan_backup(&lib, &pocket);
+        // Another card with the same contents mounted at the same place.
+        let root = pocket.root().to_path_buf();
+        std::fs::rename(&root, elsewhere.path().join("old card")).unwrap();
+        std::fs::create_dir_all(root.join("Assets")).unwrap();
+        std::fs::create_dir_all(root.join("Cores")).unwrap();
+        std::fs::write(root.join("Analogue_Pocket.json"), "{}").unwrap();
+        write(&root, REL, "one", 100);
+        let result = apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        assert_eq!(result.failed.len(), 1);
+        assert_eq!(result.failed[0].error.code, "STALE_PLAN");
+        assert!(!current(&lib, Path::new(REL)).exists());
+    }
+
+    #[test]
     fn equal_metadata_different_bytes_conflicts_and_stale_preview_is_rejected() {
         let (tmp, pocket) = sd();
         let mut lib = Library::init(&tmp.path().join("library")).unwrap();
         write(pocket.root(), REL, "AAAA", 100);
         write(lib.root(), &format!("saves/{REL}"), "BBBB", 100);
-        let mut plan = backup(&lib, &pocket);
+        let mut plan = plan_backup(&lib, &pocket);
         assert_eq!(plan.summary.conflicts, 1);
         plan.resolve(0, ConflictChoice::Card);
         write(lib.root(), &format!("saves/{REL}"), "CCCC", 100);
@@ -669,7 +976,7 @@ mod tests {
             std::fs::read(current(&lib, Path::new(REL))).unwrap(),
             b"CCCC"
         );
-        let mut plan = backup(&lib, &pocket);
+        let mut plan = plan_backup(&lib, &pocket);
         plan.resolve(0, ConflictChoice::Skip);
         assert_eq!(plan.summary.conflicts, 0);
         assert_eq!(plan.summary.retained, 1);
@@ -680,10 +987,10 @@ mod tests {
         let (tmp, pocket) = sd();
         let mut lib = Library::init(&tmp.path().join("library")).unwrap();
         write(pocket.root(), REL, "old", 100);
-        let plan = backup(&lib, &pocket);
+        let plan = plan_backup(&lib, &pocket);
         apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
         write(pocket.root(), REL, "new", 200);
-        let plan = backup(&lib, &pocket);
+        let plan = plan_backup(&lib, &pocket);
         apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
         let old = versions(&lib, Path::new(REL)).unwrap().remove(0);
         write(pocket.root(), REL, "unbacked AP", 300);
@@ -698,7 +1005,14 @@ mod tests {
                 .any(|v| std::fs::read(lib.root().join(&v.stored_path)).unwrap() == b"unbacked AP")
         );
         std::fs::write(lib.root().join(old.stored_path), "corrupt").unwrap();
-        assert!(plan_restore(&lib, &pocket, Path::new(REL), Some(old.id)).is_err());
-        assert!(plan_restore(&lib, &pocket, Path::new("../outside"), None).is_err());
+        let code = |r: Result<SavesPlan>| r.unwrap_err().code();
+        assert_eq!(
+            code(plan_restore(&lib, &pocket, Path::new(REL), Some(old.id))),
+            "CONTENT_MISMATCH"
+        );
+        assert_eq!(
+            code(plan_restore(&lib, &pocket, Path::new("../outside"), None)),
+            "INVALID_PATH"
+        );
     }
 }

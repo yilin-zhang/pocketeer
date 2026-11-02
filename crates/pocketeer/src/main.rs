@@ -10,14 +10,17 @@ mod tui;
 use std::{io::IsTerminal, process::ExitCode};
 
 use clap::{CommandFactory, Parser};
-use pocketeer_core::plan::Event;
+use pocketeer_core::{
+    plan::Event,
+    transfer::saves::{Scope, TrashTarget},
+};
 
 use crate::{
     cli::{
         BiosCommand, CardCommand, Cli, Command, ConfigCommand, CoresCommand, CoversCommand,
-        InventoryCommand, LibraryCommand, SavesCommand,
+        InventoryCommand, LibraryCommand, MemoriesCommand, SavesCommand,
     },
-    ops::{card, context::Context, cores, library, saves},
+    ops::{card, context::Context, cores, library, memories, saves},
     output::Output,
 };
 
@@ -70,6 +73,7 @@ fn main() -> ExitCode {
         Command::Covers(cmd) => run_covers(&ctx, &out, cmd, &mut progress),
         Command::Card(cmd) => run_card(&ctx, &out, cmd, &mut progress),
         Command::Saves(cmd) => run_saves(&ctx, &out, cmd, &mut progress),
+        Command::Memories(cmd) => run_memories(&ctx, &out, cmd, &mut progress),
         Command::Config(cmd) => run_config(&ctx, &out, cmd),
         Command::Docs { path } => out.emit(cli::docs(&path), text::docs_text),
     }
@@ -150,8 +154,22 @@ fn run_library(
         LibraryCommand::Status => out.emit(library::status(ctx), text::library::library_status),
         LibraryCommand::Import(args) => {
             let mode = args.apply.into();
+            if args.platform.is_none() {
+                return out.emit_outcome(
+                    library::import_sorted(
+                        ctx,
+                        &args.dir,
+                        args.standard_names,
+                        !args.no_covers,
+                        mode,
+                        progress,
+                    ),
+                    text::library::library_import_sorted,
+                );
+            }
+            let req = args.request().expect("platform checked above");
             out.emit_outcome(
-                library::import(ctx, &args.into(), mode, progress),
+                library::import(ctx, &req, mode, progress),
                 text::library::library_import,
             )
         }
@@ -277,7 +295,7 @@ fn run_saves(
         } => out.emit_outcome(
             saves::backup(
                 ctx,
-                !no_states,
+                if no_states { Scope::Saves } else { Scope::All },
                 conflicts.map(Into::into),
                 apply.into(),
                 progress,
@@ -296,6 +314,47 @@ fn run_saves(
         SavesCommand::Versions { path } => {
             out.emit(saves::versions(ctx, &path), text::saves::saves_versions)
         }
+        SavesCommand::Trash {
+            path,
+            card,
+            version,
+            backup,
+            apply,
+        } => {
+            let target = match (card, version, backup) {
+                (true, ..) => TrashTarget::Card,
+                (_, Some(id), _) => TrashTarget::Version(id),
+                (_, None, true) => TrashTarget::Backup,
+                _ => TrashTarget::Library,
+            };
+            out.emit_outcome(
+                saves::trash(ctx, &path, target, apply.into()),
+                text::saves::saves_trash,
+            )
+        }
+    }
+}
+
+fn run_memories(
+    ctx: &Context,
+    out: &Output,
+    cmd: MemoriesCommand,
+    progress: &mut dyn FnMut(Event),
+) -> ExitCode {
+    match cmd {
+        MemoriesCommand::List => out.emit(memories::list(ctx), text::memories::memories_list),
+        MemoriesCommand::Backup { conflicts, apply } => out.emit_outcome(
+            memories::backup(ctx, conflicts.map(Into::into), apply.into(), progress),
+            text::saves::saves_sync,
+        ),
+        MemoriesCommand::Restore { path, apply } => out.emit_outcome(
+            memories::restore(ctx, &path, apply.into(), progress),
+            text::saves::saves_sync,
+        ),
+        MemoriesCommand::Trash { path, card, apply } => out.emit_outcome(
+            memories::trash(ctx, &path, card, apply.into()),
+            text::saves::saves_trash,
+        ),
     }
 }
 

@@ -198,7 +198,10 @@ mod tests {
         assert_eq!(covers::path_for(&lib, game.id).unwrap(), Some(old.clone()));
 
         fs::write(&source, b"invalid image").unwrap();
-        assert!(plan(&lib, game.id, &source).is_err());
+        assert_eq!(
+            plan(&lib, game.id, &source).unwrap_err().code(),
+            "UNSUPPORTED_IMAGE"
+        );
         assert_eq!(fs::read(&old).unwrap(), original);
         image(&source, 90);
         let replacement = plan(&lib, game.id, &source).unwrap();
@@ -215,7 +218,8 @@ mod tests {
                 .unwrap()
                 .imported
         );
-        assert!(apply(&mut lib, &preview).is_err());
+        // The first preview is out of date now.
+        assert_eq!(apply(&mut lib, &preview).unwrap_err().code(), "STALE_PLAN");
     }
 
     #[test]

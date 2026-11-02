@@ -194,7 +194,7 @@ mod tests {
     use crate::testutil::write;
 
     /// A card littered with the junk macOS leaves behind.
-    fn sd() -> (tempfile::TempDir, Pocket) {
+    fn junk_card() -> (tempfile::TempDir, Pocket) {
         let (tmp, pocket) = crate::testutil::sd();
         for (rel, body) in [
             ("Cores/a.B/core.json", "{}"),
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn finds_junk_and_leaves_system_dirs_unless_asked() {
-        let (tmp, pocket) = sd();
+        let (tmp, pocket) = junk_card();
         let p = plan(&pocket, false).unwrap();
         let paths: Vec<String> = p
             .entries

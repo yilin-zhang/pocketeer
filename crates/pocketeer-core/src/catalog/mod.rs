@@ -8,6 +8,32 @@ pub mod inventory;
 pub mod libretro;
 pub use dat::Dat;
 
+/// ROM file extensions that name their platform without doubt, beyond the
+/// ones that already are a platform id (`gba`, `nes`, …).
+const EXTENSIONS: &[(&str, &str)] = &[
+    ("sfc", "snes"),
+    ("smc", "snes"),
+    ("md", "genesis"),
+    ("gen", "genesis"),
+    ("smd", "genesis"),
+    ("lnx", "lynx"),
+    ("pocket", "gbstudio"),
+];
+
+/// The platform a ROM file belongs to, judging by its extension: one of
+/// `known` (platform ids the library or the card's cores use) when the
+/// extension is that id, or an unambiguous extension from a fixed table.
+pub fn platform_of(file_name: &str, known: &[String]) -> Option<String> {
+    let ext = file_name.rsplit_once('.')?.1.to_lowercase();
+    if let Some((_, p)) = EXTENSIONS.iter().find(|(e, _)| *e == ext) {
+        return Some((*p).to_string());
+    }
+    let builtin = [
+        "gb", "gbc", "gba", "nes", "snes", "sms", "gg", "pce", "lynx",
+    ];
+    (builtin.contains(&ext.as_str()) || known.contains(&ext)).then_some(ext)
+}
+
 /// Pocket platform id → libretro-thumbnails repository name.
 pub const SYSTEMS: &[(&str, &str)] = &[
     ("2600", "Atari - 2600"),
@@ -65,5 +91,23 @@ pub fn dat_system(platform: &str) -> Option<&'static str> {
     match platform.to_ascii_lowercase().as_str() {
         "pcecd" | "psx" | "ng" | "gamate" | "gameandwatch" => None,
         _ => thumbnail_system(platform),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn platforms_come_from_unambiguous_extensions() {
+        let known = vec!["wonderswan".to_string()];
+        assert_eq!(platform_of("Metroid.GBA", &known).as_deref(), Some("gba"));
+        assert_eq!(platform_of("Sonic.md", &known).as_deref(), Some("genesis"));
+        assert_eq!(
+            platform_of("x.wonderswan", &known).as_deref(),
+            Some("wonderswan")
+        );
+        assert_eq!(platform_of("disc.bin", &known), None);
+        assert_eq!(platform_of("noext", &known), None);
     }
 }

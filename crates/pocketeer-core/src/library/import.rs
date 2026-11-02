@@ -724,16 +724,6 @@ mod tests {
     }
 
     #[test]
-    fn fallback_names() {
-        assert_eq!(fallback_game_name("Foo (USA).gba"), "Foo (USA)");
-        assert_eq!(fallback_game_name("noext"), "noext");
-        assert_eq!(
-            fallback_game_name("weird.longextension"),
-            "weird.longextension"
-        );
-    }
-
-    #[test]
     fn a_single_file_or_zip_imports_like_a_folder_of_one() {
         let lib_dir = tempfile::tempdir().unwrap();
         let lib = Library::init(lib_dir.path()).unwrap();

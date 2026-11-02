@@ -52,17 +52,6 @@ pub struct ImportReport {
     pub warnings: Vec<String>,
 }
 
-impl ImportReport {
-    /// A plan shown in a TUI dialog before it is applied.
-    pub fn preview(plan: ImportPlan) -> Self {
-        ImportReport {
-            staged: Staged::preview(plan),
-            covers: None,
-            warnings: Vec::new(),
-        }
-    }
-}
-
 impl Outcome for ImportReport {
     fn error(&self) -> Option<Error> {
         self.staged.error()
@@ -207,6 +196,59 @@ pub fn plan_import(
     Ok((opts, plan))
 }
 
+/// What a folder holds, sorted by platform: one import plan per platform
+/// the file extensions name, and the files whose platform they don't.
+pub struct SortedImport {
+    pub parts: Vec<(ImportOptions, ImportPlan)>,
+    /// Files no extension rule recognised, relative to the folder.
+    pub unknown: Vec<String>,
+}
+
+/// Plans importing `source` with each file's platform taken from its
+/// extension (`known`: platform ids the library or card already use).
+/// Files it can't place go to `fallback` when given, else into `unknown`.
+pub fn plan_import_sorted(
+    ctx: &Context,
+    source: &Path,
+    known: &[String],
+    fallback: Option<&str>,
+    standard_names: bool,
+    progress: &mut dyn FnMut(Event),
+) -> Result<SortedImport> {
+    let lib = ctx.library()?;
+    let (dir, candidates) = pocketeer_core::fsutil::scan::scan_source(source)?;
+    let mut groups: std::collections::BTreeMap<String, Vec<_>> = Default::default();
+    let mut unknown = Vec::new();
+    for c in candidates {
+        let platform = pocketeer_core::catalog::platform_of(&c.file.display_name(), known)
+            .or_else(|| fallback.map(str::to_owned));
+        match platform {
+            Some(p) => groups.entry(p).or_default().push(c),
+            None => unknown.push(c.file.location()),
+        }
+    }
+    let mut parts = Vec::new();
+    for (platform, files) in groups {
+        let opts = ImportOptions {
+            platform_name: ctx.platform_name(&platform),
+            platform: platform.clone(),
+            dat_only: false,
+        };
+        let mut plan = import::plan_import_candidates(
+            &lib,
+            &dir,
+            &files,
+            &opts,
+            None,
+            &mut ctx.hash_cache(),
+            progress,
+        )?;
+        suggest_standard_names(ctx, &lib, &platform, &mut plan, standard_names)?;
+        parts.push((opts, plan));
+    }
+    Ok(SortedImport { parts, unknown })
+}
+
 pub fn apply_import(
     ctx: &Context,
     options: &ImportOptions,
@@ -231,6 +273,56 @@ pub fn import(
         staged,
         warnings: metadata.problems().map(str::to_owned).collect(),
         covers: metadata.covers,
+    })
+}
+
+/// `library import` without `--platform`: one report per platform the
+/// file extensions name, and the files they don't.
+#[derive(Debug, Serialize)]
+pub struct SortedImportReport {
+    pub parts: Vec<ImportReport>,
+    /// Files whose platform couldn't be told; give `--platform` for them.
+    pub unknown: Vec<String>,
+}
+
+impl Outcome for SortedImportReport {
+    fn error(&self) -> Option<Error> {
+        self.parts.iter().find_map(|p| p.error())
+    }
+}
+
+/// `library import` without `--platform`: each file's platform comes from
+/// its extension.
+pub fn import_sorted(
+    ctx: &Context,
+    source: &Path,
+    standard_names: bool,
+    covers: bool,
+    mode: Mode,
+    progress: &mut dyn FnMut(Event),
+) -> Result<SortedImportReport> {
+    let known: Vec<String> = ctx
+        .library()?
+        .platform_stats()?
+        .into_iter()
+        .map(|p| p.platform)
+        .collect();
+    let sorted = plan_import_sorted(ctx, source, &known, None, standard_names, progress)?;
+    let mut parts = Vec::new();
+    for (opts, plan) in sorted.parts {
+        let staged = stage(mode, plan, |plan| apply_import(ctx, &opts, plan, progress))?;
+        let added = staged.result.as_ref().map_or(0, |r| r.added);
+        let metadata = metadata_after_import(ctx, Some(&opts.platform), (added, covers), progress)
+            .unwrap_or_default();
+        parts.push(ImportReport {
+            staged,
+            warnings: metadata.problems().map(str::to_owned).collect(),
+            covers: metadata.covers,
+        });
+    }
+    Ok(SortedImportReport {
+        parts,
+        unknown: sorted.unknown,
     })
 }
 

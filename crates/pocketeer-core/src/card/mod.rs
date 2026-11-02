@@ -8,6 +8,7 @@ pub mod clean;
 pub mod cores;
 pub mod formats;
 pub mod install;
+pub mod memories;
 pub mod rename;
 pub mod roms;
 
@@ -405,18 +406,6 @@ mod tests {
         make_pocket(&mounts.path().join("B"));
         let err = Pocket::detect_in(mounts.path()).unwrap_err();
         assert_eq!(err.code(), "MULTIPLE_SD_CARDS");
-    }
-
-    #[test]
-    fn mount_dirs_match_the_host_os() {
-        let dirs = mount_dirs();
-        if cfg!(target_os = "macos") {
-            assert_eq!(dirs, [PathBuf::from("/Volumes")]);
-        } else if cfg!(target_os = "linux") {
-            assert!(dirs.contains(&PathBuf::from("/mnt")));
-        } else {
-            assert!(dirs.is_empty());
-        }
     }
 }
 

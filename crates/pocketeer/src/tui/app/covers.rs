@@ -5,6 +5,11 @@
 //! the list usually finds them done. Each frame tells the thread which
 //! covers it wants, in order; work for rows already scrolled past is
 //! dropped instead of making the selected one wait behind it.
+//!
+//! Terminals that can show images get the picture itself. The others get
+//! a dot-matrix picture: braille characters give 2×4 dots per cell, eight
+//! times what half blocks give, and one tone of dots dithered on the dark
+//! background reads like the Pocket's own screen instead of a mosaic.
 
 use std::{
     collections::HashMap,
@@ -17,8 +22,17 @@ use std::{
     time::SystemTime,
 };
 
-use ratatui::layout::Size;
-use ratatui_image::{Resize, ResizeEncodeRender, picker::Picker, protocol::StatefulProtocol};
+use image::{DynamicImage, GrayImage, RgbImage, imageops::FilterType};
+use ratatui::{
+    layout::Size,
+    style::{Color, Style},
+    text::{Line, Span},
+};
+use ratatui_image::{
+    Resize, ResizeEncodeRender,
+    picker::{Picker, ProtocolType},
+    protocol::StatefulProtocol,
+};
 
 /// How the cover panel fits an image; the widget must be drawn with the same.
 pub const RESIZE: Resize = Resize::Fit(None);
@@ -41,7 +55,7 @@ enum Work {
     Resize {
         path: PathBuf,
         stamp: Stamp,
-        cover: Box<StatefulProtocol>,
+        cover: Art,
         size: Size,
     },
 }
@@ -60,8 +74,43 @@ struct Done {
     outcome: Outcome,
 }
 
+/// A decoded cover, ready to draw at the size it was made for.
+enum Art {
+    /// For terminals that show images (kitty, iTerm2, sixel).
+    Image(Box<StatefulProtocol>),
+    /// For the others.
+    Dots(Dots),
+}
+
+impl Art {
+    fn new(picker: &Picker, image: DynamicImage, size: Size) -> Self {
+        match picker.protocol_type() {
+            ProtocolType::Halfblocks => Art::Dots(Dots::new(&image, size)),
+            _ => Art::Image(Box::new(picker.new_resize_protocol(image))),
+        }
+    }
+
+    fn needs_resize(&self, size: Size) -> bool {
+        match self {
+            Art::Image(p) => p.needs_resize(&RESIZE, size).is_some(),
+            Art::Dots(d) => d.size != size,
+        }
+    }
+
+    fn resize(&mut self, size: Size) {
+        match self {
+            Art::Image(p) => {
+                if let Some(target) = p.needs_resize(&RESIZE, size) {
+                    p.resize_encode(&RESIZE, target);
+                }
+            }
+            Art::Dots(d) => d.resize(size),
+        }
+    }
+}
+
 enum Outcome {
-    Ready(Box<StatefulProtocol>),
+    Ready(Art),
     Unreadable,
     /// Nobody wanted it any more by the time the thread got to it.
     Dropped,
@@ -70,13 +119,15 @@ enum Outcome {
 enum State {
     Working,
     Unreadable,
-    Ready(Box<StatefulProtocol>),
+    Ready(Art),
 }
 
 pub enum Cover<'a> {
     Loading,
     Unreadable,
-    Ready(&'a mut StatefulProtocol),
+    Image(&'a mut StatefulProtocol),
+    /// The dot-matrix picture, one line per row, centred in the panel.
+    Dots(&'a [Line<'static>]),
 }
 
 pub struct Covers {
@@ -187,7 +238,7 @@ impl Covers {
             return Cover::Loading;
         };
         if let State::Ready(cover) = state
-            && cover.needs_resize(&RESIZE, size).is_some()
+            && cover.needs_resize(size)
         {
             let State::Ready(cover) = std::mem::replace(state, State::Working) else {
                 unreachable!()
@@ -203,7 +254,8 @@ impl Covers {
         match state {
             State::Working => Cover::Loading,
             State::Unreadable => Cover::Unreadable,
-            State::Ready(cover) => Cover::Ready(cover),
+            State::Ready(Art::Image(p)) => Cover::Image(p),
+            State::Ready(Art::Dots(d)) => Cover::Dots(&d.lines),
         }
     }
 
@@ -260,7 +312,7 @@ fn run(picker: &Picker, work: Work) -> Done {
                 .ok()
                 .and_then(|r| r.with_guessed_format().ok())
                 .and_then(|r| r.decode().ok())
-                .map(|img| Box::new(picker.new_resize_protocol(img)));
+                .map(|img| Art::new(picker, img, size));
             (path, stamp, cover, size)
         }
         Work::Resize {
@@ -271,9 +323,7 @@ fn run(picker: &Picker, work: Work) -> Done {
         } => (path, stamp, Some(cover), size),
     };
     let cover = cover.map(|mut cover| {
-        if let Some(target) = cover.needs_resize(&RESIZE, size) {
-            cover.resize_encode(&RESIZE, target);
-        }
+        cover.resize(size);
         cover
     });
     Done {
@@ -283,9 +333,151 @@ fn run(picker: &Picker, work: Work) -> Done {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The dot-matrix picture
+
+/// A cover drawn in coloured braille dots, kept with its picture so it can
+/// be drawn again when the panel changes size.
+struct Dots {
+    source: RgbImage,
+    /// The size the lines were drawn for, in cells.
+    size: Size,
+    lines: Vec<Line<'static>>,
+}
+
+impl Dots {
+    fn new(image: &DynamicImage, size: Size) -> Self {
+        let source = image.to_rgb8();
+        let lines = render(&source, size);
+        Dots {
+            source,
+            size,
+            lines,
+        }
+    }
+
+    fn resize(&mut self, size: Size) {
+        self.size = size;
+        self.lines = render(&self.source, size);
+    }
+}
+
+/// Dots per cell, across and down.
+const DOTS_X: u32 = 2;
+const DOTS_Y: u32 = 4;
+
+/// The braille bit for the dot at (x, y) in a cell.
+const BITS: [[u8; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
+
+/// Fits `source` into `size` cells (dots are about square, since a cell is
+/// twice as tall as it is wide), dithers its brightness and encodes it as
+/// braille. Which dots are lit carries the brightness; each cell is drawn
+/// in the average colour of its lit dots, so the colour carries the hue.
+fn render(source: &RgbImage, size: Size) -> Vec<Line<'static>> {
+    let (cols, rows) = (size.width as u32, size.height as u32);
+    if cols == 0 || rows == 0 || source.width() == 0 || source.height() == 0 {
+        return Vec::new();
+    }
+    let (max_w, max_h) = (cols * DOTS_X, rows * DOTS_Y);
+    let scale = (max_w as f32 / source.width() as f32).min(max_h as f32 / source.height() as f32);
+    let w = ((source.width() as f32 * scale).round() as u32).clamp(1, max_w);
+    let h = ((source.height() as f32 * scale).round() as u32).clamp(1, max_h);
+    let small = image::imageops::resize(source, w, h, FilterType::Triangle);
+    let on = dither(&DynamicImage::ImageRgb8(small.clone()).to_luma8());
+
+    // Centre the picture in whole cells.
+    let used_cols = w.div_ceil(DOTS_X);
+    let used_rows = h.div_ceil(DOTS_Y);
+    let left = ((cols - used_cols) / 2) as usize;
+    let top = (rows - used_rows) / 2;
+    let mut lines = vec![Line::default(); top as usize];
+    for row in 0..used_rows {
+        let mut spans = vec![Span::raw(" ".repeat(left))];
+        for col in 0..used_cols {
+            let mut bits = 0u8;
+            let mut sum = [0u32; 3];
+            let mut lit = 0u32;
+            for (dx, column) in BITS.iter().enumerate() {
+                for (dy, bit) in column.iter().enumerate() {
+                    let (x, y) = (col * DOTS_X + dx as u32, row * DOTS_Y + dy as u32);
+                    if x < w && y < h && on[(y * w + x) as usize] {
+                        bits |= bit;
+                        let p = small.get_pixel(x, y).0;
+                        for (s, c) in sum.iter_mut().zip(p) {
+                            *s += c as u32;
+                        }
+                        lit += 1;
+                    }
+                }
+            }
+            // An empty cell is a space: some fonts draw U+2800 as a box.
+            if bits == 0 {
+                spans.push(Span::raw(" "));
+                continue;
+            }
+            let dot = char::from_u32(0x2800 + bits as u32).unwrap_or(' ');
+            let [r, g, b] = sum.map(|s| s / lit);
+            spans.push(Span::styled(
+                dot.to_string(),
+                Style::new().fg(visible(r, g, b)),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+/// A dot's colour, lifted so a dark colour still shows on the dark
+/// background: a lit dot means "light here", and density already says how
+/// light.
+fn visible(r: u32, g: u32, b: u32) -> Color {
+    const FLOOR: u32 = 130;
+    let max = r.max(g).max(b).max(1);
+    let lift = |c: u32| (c * max.max(FLOOR) / max).min(255) as u8;
+    Color::Rgb(lift(r), lift(g), lift(b))
+}
+
+/// Which dots are lit: the contrast is stretched to the picture's own
+/// range, then Atkinson dithering (the classic Mac look) spreads three
+/// quarters of each error to six neighbours, which keeps highlights and
+/// shadows clean instead of speckled.
+fn dither(image: &GrayImage) -> Vec<bool> {
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let mut px: Vec<f32> = image.pixels().map(|p| p.0[0] as f32).collect();
+    // Stretch between the 2nd and 98th percentile, so one stray pixel
+    // doesn't flatten the rest. A nearly flat picture is left as it is:
+    // stretching nothing would turn it all black or all white.
+    let mut sorted = px.clone();
+    sorted.sort_by(f32::total_cmp);
+    let low = sorted[sorted.len() / 50];
+    let high = sorted[sorted.len() - 1 - sorted.len() / 50];
+    if high - low >= 32.0 {
+        for p in &mut px {
+            *p = ((*p - low) / (high - low) * 255.0).clamp(0.0, 255.0);
+        }
+    }
+    let mut on = vec![false; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let lit = px[i] >= 128.0;
+            on[i] = lit;
+            let error = (px[i] - if lit { 255.0 } else { 0.0 }) / 8.0;
+            for (dx, dy) in [(1, 0), (2, 0), (-1, 1), (0, 1), (1, 1), (0, 2)] {
+                let (nx, ny) = (x as isize + dx, y as isize + dy);
+                if nx >= 0 && (nx as usize) < w && (ny as usize) < h {
+                    px[ny as usize * w + nx as usize] += error;
+                }
+            }
+        }
+    }
+    on
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::Luma;
     use std::time::{Duration, Instant};
 
     fn wait_ready(covers: &mut Covers, path: &Path, size: Size) -> bool {
@@ -293,7 +485,7 @@ mod tests {
         while start.elapsed() < Duration::from_secs(10) {
             covers.receive();
             match covers.show(path, &[], size) {
-                Cover::Ready(_) => return true,
+                Cover::Image(_) | Cover::Dots(_) => return true,
                 Cover::Unreadable => return false,
                 Cover::Loading => thread::sleep(Duration::from_millis(5)),
             }
@@ -342,5 +534,75 @@ mod tests {
         }
         assert!(wait_ready(&mut covers, &paths[5], size));
         assert!(wait_ready(&mut covers, &paths[0], size));
+    }
+
+    // -- the dot-matrix picture --
+
+    fn picture(w: u32, h: u32, f: impl Fn(u32, u32) -> u8) -> DynamicImage {
+        DynamicImage::ImageLuma8(GrayImage::from_fn(w, h, |x, y| Luma([f(x, y)])))
+    }
+
+    fn text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn a_tall_cover_is_fitted_and_centred_in_whole_cells() {
+        // White left half, black right half; 1:2, so 10×5 cells take the
+        // full height (20 dots) and 10 dots (5 cells) across.
+        let dots = Dots::new(
+            &picture(50, 100, |x, _| if x < 25 { 255 } else { 0 }),
+            Size::new(10, 5),
+        );
+        let lines: Vec<String> = dots.lines.iter().map(text).collect();
+        assert_eq!(lines.len(), 5);
+        for line in &lines {
+            assert_eq!(line.chars().count(), 2 + 5);
+            assert!(line.starts_with("  "));
+        }
+        // Lit on the left, dark on the right.
+        assert_eq!(lines[2].chars().nth(2), Some('⣿'));
+        assert_eq!(lines[2].chars().nth(6), Some(' '));
+    }
+
+    #[test]
+    fn dots_take_the_colour_of_the_picture_lifted_to_show_on_black() {
+        let red = DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, image::Rgb([200, 40, 40])));
+        let dots = Dots::new(&red, Size::new(4, 2));
+        let colours: Vec<_> = dots
+            .lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .filter_map(|s| s.style.fg)
+            .collect();
+        assert!(!colours.is_empty());
+        assert!(colours.iter().all(|c| *c == Color::Rgb(200, 40, 40)));
+        // Dark navy keeps its hue but comes up to a visible brightness.
+        assert_eq!(visible(0, 0, 60), Color::Rgb(0, 0, 130));
+    }
+
+    #[test]
+    fn mid_grey_dithers_to_about_half_the_dots() {
+        // A grey ramp: after stretching, the middle is mid-grey.
+        let on = dither(&picture(64, 64, |x, _| (x * 4) as u8).to_luma8());
+        let middle: Vec<bool> = (0..64)
+            .flat_map(|y| (28..36).map(move |x| (x, y)))
+            .map(|(x, y)| on[y * 64 + x])
+            .collect();
+        let lit = middle.iter().filter(|b| **b).count() as f32 / middle.len() as f32;
+        assert!((0.35..0.65).contains(&lit), "{lit}");
+    }
+
+    #[test]
+    fn redrawing_at_another_size_uses_the_kept_picture() {
+        let dots = Dots::new(&picture(40, 40, |_, _| 200), Size::new(8, 4));
+        let art = Art::Dots(dots);
+        assert!(!art.needs_resize(Size::new(8, 4)));
+        assert!(art.needs_resize(Size::new(20, 10)));
+        let Art::Dots(mut dots) = art else {
+            unreachable!()
+        };
+        dots.resize(Size::new(20, 10));
+        assert_eq!(dots.lines.len(), 10);
     }
 }

@@ -457,7 +457,7 @@ mod tests {
         r#"{"instance":{"data_path":"games","data_slots":[{"id":1,"filename":"game1.hex"}]}}"#;
 
     /// Two cores with data.json (one with an instance file), one without.
-    fn sd() -> (tempfile::TempDir, Pocket) {
+    fn bios_card() -> (tempfile::TempDir, Pocket) {
         let (tmp, pocket) = crate::testutil::sd();
         for (rel, body) in [
             ("Cores/sp.GBA/core.json", GBA_CORE),
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn collects_core_and_instance_slots() {
-        let (_tmp, pocket) = sd();
+        let (_tmp, pocket) = bios_card();
         let r = report(&pocket);
         assert_eq!(r.cores.len(), 3);
         let gba = file(&r, "Assets/gba/common/gba_bios.bin");
@@ -515,7 +515,7 @@ mod tests {
 
     #[test]
     fn present_wrong_hash_and_root_files() {
-        let (tmp, pocket) = sd();
+        let (tmp, pocket) = bios_card();
         fs::create_dir_all(tmp.path().join("Assets/gba/common")).unwrap();
         fs::write(tmp.path().join("Assets/gba/common/gba_bios.bin"), "WRONG").unwrap();
         fs::write(tmp.path().join("game1.hex"), "hex").unwrap();
@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn root_zip_contents_are_reported_not_placed() {
-        let (tmp, pocket) = sd();
+        let (tmp, pocket) = bios_card();
         let zip = build_zip(&[("bios/gba_bios.bin", b"GBA BIOS")]);
         fs::write(tmp.path().join("bios.zip"), zip).unwrap();
         let r = report(&pocket);
@@ -573,7 +573,7 @@ mod tests {
 
     #[test]
     fn only_filter_and_unknown_id() {
-        let (_tmp, pocket) = sd();
+        let (_tmp, pocket) = bios_card();
         let installed = cores::list_installed(&pocket).unwrap();
         let r = check(&pocket, &installed, Some(&["SP.gba".to_string()])).unwrap();
         assert_eq!(r.cores.len(), 1);

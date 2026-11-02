@@ -499,11 +499,10 @@ mod index_tests {
             assert!(index.verify(&pocket, i, false, &|| false));
         }
         assert_eq!(index.roms[0].sha1, index.roms[1].sha1);
+        // `shasum` of "same bytes".
         assert_eq!(
-            index.roms[0].sha1.as_ref().unwrap(),
-            &hash::hash_file(&tmp.path().join(&index.roms[0].rel_path))
-                .unwrap()
-                .sha1
+            index.roms[0].sha1.as_deref(),
+            Some("9ad949ae6c2f37319cfa43f410db66843000a047")
         );
         index.save(&pocket).unwrap();
         let mut index = Index::scan(&pocket).unwrap();

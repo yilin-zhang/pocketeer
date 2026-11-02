@@ -1,14 +1,14 @@
 //! Text for `ops::saves`.
 
-use std::fmt::Write;
+use std::{collections::BTreeMap, fmt::Write, path::PathBuf};
 
 use pocketeer_core::{
     plan::Plan,
-    transfer::saves::{SaveAction, SaveReason, SaveSkip},
+    transfer::saves::{SaveAction, SaveReason, SaveSkip, TrashTarget},
 };
 
 use super::{bytes, plan_lines, staged_footer, table, time_ago};
-use crate::ops::saves::{ListReport, SyncReport, VersionsReport};
+use crate::ops::saves::{ListReport, SyncReport, TrashReport, VersionsReport};
 
 fn save_reason(reason: SaveReason) -> &'static str {
     match reason {
@@ -20,42 +20,74 @@ fn save_reason(reason: SaveReason) -> &'static str {
     }
 }
 
+/// One line of a backup plan; `shown` is how the save is named.
+fn action_line(action: &SaveAction, shown: &str) -> Option<String> {
+    Some(match action {
+        SaveAction::Pull { reason, .. } => format!("← backup {shown} ({})", save_reason(*reason)),
+        SaveAction::Push { source, .. } => {
+            format!("→ restore AP {shown} from {}", source.display())
+        }
+        SaveAction::Conflict {
+            card,
+            computer,
+            reason,
+            ..
+        } => format!(
+            "? {shown}: {}; AP {}, computer {} — unchanged until chosen",
+            save_reason(*reason),
+            time_ago(card.mtime),
+            time_ago(computer.mtime)
+        ),
+        SaveAction::Skip {
+            reason: SaveSkip::OnlyInLibrary,
+            ..
+        } => format!("· keep computer backup {shown}"),
+        SaveAction::Skip {
+            reason: SaveSkip::LeftUnchanged,
+            ..
+        } => format!("· leave both unchanged {shown}"),
+        SaveAction::Skip { .. } => return None,
+    })
+}
+
 pub fn saves_sync(report: &SyncReport) -> String {
+    saves_sync_by_game(report, &BTreeMap::new())
+}
+
+/// A backup plan with its saves listed under the game each belongs to
+/// (`games`: card path → game name); the rest come last as "Other saves".
+/// With no names it lists card paths, as the CLI prints.
+pub fn saves_sync_by_game(report: &SyncReport, games: &BTreeMap<PathBuf, String>) -> String {
     let mut text = String::new();
-    plan_lines(
-        &mut text,
-        report.plan.actions.iter().filter_map(|a| {
-            Some(match a {
-                SaveAction::Pull { rel, reason, .. } => {
-                    format!("← backup {} ({})", rel.display(), save_reason(*reason))
-                }
-                SaveAction::Push { rel, source, .. } => {
-                    format!("→ restore AP {} from {}", rel.display(), source.display())
-                }
-                SaveAction::Conflict {
-                    rel,
-                    card,
-                    computer,
-                    reason,
-                } => format!(
-                    "? {}: {}; AP {}, computer {} — unchanged until chosen",
-                    rel.display(),
-                    save_reason(*reason),
-                    time_ago(card.mtime),
-                    time_ago(computer.mtime)
-                ),
-                SaveAction::Skip {
-                    rel,
-                    reason: SaveSkip::OnlyInLibrary,
-                } => format!("· keep computer backup {}", rel.display()),
-                SaveAction::Skip {
-                    rel,
-                    reason: SaveSkip::LeftUnchanged,
-                } => format!("· leave both unchanged {}", rel.display()),
-                SaveAction::Skip { .. } => return None,
-            })
-        }),
-    );
+    if games.is_empty() {
+        plan_lines(
+            &mut text,
+            report
+                .plan
+                .actions
+                .iter()
+                .filter_map(|a| action_line(a, &a.path().display().to_string())),
+        );
+    } else {
+        let mut groups: BTreeMap<(bool, &str), Vec<String>> = BTreeMap::new();
+        for a in &report.plan.actions {
+            let rel = a.path();
+            let name = rel.file_name().unwrap_or_default().to_string_lossy();
+            let (key, shown) = match games.get(rel) {
+                Some(game) => ((false, game.as_str()), name.into_owned()),
+                None => ((true, "Other saves"), rel.display().to_string()),
+            };
+            if let Some(line) = action_line(a, &shown) {
+                groups.entry(key).or_default().push(format!("  {line}"));
+            }
+        }
+        plan_lines(
+            &mut text,
+            groups
+                .into_iter()
+                .flat_map(|((_, game), lines)| std::iter::once(game.to_string()).chain(lines)),
+        );
+    }
     let s = &report.plan.summary;
     let _ = writeln!(
         text,
@@ -137,4 +169,139 @@ pub fn saves_versions(r: &VersionsReport) -> String {
         "\nRestore one with: pocketeer saves restore <PATH> --version <ID>"
     );
     out
+}
+
+pub fn saves_trash(report: &TrashReport) -> String {
+    let mut text = String::new();
+    let plan = &report.plan;
+    plan_lines(
+        &mut text,
+        plan.files.iter().map(|f| match plan.target {
+            TrashTarget::Card if f.archive_first => format!(
+                "- delete from AP {} (archived into the library first)",
+                f.path.display()
+            ),
+            TrashTarget::Card => format!(
+                "- delete from AP {} (the library has these bytes)",
+                f.path.display()
+            ),
+            TrashTarget::Version(_) => {
+                format!(
+                    "→ trash older version of {} ({})",
+                    f.save.display(),
+                    bytes(f.size)
+                )
+            }
+            _ if f.path.starts_with("saves/.history") => {
+                format!(
+                    "→ trash older version of {} ({})",
+                    f.save.display(),
+                    bytes(f.size)
+                )
+            }
+            _ => format!("→ trash backup {} ({})", f.save.display(), bytes(f.size)),
+        }),
+    );
+    if plan.target != TrashTarget::Card && !plan.files.is_empty() {
+        let _ = writeln!(
+            text,
+            "Files go to {} inside the library.",
+            plan.trash.display()
+        );
+    }
+    staged_footer(
+        &mut text,
+        report.mode,
+        report.result.as_ref(),
+        plan.changes(),
+        "Nothing to throw away.",
+        |text, result| {
+            let _ = writeln!(
+                text,
+                "Trashed {}, archived {}",
+                result.trashed, result.archived
+            );
+            for failure in &result.failed {
+                let _ = writeln!(
+                    text,
+                    "✗ {}: {}",
+                    failure.rel.display(),
+                    failure.error.message
+                );
+            }
+        },
+    );
+    text
+}
+
+/// A backup or restore plan as the TUI's dialog shows it: saves under the
+/// game they belong to, each with what happens in a few words. Saves that
+/// stay as they are aren't listed.
+pub fn saves_dialog(
+    plan: &pocketeer_core::transfer::saves::SavesPlan,
+    games: &BTreeMap<PathBuf, String>,
+) -> Vec<String> {
+    let mut groups: BTreeMap<(bool, String), Vec<String>> = BTreeMap::new();
+    for a in &plan.actions {
+        let what = match a {
+            SaveAction::Pull {
+                reason: SaveReason::OnlyOnCard,
+                ..
+            } => "← back up, new on AP".to_string(),
+            SaveAction::Pull { .. } => "← back up, AP is newer".to_string(),
+            SaveAction::Push { .. } => "→ put back on AP".to_string(),
+            SaveAction::Conflict { .. } => "? changed on both sides, left as is".to_string(),
+            SaveAction::Skip { .. } => continue,
+        };
+        let rel = a.path();
+        let file = rel.file_name().unwrap_or_default().to_string_lossy();
+        let (key, line) = match games.get(rel) {
+            Some(game) if pocketeer_core::fsutil::names::stem(&file) == game => {
+                ((false, game.clone()), format!("  {what}"))
+            }
+            Some(game) => ((false, game.clone()), format!("  {what}: {file}")),
+            None => ((true, String::new()), format!("{what}: {file}")),
+        };
+        groups.entry(key).or_default().push(line);
+    }
+    let mut lines = Vec::new();
+    for ((other, game), items) in groups {
+        if !other {
+            lines.push(game);
+        } else if !lines.is_empty() {
+            lines.push("Other saves".into());
+        }
+        lines.extend(items);
+    }
+    lines
+}
+
+/// A trash plan as the TUI's dialog shows it.
+pub fn trash_dialog(plan: &pocketeer_core::transfer::saves::TrashPlan) -> Vec<String> {
+    let name = |p: &std::path::Path| {
+        p.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    };
+    let mut lines: Vec<String> = plan
+        .files
+        .iter()
+        .map(|f| match plan.target {
+            TrashTarget::Card => name(&f.path),
+            _ if f.path.starts_with("saves/.history") => {
+                format!("{}  older version, {}", name(&f.save), bytes(f.size))
+            }
+            _ => format!("{}  backup, {}", name(&f.save), bytes(f.size)),
+        })
+        .collect();
+    lines.push(String::new());
+    lines.push(match plan.target {
+        TrashTarget::Card if plan.files.iter().any(|f| f.archive_first) => {
+            "The library keeps a copy first.".into()
+        }
+        TrashTarget::Card => "The library already has a copy.".into(),
+        _ => "They go to .trash/ in the library.".into(),
+    });
+    lines
 }

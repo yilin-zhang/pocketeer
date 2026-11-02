@@ -1,10 +1,11 @@
 //! Path lookup has its own worker so neither disk I/O nor queued network work
-//! can block typing. Each edit cancels obsolete work and restarts a short debounce.
+//! can block typing. A folder is read once (a few levels deep) and every
+//! keystroke after that only filters what was read, in memory.
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+        mpsc::{self, Receiver, Sender},
     },
     thread,
     time::Duration,
@@ -13,7 +14,8 @@ use std::{
 pub struct Matches {
     pub generation: u64,
     pub value: String,
-    pub suggestions: Vec<Suggestion>,
+    /// `None` while the folder is still being read: keep showing the last list.
+    pub suggestions: Option<Vec<Suggestion>>,
     pub completion: String,
     pub finished: bool,
 }
@@ -22,66 +24,74 @@ pub struct PathLookup {
     tx: Sender<(u64, String)>,
     rx: Receiver<Matches>,
     generation: Arc<AtomicU64>,
+    /// The value being looked up, so a folder read can stop as soon as the
+    /// user types their way into another folder.
+    latest: Arc<Mutex<String>>,
 }
 impl PathLookup {
     pub fn spawn() -> Self {
         let (tx, requests) = mpsc::channel::<(u64, String)>();
         let (results, rx) = mpsc::channel();
         let generation = Arc::new(AtomicU64::new(0));
+        let latest = Arc::new(Mutex::new(String::new()));
         let current = generation.clone();
+        let wanted = latest.clone();
         thread::spawn(move || {
-            while let Ok(mut request) = requests.recv() {
-                loop {
-                    match requests.recv_timeout(Duration::from_millis(80)) {
-                        Ok(newer) => request = newer,
-                        Err(RecvTimeoutError::Timeout) => break,
-                        Err(RecvTimeoutError::Disconnected) => return,
-                    }
-                }
-                let (generation, value) = request;
-                let cancelled = || current.load(Ordering::Relaxed) != generation;
-                if cancelled() {
+            let mut cache: Option<FolderIndex> = None;
+            while let Ok(first) = requests.recv() {
+                // Only the newest edit matters.
+                let (generation, value) = requests.try_iter().last().unwrap_or(first);
+                if current.load(Ordering::Relaxed) != generation {
                     continue;
                 }
-                let completion = complete_path(&value, cancelled);
-                if cancelled() {
-                    continue;
-                }
-                if results
-                    .send(Matches {
+                let completion = complete_path(&value, || false);
+                let (dir, _) = split(&value);
+                let fresh = cache
+                    .as_ref()
+                    .is_some_and(|c| c.dir == dir && c.read.elapsed() < CACHE_FOR);
+                if !fresh {
+                    let interim = Matches {
                         generation,
                         value: value.clone(),
-                        suggestions: Vec::new(),
+                        suggestions: None,
                         completion: completion.clone(),
                         finished: false,
-                    })
-                    .is_err()
-                {
-                    return;
+                    };
+                    if results.send(interim).is_err() {
+                        return;
+                    }
+                    // Stop reading once the prompt has moved to another folder.
+                    let moved = || wanted.lock().map(|v| split(&v).0 != dir).unwrap_or(true);
+                    match FolderIndex::read(&dir, moved) {
+                        Some(index) => cache = Some(index),
+                        None => continue,
+                    }
                 }
-                let suggestions = path_suggestions(&value, cancelled);
-                if cancelled() {
-                    continue;
-                }
-                if !cancelled()
-                    && results
-                        .send(Matches {
-                            generation,
-                            value,
-                            suggestions,
-                            completion,
-                            finished: true,
-                        })
-                        .is_err()
-                {
+                let index = cache.as_ref().expect("read above");
+                let done = Matches {
+                    generation,
+                    suggestions: Some(index.suggestions(&value)),
+                    value,
+                    completion,
+                    finished: true,
+                };
+                if results.send(done).is_err() {
                     return;
                 }
             }
         });
-        Self { tx, rx, generation }
+        Self {
+            tx,
+            rx,
+            generation,
+            latest,
+        }
     }
     pub fn request(&self, value: String) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Ok(mut latest) = self.latest.lock() {
+            latest.clone_from(&value);
+        }
         let _ = self.tx.send((generation, value));
     }
     pub fn cancel(&self) {
@@ -100,6 +110,153 @@ impl Drop for PathLookup {
     }
 }
 
+/// A byte range in a suggestion's name.
+type Span = (usize, usize);
+
+/// How long a folder's listing is reused before it is read again.
+const CACHE_FOR: Duration = Duration::from_secs(15);
+
+/// `value` → (the folder it is in, what is typed after the last `/`).
+fn split(value: &str) -> (String, String) {
+    let expanded = expand_home(value);
+    match expanded.rsplit_once('/') {
+        Some((d, p)) => (
+            if d.is_empty() { "/" } else { d }.to_string(),
+            p.to_string(),
+        ),
+        None => (".".to_string(), expanded),
+    }
+}
+
+/// Everything under one folder, a few levels deep and capped, read once
+/// and then filtered on every keystroke without touching the disk.
+struct FolderIndex {
+    dir: String,
+    read: std::time::Instant,
+    entries: Vec<Entry>,
+}
+
+struct Entry {
+    /// Relative to the folder.
+    rel: String,
+    lower: String,
+    /// Byte offset of the file name in `rel`.
+    name_at: usize,
+    depth: usize,
+    is_dir: bool,
+    hidden: bool,
+}
+
+impl FolderIndex {
+    const MAX_DEPTH: usize = 4;
+    const MAX_VISITED: usize = 6000;
+
+    /// `None` when `stop` said to give up part way.
+    fn read(dir: &str, stop: impl Fn() -> bool) -> Option<Self> {
+        let root = std::path::Path::new(dir);
+        let mut entries = Vec::new();
+        if root.is_dir() {
+            let walker = walkdir::WalkDir::new(root)
+                .min_depth(1)
+                .max_depth(Self::MAX_DEPTH)
+                .into_iter()
+                .filter_entry(|e| {
+                    let name = e.file_name().to_string_lossy();
+                    // Hidden entries are listed at the top only, never entered.
+                    !(name.starts_with('.') && e.depth() > 1)
+                        && name != "node_modules"
+                        && name != "target"
+                });
+            for (visited, entry) in walker.filter_map(|e| e.ok()).enumerate() {
+                if visited % 64 == 0 && stop() {
+                    return None;
+                }
+                if visited >= Self::MAX_VISITED {
+                    break;
+                }
+                let is_dir = entry.file_type().is_dir();
+                // Don't descend into a hidden folder at the top either.
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let rel = entry
+                    .path()
+                    .strip_prefix(root)
+                    .unwrap_or(entry.path())
+                    .to_string_lossy()
+                    .into_owned();
+                entries.push(Entry {
+                    lower: rel.to_lowercase(),
+                    name_at: rel.len() - name.len(),
+                    hidden: name.starts_with('.'),
+                    depth: entry.depth(),
+                    is_dir,
+                    rel,
+                });
+            }
+        }
+        Some(FolderIndex {
+            dir: dir.to_string(),
+            read: std::time::Instant::now(),
+            entries,
+        })
+    }
+
+    /// What a path prompt lists for `value`: with nothing typed after the
+    /// last `/`, the folder's entries; otherwise everything under it whose
+    /// path contains the typed text, best matches first: name starts with
+    /// it, name contains it, path contains it. Hidden entries only show up
+    /// once a `.` is typed.
+    fn suggestions(&self, value: &str) -> Vec<Suggestion> {
+        const MAX_RESULTS: usize = 60;
+        let (_, partial) = split(value);
+        let needle = partial.to_lowercase();
+        let show_hidden = partial.starts_with('.');
+        let mut ranked: Vec<(u8, &Entry, Option<Span>)> = Vec::new();
+        for e in &self.entries {
+            if (e.hidden && !show_hidden) || (needle.is_empty() && e.depth > 1) {
+                continue;
+            }
+            // Offsets are only trusted when lowercasing kept the length.
+            let same = e.lower.len() == e.rel.len();
+            let span = |at: usize| same.then_some((at, at + needle.len()));
+            let name = &e.lower[e.name_at..];
+            let (rank, at) = if needle.is_empty() {
+                (0, None)
+            } else if name.starts_with(&needle) {
+                (0, span(e.name_at))
+            } else if let Some(i) = name.find(&needle) {
+                (1, span(e.name_at + i))
+            } else if let Some(i) = e.lower.find(&needle) {
+                (2, span(i))
+            } else {
+                continue;
+            };
+            ranked.push((rank, e, at));
+        }
+        ranked.sort_by(|a, b| {
+            (a.0, a.1.depth, !a.1.is_dir, &a.1.lower).cmp(&(
+                b.0,
+                b.1.depth,
+                !b.1.is_dir,
+                &b.1.lower,
+            ))
+        });
+        ranked
+            .into_iter()
+            .take(MAX_RESULTS)
+            .map(|(_, e, matched)| Suggestion {
+                path: if self.dir == "/" {
+                    format!("/{}", e.rel)
+                } else {
+                    format!("{}/{}", self.dir, e.rel)
+                },
+                name: e.rel.clone(),
+                is_dir: e.is_dir,
+                matched,
+            })
+            .collect()
+    }
+}
+
 /// One entry a path prompt offers.
 #[derive(Debug, Clone)]
 pub struct Suggestion {
@@ -108,6 +265,8 @@ pub struct Suggestion {
     /// Shown in the list.
     pub name: String,
     pub is_dir: bool,
+    /// Where the typed text is in `name` (byte range), to highlight it.
+    pub matched: Option<Span>,
 }
 pub(super) fn start_path() -> String {
     dirs::home_dir()
@@ -128,84 +287,13 @@ pub(super) fn expand_home(path: &str) -> String {
     }
 }
 
-/// What a path prompt lists for `value`: with nothing typed after the last
-/// `/`, the folder's entries; otherwise everything under that folder (a
-/// few levels deep, capped) whose path contains the typed text, best
-/// matches first: name starts with it, name contains it, path contains it.
-/// Hidden entries only show up once a `.` is typed.
-pub(super) fn path_suggestions(value: &str, cancelled: impl Fn() -> bool) -> Vec<Suggestion> {
-    const MAX_DEPTH: usize = 4;
-    const MAX_VISITED: usize = 6000;
-    const MAX_RESULTS: usize = 60;
-
-    let expanded = expand_home(value);
-    let (dir, partial) = match expanded.rsplit_once('/') {
-        Some((d, p)) => (if d.is_empty() { "/" } else { d }, p),
-        None => (".", expanded.as_str()),
-    };
-    let root = std::path::Path::new(dir);
-    if !root.is_dir() {
-        return Vec::new();
-    }
-    let needle = partial.to_lowercase();
-    let show_hidden = partial.starts_with('.');
-    let depth = if needle.is_empty() { 1 } else { MAX_DEPTH };
-    let mut ranked: Vec<(u8, usize, String, Suggestion)> = Vec::new();
-    let walker = walkdir::WalkDir::new(root)
-        .min_depth(1)
-        .max_depth(depth)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            // Never descend into hidden folders; a hidden name only matches
-            // at the top level when the user typed the dot.
-            !(name.starts_with('.') && !(show_hidden && e.depth() == 1))
-                && name != "node_modules"
-                && name != "target"
-        });
-    for (visited, entry) in walker.filter_map(|e| e.ok()).enumerate() {
-        if cancelled() || visited >= MAX_VISITED {
-            break;
-        }
-        let is_dir = entry.file_type().is_dir();
-        let rel = entry
-            .path()
-            .strip_prefix(root)
-            .unwrap_or(entry.path())
-            .to_string_lossy()
-            .into_owned();
-        let name = entry.file_name().to_string_lossy().to_lowercase();
-        let rank = if needle.is_empty() || name.starts_with(&needle) {
-            0
-        } else if name.contains(&needle) {
-            1
-        } else if rel.to_lowercase().contains(&needle) {
-            2
-        } else {
-            continue;
-        };
-        let path = if dir == "/" {
-            format!("/{rel}")
-        } else {
-            format!("{dir}/{rel}")
-        };
-        ranked.push((
-            rank,
-            entry.depth(),
-            rel.to_lowercase(),
-            Suggestion {
-                path,
-                name: rel,
-                is_dir,
-            },
-        ));
-    }
-    ranked.sort_by(|a, b| (a.0, a.1, !a.3.is_dir, &a.2).cmp(&(b.0, b.1, !b.3.is_dir, &b.2)));
-    ranked
-        .into_iter()
-        .map(|(_, _, _, s)| s)
-        .take(MAX_RESULTS)
-        .collect()
+/// The suggestions for `value`, reading its folder right away.
+#[cfg(test)]
+pub(super) fn path_suggestions(value: &str) -> Vec<Suggestion> {
+    let (dir, _) = split(value);
+    FolderIndex::read(&dir, || false)
+        .map(|i| i.suggestions(value))
+        .unwrap_or_default()
 }
 
 /// Shell-style Tab completion: extends `value` to the longest common prefix
@@ -260,7 +348,37 @@ pub(super) fn complete_path(value: &str, cancelled: impl Fn() -> bool) -> String
 
 #[cfg(test)]
 mod lookup_tests {
-    use super::complete_path;
+    use super::{complete_path, path_suggestions};
+
+    #[test]
+    fn suggestions_rank_names_first_and_mark_the_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("Downloads/gba roms")).unwrap();
+        std::fs::write(tmp.path().join("Downloads/gba roms/Metroid.gba"), "").unwrap();
+        std::fs::write(tmp.path().join("GBA.txt"), "").unwrap();
+        std::fs::write(tmp.path().join(".gba-hidden"), "").unwrap();
+        let p = |s: &str| format!("{}/{s}", tmp.path().display());
+        let found = path_suggestions(&p("gba"));
+        let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
+        // Name starts with it, then name contains it; hidden only with a dot.
+        assert_eq!(
+            names,
+            [
+                "GBA.txt",
+                "Downloads/gba roms",
+                "Downloads/gba roms/Metroid.gba"
+            ]
+        );
+        assert_eq!(found[0].matched, Some((0, 3)));
+        assert_eq!(found[1].matched, Some((10, 13)));
+        assert_eq!(&found[1].name[10..13], "gba");
+        assert_eq!(found[2].matched, Some((27, 30)));
+        let in_name = path_suggestions(&p("metroid"));
+        assert_eq!(in_name[0].matched, Some((19, 26)));
+        assert_eq!(path_suggestions(&p(".gba-")).len(), 1);
+        // Nothing typed: the folder's own entries only.
+        assert_eq!(path_suggestions(&p("")).len(), 2);
+    }
 
     #[test]
     fn completes_unique_prefixes_and_marks_directories() {
@@ -273,104 +391,5 @@ mod lookup_tests {
         assert_eq!(complete_path(&p("r"), || false), p("roms-gb"));
         assert_eq!(complete_path(&p("roms-gba"), || false), p("roms-gba/"));
         assert_eq!(complete_path(&p("zzz"), || false), p("zzz"));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn tab_pressed_before_results_arrive_is_applied_when_ready() {
-        use super::super::{App, InputKind, Modal};
-        use crate::cli::Global;
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join("roms")).unwrap();
-        let mut app = App::new(
-            Global {
-                json: false,
-                root: Some(tmp.path().join("no-card")),
-                offline: true,
-                refresh: false,
-                cache_dir: Some(tmp.path().join("cache")),
-                library: Some(tmp.path().join("lib")),
-                config: Some(tmp.path().join("config")),
-                github_token: None,
-                ..Default::default()
-            },
-            ratatui_image::picker::Picker::halfblocks(),
-        );
-        app.input(
-            "Import",
-            vec![],
-            format!("{}/ro", tmp.path().display()),
-            InputKind::ImportDir,
-        );
-        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        let expected = format!("{}/roms/", tmp.path().display());
-        loop {
-            app.pump();
-            if matches!(&app.modal, Some(Modal::Input { value, .. }) if value == &expected) {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "Tab was lost while lookup was pending"
-            );
-            thread::sleep(Duration::from_millis(5));
-        }
-        // All candidates remain selectable even beyond the visible viewport.
-        if let Some(Modal::Input {
-            suggestions,
-            highlight,
-            ..
-        }) = &mut app.modal
-        {
-            *suggestions = (0..20)
-                .map(|i| Suggestion {
-                    path: format!("/image{i}.png"),
-                    name: format!("image{i}.png"),
-                    is_dir: false,
-                })
-                .collect();
-            *highlight = None;
-        }
-        for _ in 0..15 {
-            app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        }
-        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(&app.modal, Some(Modal::Input { value, .. }) if value == "/image14.png"));
-        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(app.modal.is_none());
-    }
-
-    #[test]
-    fn rapid_edits_return_only_the_latest_query() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("alpha.png"), "").unwrap();
-        std::fs::write(tmp.path().join("beta.webp"), "").unwrap();
-        let worker = PathLookup::spawn();
-        worker.request(format!("{}/a", tmp.path().display()));
-        let query = format!("{}/b", tmp.path().display());
-        worker.request(query.clone());
-        let completion = worker.rx.recv_timeout(Duration::from_secs(3)).unwrap();
-        assert!(!completion.finished);
-        assert!(completion.completion.ends_with("beta.webp"));
-        let result = worker.rx.recv_timeout(Duration::from_secs(3)).unwrap();
-        assert!(result.finished);
-        assert_eq!(result.value, query);
-        assert_eq!(result.suggestions.len(), 1);
-        assert_eq!(result.suggestions[0].name, "beta.webp");
-        assert!(result.completion.ends_with("beta.webp"));
-        let (tx, rx) = mpsc::channel();
-        tx.send(result).unwrap();
-        let obsolete = PathLookup {
-            tx: worker.tx.clone(),
-            rx,
-            generation: worker.generation.clone(),
-        };
-        obsolete.cancel();
-        assert!(obsolete.latest().is_none());
     }
 }

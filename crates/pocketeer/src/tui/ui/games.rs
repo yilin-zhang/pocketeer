@@ -1,21 +1,25 @@
 //! The Games tab: library and card-only ROMs, cover and details.
 
+use super::saves::{draw_save_panel, save_cell, save_summary};
 use super::*;
-use crate::tui::app::{
-    GameRef,
-    covers::{self, Cover},
-};
+use crate::tui::app::covers::{self, Cover};
 use pocketeer_core::{card::roms::Confidence, transfer::Presence};
 
 pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
-    if app.snapshot.is_none() {
+    if app.session().snapshot().is_none() {
         frame.render_widget(loading(app), area);
         return;
     }
     let (filter_row, table_area, right) = split_tab(app, area);
-    // Right: cover on top, details below.
-    let [cover_area, details_area] = split_rows(app, right, Splitter::GamesRows);
-    let snap = app.snapshot.as_ref().expect("checked above");
+    // Right: cover on top, details below; or the game's saves.
+    let panel_open = app.games().panel().is_some();
+    let [cover_area, details_area] = if panel_open {
+        [Rect::default(), Rect::default()]
+    } else {
+        split_rows(app, right, Splitter::GamesRows)
+    };
+    let s = app.session();
+    let snap = s.snapshot().expect("checked above");
     let compact = table_area.width < 68;
     let game_row = |mut cells: Vec<Cell<'static>>| {
         if compact {
@@ -24,37 +28,38 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
         Row::new(cells)
     };
     let rows: Vec<Row> = app
-        .games
-        .rows
+        .games()
+        .pane()
+        .rows()
         .iter()
         .map(|r| {
-            if let Some(g) = app.game_row(*r) {
+            if let Some(g) = r.game(s) {
                 let size: u64 = g.game.roms.iter().map(|r| r.size).sum();
                 let where_ = if g.on_card() {
-                    Cell::from("lib + card").style(Style::new().fg(GOOD))
+                    Cell::from("lib + card").style(Palette::Good.style())
                 } else if g.matches.iter().any(|m| m.presence == Presence::Unknown) {
-                    Cell::from("lib + ?").style(Style::new().fg(WARN))
+                    Cell::from("lib + ?").style(Palette::Warn.style())
                 } else {
                     Cell::from("lib")
                 };
                 use pocketeer_core::library::identify::Status as DatStatus;
                 let states: Vec<_> = g.game.roms.iter().map(|r| r.dat.status).collect();
                 let (symbol, color) = if states.iter().all(|s| *s == DatStatus::Matched) {
-                    ("✓", GOOD)
+                    ("✓", Palette::Good)
                 } else if states.contains(&DatStatus::Error) {
-                    ("!", WARN)
+                    ("!", Palette::Warn)
                 } else if states.contains(&DatStatus::Unchecked) {
-                    ("?", MUTED)
+                    ("?", Palette::Muted)
                 } else if states.contains(&DatStatus::Ambiguous) {
-                    ("~", WARN)
+                    ("~", Palette::Warn)
                 } else if states.contains(&DatStatus::NoMatch) {
-                    ("–", MUTED)
+                    ("–", Palette::Muted)
                 } else {
-                    ("n/a", MUTED)
+                    ("n/a", Palette::Muted)
                 };
-                let dat = Cell::from(symbol).style(Style::new().fg(color));
+                let dat = Cell::from(symbol).style(color.style());
                 game_row(vec![
-                    Cell::from(g.game.platform.clone()).style(Style::new().dim()),
+                    platform_cell(&g.game.platform),
                     Cell::from(format!(
                         "{}{}",
                         g.game
@@ -75,25 +80,23 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
                     where_,
                     dat,
                     Cell::from(if g.cover.is_some() { "▣" } else { "" }).style(Style::new().dim()),
+                    save_cell(app, *r),
                     Cell::from(text::bytes(size)).style(Style::new().dim()),
                 ])
-            } else if let Some(o) = app.card_rom(*r) {
-                let indexed = match r {
-                    GameRef::CardOnly(i) => app.card_view().and_then(|c| c.card_roms.get(*i)),
-                    _ => None,
-                };
-                let (where_, color) = match indexed.map(|r| r.confidence) {
-                    Some(Confidence::Pending) => ("card + ?", WARN),
-                    Some(Confidence::Error) => ("read error", BAD),
-                    _ => ("card", WARN),
+            } else if let Some(o) = r.card_rom(s) {
+                let (where_, color) = match o.confidence {
+                    Confidence::Pending => ("card + ?", Palette::Warn),
+                    Confidence::Error => ("read error", Palette::Bad),
+                    _ => ("card", Palette::Warn),
                 };
                 game_row(vec![
-                    Cell::from(o.platform.clone()).style(Style::new().dim()),
+                    platform_cell(&o.platform),
                     Cell::from(pocketeer_core::fsutil::names::stem(&o.name).to_string())
-                        .style(Style::new().fg(WARN)),
-                    Cell::from(where_).style(Style::new().fg(color)),
+                        .style(Palette::Warn.style()),
+                    Cell::from(where_).style(color.style()),
                     Cell::from(""),
                     Cell::from(""),
+                    save_cell(app, *r),
                     Cell::from(text::bytes(o.size)).style(Style::new().dim()),
                 ])
             } else {
@@ -101,27 +104,11 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         })
         .collect();
-    let card_only = snap.card.as_ref().map_or(0, |c| {
-        c.card_presence
-            .iter()
-            .filter(|p| **p == Presence::Card)
-            .count()
-    });
     let title = match &snap.library {
-        Some(l) => format!(
-            "LIBRARY  ·  {} games  ·  {} saves{}  ·  {}",
-            l.games.len(),
-            l.saves,
-            if card_only == 0 {
-                String::new()
-            } else {
-                format!("  ·  {card_only} only on the card")
-            },
-            tilde(&l.root)
-        ),
+        Some(l) => format!("LIBRARY  ·  {} games  ·  {}", l.games.len(), tilde(&l.root)),
         None => format!(
             "LIBRARY  ·  none yet (n creates {})",
-            app.library_path_display()
+            s.library_path_display()
         ),
     };
     let table = if compact {
@@ -145,130 +132,101 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
                 Constraint::Length(11),
                 Constraint::Length(3),
                 Constraint::Length(3),
+                Constraint::Length(4),
                 Constraint::Length(9),
             ],
-            ["PLATFORM", "GAME", "WHERE", "DAT", "ART", "SIZE"],
+            ["PLATFORM", "GAME", "WHERE", "DAT", "ART", "SAVE", "SIZE"],
             title,
             table_area.width,
         )
     };
-    let sel = (!app.games.rows.is_empty()).then_some(app.games.sel);
+    let pane = app.games().pane();
+    let sel = (!pane.rows().is_empty()).then_some(pane.sel());
     draw_filter_bar(frame, app, filter_row);
     render_table(frame, app, table_area, table, sel);
+    if panel_open {
+        draw_save_panel(frame, app, right);
+        return;
+    }
+    let summary = app.games().selected().and_then(|r| save_summary(app, r));
 
+    let s = app.session();
     let selected = app
-        .selected_game()
+        .games()
+        .selected_game(s)
         .map(|g| (g.game.clone(), g.cover.clone()));
-    let orphan = app.selected_orphan().cloned();
+    let orphan = app.games().selected_card_rom(s).cloned();
     let selected_matches = app
-        .selected_game()
+        .games()
+        .selected_game(s)
         .map(|g| g.matches.clone())
         .unwrap_or_default();
-    let indexed = match app.games.selected() {
-        Some(GameRef::CardOnly(i)) => app.card_view().and_then(|c| c.card_roms.get(*i)).cloned(),
-        _ => None,
-    };
-    let has_library = app.library_view().is_some();
+    let has_library = s.library().is_some();
+    let library_path = s.library_path_display();
     match (&selected, &orphan) {
-        (None, Some(o)) => placeholder(
-            frame,
-            cover_area,
-            &o.name,
-            if matches!(o.confidence, Confidence::Pending | Confidence::Error) {
-                "on card; library match unresolved"
-            } else {
-                "on the card, not in the library"
-            },
-            &[
-                ("i", "copy it into the library"),
-                ("I", "copy every card-only ROM"),
-                ("x", "delete it from the card"),
-            ],
-        ),
-        (Some((game, Some(cover_path))), _) => {
-            let block = panel(truncate(&game.name, 40));
+        (None, Some(_)) => placeholder(frame, cover_area, "COVER", "on the card only", &[]),
+        (Some((_, Some(cover_path))), _) => {
+            let block = panel("COVER");
             let inner = block.inner(cover_area);
             frame.render_widget(block, cover_area);
             match app.cover(cover_path, inner.as_size()) {
-                Cover::Ready(proto) => frame.render_stateful_widget(
+                Cover::Dots(lines) => frame.render_widget(Paragraph::new(lines.to_vec()), inner),
+                Cover::Image(proto) => frame.render_stateful_widget(
                     StatefulImage::<StatefulProtocol>::new().resize(covers::RESIZE),
                     inner,
                     proto,
                 ),
-                Cover::Loading => {
-                    frame.render_widget(Paragraph::new(dim("loading cover…")).centered(), inner)
-                }
+                Cover::Loading => frame.render_widget(
+                    Paragraph::new(Palette::Muted.span("loading cover…")).centered(),
+                    inner,
+                ),
                 Cover::Unreadable => frame.render_widget(
-                    Paragraph::new(dim("cover file unreadable")).centered(),
+                    Paragraph::new(Palette::Muted.span("cover file unreadable")).centered(),
                     inner,
                 ),
             }
         }
-        (Some((game, None)), _) => placeholder(
+        (Some((_, None)), _) => placeholder(
             frame,
             cover_area,
-            &game.name,
+            "COVER",
             "no cover yet",
-            &[
-                ("b", "import a cover image"),
-                ("f", "fetch it"),
-                ("F", "fetch the whole platform"),
-                ("C", "fetch everything missing"),
-            ],
+            &[("f", "download it"), ("c", "use an image file")],
         ),
         (None, None) if !has_library => placeholder(
             frame,
             cover_area,
             "LIBRARY",
-            "no library yet",
-            &[
-                (
-                    "n",
-                    &format!("create one at {}", app.library_path_display()),
-                ),
-                ("a", "then import ROMs from a folder"),
-                ("i", "or from the card"),
-            ],
+            &format!("no library yet; n creates it at {}", library_path),
+            &[],
         ),
-        (None, None) => placeholder(
-            frame,
-            cover_area,
-            "LIBRARY",
-            "no games match",
-            &[
-                ("a", "import ROMs from a folder"),
-                ("I", "import ROMs that are only on the card"),
-                ("l", "change what the list shows"),
-            ],
-        ),
+        (None, None) => placeholder(frame, cover_area, "LIBRARY", "no games match", &[]),
     }
 
     let mut lines: Vec<Line> = Vec::new();
     if let Some(o) = &orphan {
-        lines.push(kv_text("File", o.name.clone()));
-        lines.push(kv_text("Platform", o.platform.clone()));
-        lines.push(kv_text("Card path", o.rel_path.display().to_string()));
-        lines.push(kv_text("Size", text::bytes(o.size)));
-        if let Some(rom) = &indexed {
-            lines.push(kv_text("Identity", format!("{:?}", rom.confidence)));
-            if let Some(sha1) = &rom.sha1 {
-                lines.push(kv_text("SHA-1", sha1.clone()));
-            }
-            if let Some(error) = &rom.error {
-                lines.push(Line::from(fg(error.clone(), BAD)));
-            }
+        lines.push(kv_text("AP path", o.rel_path.display().to_string()));
+        lines.extend(summary.clone());
+        lines.push(kv_text("Identity", format!("{:?}", o.confidence)));
+        if let Some(sha1) = &o.sha1 {
+            lines.push(kv_text("SHA-1", sha1.clone()));
+        }
+        if let Some(error) = &o.error {
+            lines.push(Line::from(Palette::Bad.span(error.clone())));
         }
     }
-    if let Some((game, cover)) = &selected {
+    if let Some((game, _)) = &selected {
+        // The table has platform, where, size and cover; this adds the rest.
         lines.push(kv_text("Game", game.name.clone()));
-        lines.push(kv_text("Platform", game.platform.clone()));
+        lines.extend(summary);
         for matched in &selected_matches {
-            lines.push(kv_text("Card", format!("{:?}", matched.presence)));
             for copy in &matched.copies {
                 lines.push(kv_text("AP path", copy.path.display().to_string()));
                 lines.push(kv_text("Identity", format!("{:?}", copy.confidence)));
                 if copy.name_mismatch {
-                    lines.push(Line::from(dim("≠ names differ; e reviews rename options")));
+                    lines.push(Line::from(
+                        Palette::Muted.span("≠ names differ; e reviews rename options"),
+                    ));
                 }
             }
         }
@@ -279,45 +237,47 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
                     Style::new().bold(),
                 )));
             }
-            lines.push(kv_text("File", rom.name.clone()));
-            lines.push(kv_text("Size", text::bytes(rom.size)));
-            lines.push(kv_text("DAT", rom.dat.status.label().to_string()));
-            if let Some(name) = &rom.dat.game_name {
+            let multi = game.roms.len() > 1;
+            if multi || pocketeer_core::fsutil::names::stem(&rom.name) != game.name {
+                lines.push(kv_text("File", rom.name.clone()));
+            }
+            if multi {
+                lines.push(kv_text("Size", text::bytes(rom.size)));
+            }
+            // The DAT column shows a match; only other states need words.
+            if rom.dat.status != pocketeer_core::library::identify::Status::Matched {
+                lines.push(kv_text("DAT", rom.dat.status.label().to_string()));
+            }
+            if let Some(name) = rom.dat.game_name.as_ref().filter(|n| **n != game.name) {
                 lines.push(kv_text("Standard", name.clone()));
             }
             if let Some(error) = &rom.dat.error {
                 lines.push(kv_text("DAT retry", error.clone()));
             }
-            lines.push(kv("crc32", dim(rom.crc32.clone())));
-            lines.push(kv_text(
-                "Kept as",
-                match rom.mode.as_str() {
-                    "copy" => "copy in the library".to_string(),
-                    "link" => "hard link in the library".to_string(),
-                    _ => format!(
+            lines.push(kv("crc32", Palette::Muted.span(rom.crc32.clone())));
+            match rom.mode.as_str() {
+                "copy" => {}
+                "link" => lines.push(kv_text("Kept as", "hard link in the library")),
+                _ => lines.push(kv_text(
+                    "Kept as",
+                    format!(
                         "reference to {}",
                         rom.source_path
                             .as_ref()
                             .map(|p| p.display().to_string())
                             .unwrap_or_default()
                     ),
-                },
-            ));
+                )),
+            }
         }
-        lines.push(kv_text(
-            "Cover",
-            if cover.is_some() {
-                "yes"
-            } else {
-                "none yet  (f fetches it)"
-            },
-        ));
     }
     details(frame, details_area, lines);
 }
 
 /// Where a cover would be: a dot-matrix field (the Pocket's screen) with a
-/// short line and the keys that apply, centred.
+/// short line and the cover's own keys, centred. A key is listed in one
+/// place only, where it acts: cover keys here, row and tab keys in the key
+/// bar.
 fn placeholder(frame: &mut Frame, area: Rect, title: &str, what: &str, keys: &[(&str, &str)]) {
     let block = panel(truncate(title, 40));
     let inner = block.inner(area);
@@ -327,16 +287,20 @@ fn placeholder(frame: &mut Frame, area: Rect, title: &str, what: &str, keys: &[(
             let row: String = (0..inner.width)
                 .map(|x| if (x + y) % 2 == 0 { '·' } else { ' ' })
                 .collect();
-            Line::from(Span::styled(row, Style::new().fg(RULE)))
+            Line::from(Span::styled(row, Palette::Rule.style()))
         })
         .collect();
     frame.render_widget(Paragraph::new(dots), inner);
 
-    let mut lines = vec![Line::from(dim(what.to_string())), Line::from("")];
-    lines.extend(
-        keys.iter()
-            .map(|(k, what)| key_line(&[(k, what)], usize::MAX)),
-    );
+    let mut lines = vec![Line::from(Palette::Muted.span(what.to_string()))];
+    if !keys.is_empty() {
+        lines.push(Line::from(""));
+        lines.extend(
+            keys.iter().map(|(k, what)| {
+                Line::from(vec![keycap(k), Palette::Muted.span(format!(" {what}"))])
+            }),
+        );
+    }
     let height = lines.len() as u16;
     let width = lines
         .iter()

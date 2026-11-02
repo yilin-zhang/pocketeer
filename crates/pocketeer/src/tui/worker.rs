@@ -6,6 +6,7 @@
 //! Also here: the [`Snapshot`] the screens draw from, and how it is loaded.
 
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     sync::{
         Arc,
@@ -25,12 +26,20 @@ use pocketeer_core::{
     catalog::inventory::{Inventory, InventoryLoad},
     library::{Library, covers, db::Game},
     plan::Event,
-    transfer::{self, LocalMatch, Presence},
+    transfer::{
+        self, LocalMatch, Presence,
+        saves::{SaveOverview, Scope},
+    },
 };
 
 use super::pending::{Pending, Request, text_lines};
 use crate::{
-    ops::{Mode, context::Context, cores as cores_cmd, library as library_cmd},
+    ops::{
+        Mode,
+        context::Context,
+        cores as cores_cmd, library as library_cmd,
+        memories::{self as memories_cmd, MemoryEntry},
+    },
     text,
 };
 
@@ -63,9 +72,19 @@ pub struct CardSnapshot {
 pub struct LibraryView {
     pub root: PathBuf,
     pub games: Vec<GameRow>,
-    pub saves: usize,
     /// Platform ids the library holds ROMs for.
     pub platforms: Vec<String>,
+}
+
+/// Saves and Memories as the card and the library have them; read on the
+/// side worker after every load, since it hashes the card's saves.
+#[derive(Default)]
+pub struct SavesView {
+    /// Cartridge saves, by card path.
+    pub saves: BTreeMap<PathBuf, SaveOverview>,
+    /// The library game each linked save belongs to.
+    pub owners: BTreeMap<PathBuf, i64>,
+    pub memories: Vec<MemoryEntry>,
 }
 
 pub struct GameRow {
@@ -107,6 +126,11 @@ pub enum Job {
     Fingerprint,
     /// Side worker: re-read the library while a long import is still running.
     RefreshLibrary,
+    /// Side worker: read saves and Memories. `copies` are the card paths
+    /// found for each library game, so their saves can be matched.
+    Saves {
+        copies: BTreeMap<i64, Vec<PathBuf>>,
+    },
 }
 
 pub enum Msg {
@@ -125,6 +149,7 @@ pub enum Msg {
     SideProgress(Event),
     Fingerprint(u64),
     LibraryRefreshed(Result<Box<LibraryView>>),
+    Saves(Result<Box<SavesView>>),
     /// A side-worker job finished.
     SideDone(Outcome),
 }
@@ -259,7 +284,28 @@ fn run(ctx: &Context, job: Job, progress: &mut dyn FnMut(Event)) -> Msg {
             ctx.library()
                 .and_then(|lib| library_view(&lib).map(Box::new)),
         ),
+        Job::Saves { copies } => Msg::Saves(saves_view(ctx, &copies).map(Box::new)),
     }
+}
+
+fn saves_view(ctx: &Context, copies: &BTreeMap<i64, Vec<PathBuf>>) -> Result<SavesView> {
+    let lib = ctx.library()?;
+    let games = lib.list_games(None, None)?;
+    let owners = transfer::saves::link_owners(&lib, &games, copies)?
+        .into_iter()
+        .filter_map(|(id, rels)| Some((id?, rels)))
+        .flat_map(|(id, rels)| rels.into_iter().map(move |r| (r, id)))
+        .collect();
+    let pocket = ctx.pocket_opt();
+    let saves = transfer::saves::overview(&lib, pocket.as_ref(), Scope::Saves)?
+        .into_iter()
+        .map(|s| (s.rel_path.clone(), s))
+        .collect();
+    Ok(SavesView {
+        saves,
+        owners,
+        memories: memories_cmd::list(ctx)?.memories,
+    })
 }
 
 /// A job that changed the card or the library (or tried to): its text,
@@ -322,7 +368,6 @@ fn library_view(lib: &Library) -> Result<LibraryView> {
     Ok(LibraryView {
         root: lib.root().to_path_buf(),
         games: rows,
-        saves: pocketeer_core::transfer::saves::list(lib)?.len(),
         platforms: lib
             .platform_stats()?
             .into_iter()

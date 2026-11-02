@@ -4,8 +4,38 @@ use super::*;
 
 use crate::tui::app::SUGGESTIONS_SHOWN;
 
+/// One path suggestion: the typed text stands out in the name; the picked
+/// row is the selection bar.
+fn suggestion_line(s: &crate::tui::app::Suggestion, picked: bool) -> Line<'static> {
+    let base = if picked {
+        selected()
+    } else {
+        Palette::Muted.style()
+    };
+    let hit = if picked {
+        base.add_modifier(Modifier::UNDERLINED)
+    } else {
+        Palette::Ink.style().add_modifier(Modifier::BOLD)
+    };
+    let mut spans = vec![Span::styled(if picked { "▸ " } else { "  " }, base)];
+    match s.matched {
+        Some((a, b))
+            if b <= s.name.len() && s.name.is_char_boundary(a) && s.name.is_char_boundary(b) =>
+        {
+            spans.push(Span::styled(s.name[..a].to_string(), base));
+            spans.push(Span::styled(s.name[a..b].to_string(), hit));
+            spans.push(Span::styled(s.name[b..].to_string(), base));
+        }
+        _ => spans.push(Span::styled(s.name.clone(), base)),
+    }
+    if s.is_dir {
+        spans.push(Span::styled("/", base));
+    }
+    Line::from(spans)
+}
+
 pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
-    let Some(modal) = &app.modal else {
+    let Some(modal) = app.modal() else {
         return;
     };
     // (label, key hint, is_primary, focused)
@@ -43,58 +73,38 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
                 title,
                 lines,
                 value,
-                kind,
+                step,
                 suggestions,
-                highlight,
                 searching,
                 ..
             } => {
                 let mut all = lines.clone();
                 all.push(String::new());
-                all.push(format!("> {value}▌"));
-                if kind.completes_paths() {
+                all.push(format!("> {}", edit_view(value, usize::MAX)));
+                if step.completes_paths() {
                     // Fixed rows: results and long paths never move the input.
                     let rect = path_rect(area);
                     let columns = rect.width.saturating_sub(4) as usize;
                     all = lines.iter().take(2).cloned().collect();
                     all.resize(2, String::new());
                     all.push(String::new());
-                    all.push(format!(
-                        "> {}▌",
-                        path_tail(value, columns.saturating_sub(3))
-                    ));
+                    all.push(format!("> {}", edit_view(value, columns.saturating_sub(2))));
                     all.push(String::new());
                     let slots = rect.height.saturating_sub(11) as usize;
-                    let offset = highlight
-                        .unwrap_or(0)
-                        .saturating_sub(slots.saturating_sub(1));
-                    for i in offset..offset + slots {
-                        all.push(
-                            suggestions
-                                .get(i)
-                                .map(|s| {
-                                    format!(
-                                        "{} {}{}",
-                                        if *highlight == Some(i) { "▸" } else { " " },
-                                        s.name,
-                                        if s.is_dir { "/" } else { "" }
-                                    )
-                                })
-                                .unwrap_or_default(),
-                        );
-                    }
+                    // Drawn styled on top afterwards (see `suggestion_line`).
+                    all.extend(std::iter::repeat_n(String::new(), slots));
                     all.push(if *searching {
                         "Searching…".into()
                     } else if suggestions.is_empty() {
-                        "No matching entries".into()
+                        "Nothing matches".into()
                     } else if suggestions.len() > slots {
                         format!("… {} more", suggestions.len() - slots)
                     } else {
                         String::new()
                     });
                 }
-                let hint = if kind.completes_paths() {
-                    "↓ pick a match · Tab completes · Enter takes it, or submits"
+                let hint = if step.completes_paths() {
+                    "↓ pick  ·  Tab completes"
                 } else {
                     ""
                 };
@@ -154,7 +164,7 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
     let is_confirm = matches!(modal, Modal::Confirm { .. });
     let interactive = !matches!(modal, Modal::Info { .. });
 
-    let path_prompt = matches!(modal, Modal::Input { kind, .. } if kind.completes_paths());
+    let path_prompt = matches!(modal, Modal::Input { step, .. } if step.completes_paths());
     let longest = lines
         .iter()
         .map(|l| l.chars().count())
@@ -198,10 +208,17 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Clear, rect);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(if interactive { MUTED } else { RULE }))
+        .border_style(
+            if interactive {
+                Palette::Muted
+            } else {
+                Palette::Rule
+            }
+            .style(),
+        )
         .title(Span::styled(
             format!(" {title} "),
-            Style::new().fg(INK).add_modifier(Modifier::BOLD),
+            Palette::Ink.style().add_modifier(Modifier::BOLD),
         ))
         .padding(Padding::horizontal(1));
     let inner = block.inner(rect);
@@ -239,6 +256,32 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
         scroll.min(total_lines.saturating_sub(body.height))
     };
     frame.render_widget(paragraph.scroll((scroll, 0)), body);
+    if let Modal::Input {
+        suggestions,
+        highlight,
+        step,
+        ..
+    } = modal
+        && step.completes_paths()
+    {
+        // Rows 0–4 are the two text lines, a gap, the input and a gap.
+        let slots = path_rect(area).height.saturating_sub(11) as usize;
+        let offset = highlight
+            .unwrap_or(0)
+            .saturating_sub(slots.saturating_sub(1));
+        let rows: Vec<Line> = (offset..offset + slots)
+            .map(|i| match suggestions.get(i) {
+                Some(s) => suggestion_line(s, *highlight == Some(i)),
+                None => Line::from(""),
+            })
+            .collect();
+        let list = Rect {
+            y: body.y + 5,
+            height: (slots as u16).min(body.height.saturating_sub(5)),
+            ..body
+        };
+        frame.render_widget(Paragraph::new(rows), list);
+    }
     if total_lines > body.height {
         let mut state = ScrollbarState::new(total_lines.saturating_sub(body.height) as usize)
             .position(scroll as usize);
@@ -246,8 +289,8 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .track_symbol(Some("│"))
                 .thumb_symbol("┃")
-                .track_style(Style::new().fg(RULE))
-                .thumb_style(Style::new().fg(MUTED))
+                .track_style(Palette::Rule.style())
+                .thumb_style(Palette::Muted.style())
                 .begin_symbol(None)
                 .end_symbol(None),
             body,
@@ -256,7 +299,7 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     if !hint.is_empty() {
         frame.render_widget(
-            Paragraph::new(Line::from(faint(hint)).centered()),
+            Paragraph::new(Line::from(Palette::Faint.span(hint)).centered()),
             Rect {
                 y: hint_row.y + 1,
                 height: 1,
@@ -277,7 +320,7 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
         .sum::<u16>()
         + 4 * labels.len().saturating_sub(1) as u16;
     let mut x = button_row.x + button_row.width.saturating_sub(total) / 2;
-    app.hit.buttons.clear();
+    let mut hits = Vec::new();
     for ((_, _, primary, focused), (label, key)) in buttons.iter().zip(&labels) {
         let w = (label.chars().count() + key.chars().count()) as u16;
         let r = Rect {
@@ -287,16 +330,20 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, area: Rect) {
             height: 1,
         };
         let style = match (*focused, *primary, is_confirm) {
-            (true, true, true) => selected().bg(WARN),
+            (true, true, true) => selected().bg(Palette::Warn.color()),
             (true, _, _) => selected(),
-            (false, true, _) => Style::new().fg(INK).bg(KEYCAP),
-            (false, false, _) => Style::new().fg(MUTED).bg(KEYCAP),
+            (false, true, _) => Palette::Ink.style().bg(Palette::Keycap.color()),
+            (false, false, _) => Palette::Muted.style().bg(Palette::Keycap.color()),
         };
-        let line = Line::from(vec![Span::styled(label.clone(), style), faint(key.clone())]);
+        let line = Line::from(vec![
+            Span::styled(label.clone(), style),
+            Palette::Faint.span(key.clone()),
+        ]);
         frame.render_widget(Paragraph::new(line), r);
-        app.hit.buttons.push((r, *primary));
+        hits.push((r, *primary));
         x += w + 4;
     }
+    app.layout_mut().record_buttons(hits);
 }
 
 // Geometry depends only on terminal dimensions, never query/result text.
@@ -309,6 +356,26 @@ fn path_rect(area: Rect) -> Rect {
         width,
         height,
     )
+}
+
+/// A text field with its cursor (`▌`) in `columns`: the text before the
+/// cursor keeps its end in view, the text after fills what is left.
+pub(super) fn edit_view(value: &crate::tui::app::line_edit::LineEdit, columns: usize) -> String {
+    let (before, after) = value.split();
+    let room = columns.saturating_sub(1);
+    let shown = path_tail(before, room);
+    let used = Line::from(shown.as_str()).width();
+    let mut rest = String::new();
+    let mut width = used;
+    for ch in after.chars() {
+        let w = Line::from(ch.to_string()).width();
+        if width + w > room {
+            break;
+        }
+        width += w;
+        rest.push(ch);
+    }
+    format!("{shown}▌{rest}")
 }
 
 fn path_tail(value: &str, columns: usize) -> String {
@@ -327,51 +394,34 @@ fn path_tail(value: &str, columns: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        cli::Global,
-        tui::app::{InputKind, Suggestion},
-    };
+    use crate::tui::app::{CoverStep, Step, Suggestion};
     use ratatui::{Terminal, backend::TestBackend};
-    use ratatui_image::picker::Picker;
 
     #[test]
     fn path_prompt_geometry_and_input_row_stay_fixed_as_results_change() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut app = App::new(
-            Global {
-                json: false,
-                root: Some(tmp.path().join("no-card")),
-                offline: true,
-                refresh: false,
-                cache_dir: Some(tmp.path().join("cache")),
-                library: Some(tmp.path().join("lib")),
-                config: Some(tmp.path().join("config")),
-                github_token: None,
-                ..Default::default()
-            },
-            Picker::halfblocks(),
-        );
+        let mut app = crate::tui::app::test_app(tmp.path());
         for (width, height) in [(80, 24), (120, 40), (60, 18)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             let mut positions = Vec::new();
             for count in [0, 1, 60] {
-                app.modal = Some(Modal::Input {
-                    title: "Import cover".into(),
-                    lines: vec!["Choose an image".into(), "Tab completes".into()],
-                    value: format!("/{}cover.webp", "目录/".repeat(count)),
-                    kind: InputKind::ImportCover { game_id: 1 },
-                    suggestions: (0..count)
+                let dialog = app.dialog_mut();
+                dialog.input(
+                    "Import cover",
+                    vec!["Choose an image".into(), "Tab completes".into()],
+                    format!("/{}cover.webp", "目录/".repeat(count)),
+                    Step::Cover(CoverStep::Image { game_id: 1 }),
+                );
+                dialog.set_suggestions(
+                    (0..count)
                         .map(|i| Suggestion {
                             path: format!("/file{i}"),
                             name: "long filename ".repeat(count + 1),
                             is_dir: false,
+                            matched: None,
                         })
                         .collect(),
-                    highlight: None,
-                    completion: None,
-                    searching: count == 0,
-                    tab_pending: false,
-                });
+                );
                 terminal
                     .draw(|f| draw_modal(f, &mut app, f.area()))
                     .unwrap();
@@ -386,7 +436,7 @@ mod tests {
                     position("╭"),
                     position(">"),
                     position("▌"),
-                    app.hit.buttons[0].0,
+                    app.layout().button(0).unwrap(),
                 ));
             }
             for other in &positions[1..] {

@@ -19,6 +19,8 @@ use crate::{ops, output::SCHEMA_VERSION};
 /// Every command that changes something, on the card or in the library alone
 /// (library import/rename/remove/standardize, saves restore), prints its plan
 /// and applies it; --dry-run prints the plan only.
+// Every command and argument in this file needs a `///` doc comment:
+// `pocketeer docs` and `--help` are generated from them.
 #[derive(Debug, Parser)]
 #[command(name = "pocketeer", version, propagate_version = true)]
 pub struct Cli {
@@ -108,6 +110,9 @@ pub enum Command {
     /// Save files and save states: card ⇄ library, with history.
     #[command(subcommand)]
     Saves(SavesCommand),
+    /// Memories (save states made from the Pocket's menu).
+    #[command(subcommand)]
+    Memories(MemoriesCommand),
     /// Box art for library games (from libretro-thumbnails).
     #[command(subcommand)]
     Covers(CoversCommand),
@@ -320,11 +325,12 @@ pub enum LibraryCommand {
 pub struct ImportArgs {
     /// Folder of ROMs on this computer (scanned recursively), or one ROM / zip.
     pub dir: PathBuf,
-    /// Platform id these ROMs belong to, e.g. "gba".
+    /// Platform id for every file, e.g. "gba". Without it each file's
+    /// platform comes from its extension, and files it can't tell are left out.
     #[arg(long, value_name = "ID")]
-    pub platform: String,
+    pub platform: Option<String>,
     /// Optional XML/clrmamepro DAT to verify and name files with.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", requires = "platform")]
     pub dat: Option<PathBuf>,
     /// Skip files the DAT doesn't know (default: import them as unverified).
     #[arg(long, requires = "dat")]
@@ -423,6 +429,56 @@ pub enum SavesCommand {
         #[command(flatten)]
         apply: ApplyArgs,
     },
+    /// Move the library's copies of a save to its .trash/ folder, or delete
+    /// it from AP (archived into the library first).
+    #[command(disable_version_flag = true)]
+    Trash {
+        /// Card-relative save path.
+        path: PathBuf,
+        /// Delete the save from AP instead.
+        #[arg(long, conflicts_with_all = ["version", "backup"])]
+        card: bool,
+        /// Only this older version.
+        #[arg(long, conflicts_with = "backup")]
+        version: Option<i64>,
+        /// Only the current backup; older versions stay.
+        #[arg(long)]
+        backup: bool,
+        #[command(flatten)]
+        apply: ApplyArgs,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MemoriesCommand {
+    /// Memories on AP and in the library.
+    List,
+    /// Back up new and changed Memories from AP.
+    Backup {
+        /// Explicitly resolve every conflict; omitted means leave conflicts unchanged.
+        #[arg(long, value_enum)]
+        conflicts: Option<SaveConflictArg>,
+        #[command(flatten)]
+        apply: ApplyArgs,
+    },
+    /// Put the library's copy of a Memory back on AP.
+    Restore {
+        /// Card-relative path of the .sta file.
+        path: PathBuf,
+        #[command(flatten)]
+        apply: ApplyArgs,
+    },
+    /// Move a Memory to the library's .trash/, or delete it from AP
+    /// (archived into the library first).
+    Trash {
+        /// Card-relative path of the .sta file.
+        path: PathBuf,
+        /// Delete it from AP instead.
+        #[arg(long)]
+        card: bool,
+        #[command(flatten)]
+        apply: ApplyArgs,
+    },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -477,16 +533,17 @@ impl From<ApplyArgs> for ops::Mode {
     }
 }
 
-impl From<ImportArgs> for ops::library::ImportRequest {
-    fn from(a: ImportArgs) -> Self {
-        ops::library::ImportRequest {
-            source: a.dir,
-            platform: a.platform,
-            dat: a.dat,
-            dat_only: a.dat_only,
-            standard_names: a.standard_names,
-            covers: !a.no_covers,
-        }
+impl ImportArgs {
+    /// The request for one platform; `None` without `--platform`.
+    pub fn request(self) -> Option<ops::library::ImportRequest> {
+        Some(ops::library::ImportRequest {
+            source: self.dir,
+            platform: self.platform?,
+            dat: self.dat,
+            dat_only: self.dat_only,
+            standard_names: self.standard_names,
+            covers: !self.no_covers,
+        })
     }
 }
 

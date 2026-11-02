@@ -13,6 +13,7 @@ use pocketeer_core::{
         roms::{CardRom, Index},
     },
     catalog::inventory::{Inventory, Platforms},
+    fsutil::names::RenameKind,
     library::{covers::FetchReport, import::ImportOptions},
     net::{Policy, Source},
     plan::Event,
@@ -187,7 +188,20 @@ pub fn apply_rename(
     ctx: &Context,
     plan: &card_rename::CardRenamePlan,
 ) -> Result<card_rename::CardRenameResult> {
-    card_rename::apply_card(&ctx.pocket()?, plan)
+    let result = card_rename::apply_card(&ctx.pocket()?, plan)?;
+    // Backed-up saves follow, or the next backup would see them as new.
+    let saves: Vec<_> = plan
+        .moves
+        .iter()
+        .filter(|m| m.kind == RenameKind::Save)
+        .map(|m| (m.from.clone(), m.to.clone()))
+        .collect();
+    if !saves.is_empty()
+        && let Ok(lib) = ctx.library()
+    {
+        pocketeer_core::transfer::saves::follow_renames(&lib, &saves)?;
+    }
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -231,18 +245,6 @@ pub struct ImportReport {
     /// Problems identifying or fetching covers for the new games.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
-}
-
-impl ImportReport {
-    /// A plan shown in a TUI dialog before it is applied.
-    pub fn preview(plan: CardImportPlan) -> Self {
-        ImportReport {
-            staged: Staged::preview(plan),
-            not_found: Vec::new(),
-            covers: None,
-            warnings: Vec::new(),
-        }
-    }
 }
 
 impl Outcome for ImportReport {

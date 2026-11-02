@@ -68,6 +68,11 @@ pub(crate) fn dat() -> Dat {
 /// A fresh library at `<tmp>/lib` holding `files` (name, contents) imported
 /// from `<tmp>/src` on platform `fkh` by copying.
 pub(crate) fn library_with(files: &[(&str, &str)]) -> (tempfile::TempDir, Library) {
+    library_on("fkh", files)
+}
+
+/// Like [`library_with`], on `platform`.
+pub(crate) fn library_on(platform: &str, files: &[(&str, &str)]) -> (tempfile::TempDir, Library) {
     let tmp = tempfile::tempdir().unwrap();
     let mut lib = Library::init(&tmp.path().join("lib")).unwrap();
     let src = tmp.path().join("src");
@@ -76,7 +81,7 @@ pub(crate) fn library_with(files: &[(&str, &str)]) -> (tempfile::TempDir, Librar
         write(&src, name, body);
     }
     let opts = ImportOptions {
-        platform: "fkh".into(),
+        platform: platform.into(),
         platform_name: None,
         dat_only: false,
     };

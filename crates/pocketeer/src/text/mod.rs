@@ -33,6 +33,7 @@ use crate::{
 pub mod card;
 pub mod cores;
 pub mod library;
+pub mod memories;
 pub mod saves;
 
 /// Longest plan listing before "… and N more".

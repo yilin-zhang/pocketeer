@@ -5,7 +5,7 @@ use pocketeer_core::card::bios::FileStatus;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{
         Block, BorderType, Cell, Clear, Gauge, Padding, Paragraph, Row, Scrollbar,
@@ -14,63 +14,23 @@ use ratatui::{
 };
 use ratatui_image::{StatefulImage, protocol::StatefulProtocol};
 
-use super::app::{App, BiosFilter, Cycle, Modal, Splitter, Tab};
+use super::app::{App, BiosFilter, Cycle, Modal, Splitter, Tab, missing_files};
 use crate::text;
 
 mod card_tabs;
 mod games;
 mod modal;
+mod saves;
+mod theme;
 
 use card_tabs::{draw_bios, draw_cores, draw_device};
 use games::draw_games;
 use modal::draw_modal;
-
-// Palette. Analogue OS is black and white; colour is kept for state (good,
-// warn, bad) so it means something when it shows up. Indexed colours render
-// the same in every 256-colour terminal.
-const INK: Color = Color::Indexed(255);
-const PAPER: Color = Color::Indexed(232);
-const MUTED: Color = Color::Indexed(246);
-const FAINT: Color = Color::Indexed(240);
-const RULE: Color = Color::Indexed(237);
-const KEYCAP: Color = Color::Indexed(238);
-const ACCENT: Color = INK;
-const WARN: Color = Color::Indexed(179);
-const BAD: Color = Color::Indexed(167);
-const GOOD: Color = Color::Indexed(114);
+use saves::draw_memories;
+use theme::*;
 
 /// Width of the label column in detail panes.
 const LABEL: usize = 10;
-
-/// The selected table row, the active filter and the focused dialog button:
-/// one solid white bar, like a hardware menu. It overrides every cell's own
-/// colour so the row reads as one line.
-fn selected() -> Style {
-    Style::new()
-        .bg(INK)
-        .fg(PAPER)
-        .add_modifier(Modifier::BOLD)
-        .remove_modifier(Modifier::DIM)
-}
-
-/// A panel: rounded hairline border, small muted title.
-fn panel(title: impl Into<String>) -> Block<'static> {
-    Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(RULE))
-        .title(Span::styled(
-            format!(" {} ", title.into()),
-            Style::new().fg(MUTED),
-        ))
-}
-
-/// A key legend entry: the key on a dark cap, what it does beside it.
-fn keycap(key: &str) -> Span<'static> {
-    Span::styled(
-        format!(" {key} "),
-        Style::new().fg(INK).bg(KEYCAP).add_modifier(Modifier::BOLD),
-    )
-}
 
 /// One of four frames, by wall clock, for "something is running".
 fn spinner() -> &'static str {
@@ -90,17 +50,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(frame.area());
 
-    // Hit areas are rebuilt every frame by the drawing code below.
-    app.hit = super::app::HitAreas::default();
+    // Hit areas are recorded every frame by the drawing code below.
+    app.layout_mut().begin_frame();
     draw_header(frame, app, header);
-    match app.tab {
+    match app.tab() {
         Tab::Cores => draw_cores(frame, app, body),
         Tab::Bios => draw_bios(frame, app, body),
         Tab::Games => draw_games(frame, app, body),
+        Tab::Memories => draw_memories(frame, app, body),
         Tab::Device => draw_device(frame, app, body),
     }
     draw_footer(frame, app, footer);
-    if app.modal.is_some() {
+    if app.modal().is_some() {
         draw_modal(frame, app, frame.area());
     }
 }
@@ -108,21 +69,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 // ---------------------------------------------------------------------------
 // small helpers
 
-fn dim(s: impl Into<String>) -> Span<'static> {
-    Span::styled(s.into(), Style::new().fg(MUTED))
-}
-
-fn faint(s: impl Into<String>) -> Span<'static> {
-    Span::styled(s.into(), Style::new().fg(FAINT))
-}
-
-fn fg(s: impl Into<String>, color: Color) -> Span<'static> {
-    Span::styled(s.into(), Style::new().fg(color))
-}
-
 /// `Label      value` with a dim, fixed-width label.
 fn kv(label: &str, value: Span<'static>) -> Line<'static> {
-    Line::from(vec![faint(format!("{label:<LABEL$}")), value])
+    Line::from(vec![Palette::Faint.span(format!("{label:<LABEL$}")), value])
 }
 
 fn kv_text(label: &str, value: impl Into<String>) -> Line<'static> {
@@ -161,8 +110,8 @@ fn table_rows(area: Rect) -> Rect {
 fn render_table(frame: &mut Frame, app: &mut App, area: Rect, table: Table, sel: Option<usize>) {
     let mut state = TableState::default().with_selected(sel);
     frame.render_stateful_widget(table, area, &mut state);
-    app.hit.rows = table_rows(area);
-    app.hit.offset = state.offset();
+    app.layout_mut()
+        .record_table(table_rows(area), state.offset());
 }
 
 fn styled_table<'a, const N: usize>(
@@ -173,7 +122,7 @@ fn styled_table<'a, const N: usize>(
     width: u16,
 ) -> Table<'a> {
     Table::new(rows, widths)
-        .header(Row::new(header).style(Style::new().fg(FAINT)))
+        .header(Row::new(header).style(Palette::Faint.style()))
         .row_highlight_style(selected())
         .highlight_symbol("▸ ")
         .block(panel(truncate(
@@ -193,7 +142,7 @@ fn split_tab(app: &mut App, area: Rect) -> (Rect, Rect, Rect) {
 
 /// Left | right at the current tab's draggable split.
 fn split_cols(app: &mut App, area: Rect) -> [Rect; 2] {
-    let pct = app.splits.get(Splitter::Cols, app.tab);
+    let pct = app.layout().split(Splitter::Cols, app.tab());
     let [left, right] = Layout::horizontal([
         Constraint::Percentage(pct),
         Constraint::Percentage(100 - pct),
@@ -201,20 +150,20 @@ fn split_cols(app: &mut App, area: Rect) -> [Rect; 2] {
     .areas(area);
     // The two touching borders are the grab area.
     let grab = Rect::new(left.right().saturating_sub(1), area.y, 2, area.height);
-    app.hit.splitters.push((grab, area, Splitter::Cols));
+    app.layout_mut().record_splitter(grab, area, Splitter::Cols);
     [left, right]
 }
 
 /// Top / bottom at a draggable split.
 fn split_rows(app: &mut App, area: Rect, which: Splitter) -> [Rect; 2] {
-    let pct = app.splits.get(which, app.tab);
+    let pct = app.layout().split(which, app.tab());
     let [top, bottom] = Layout::vertical([
         Constraint::Percentage(pct),
         Constraint::Percentage(100 - pct),
     ])
     .areas(area);
     let grab = Rect::new(area.x, top.bottom().saturating_sub(1), area.width, 2);
-    app.hit.splitters.push((grab, area, which));
+    app.layout_mut().record_splitter(grab, area, which);
     [top, bottom]
 }
 
@@ -236,14 +185,14 @@ fn tilde(path: &std::path::Path) -> String {
 fn draw_header(frame: &mut Frame, app: &mut App, area: Rect) {
     let [title_row, tabs_row] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
-    app.hit.tabs = tabs_row;
+    app.layout_mut().record_tabs(tabs_row);
 
     // Left: the mark. Right: where we are, as a few muted chips.
     let brand = Line::from(vec![
-        Span::styled(" ◆ ", Style::new().fg(INK)),
+        Span::styled(" ◆ ", Palette::Ink.style()),
         Span::styled(
             "POCKETEER",
-            Style::new().fg(INK).add_modifier(Modifier::BOLD),
+            Palette::Ink.style().add_modifier(Modifier::BOLD),
         ),
     ]);
     frame.render_widget(Paragraph::new(brand), title_row);
@@ -251,36 +200,31 @@ fn draw_header(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut chips: Vec<Span> = Vec::new();
     let chip = |spans: &mut Vec<Span>, s: Span<'static>| {
         if !spans.is_empty() {
-            spans.push(faint("  ·  "));
+            spans.push(Palette::Faint.span("  ·  "));
         }
         spans.push(s);
     };
-    match (&app.pocket, app.card_view()) {
+    // Where the card is and how much room it has; the rest is on the Card tab.
+    match (app.session().pocket(), app.session().card()) {
         (Some(p), card) => {
-            chip(&mut chips, Span::styled("● card", Style::new().fg(INK)));
             let name = p
                 .root()
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| tilde(p.root()));
-            chip(&mut chips, dim(truncate(&name, 24)));
-            if let Some(c) = card {
-                if let Some(fw) = c.status.firmware.as_ref().and_then(|f| f.version.clone()) {
-                    chip(&mut chips, dim(format!("fw {fw}")));
-                }
-                if let Some(d) = c.status.disk {
-                    chip(
-                        &mut chips,
-                        dim(format!("{} free", text::bytes(d.available_bytes))),
-                    );
-                }
+            chip(
+                &mut chips,
+                Span::styled(format!("● {}", truncate(&name, 24)), Palette::Ink.style()),
+            );
+            if let Some(d) = card.and_then(|c| c.status.disk) {
+                chip(
+                    &mut chips,
+                    Palette::Muted.span(format!("{} free", text::bytes(d.available_bytes))),
+                );
             }
         }
         // No card is a normal state, not an error: the library is still here.
-        (None, _) => chip(&mut chips, faint("○ no SD card")),
-    }
-    if let Some(l) = app.library_view() {
-        chip(&mut chips, dim(format!("{} games", l.games.len())));
+        (None, _) => chip(&mut chips, Palette::Faint.span("○ no SD card")),
     }
     chips.push(Span::raw(" "));
     frame.render_widget(
@@ -293,12 +237,12 @@ fn draw_header(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|t| {
             Line::from(Span::styled(
                 format!(" {} ", t.label()),
-                Style::new().fg(FAINT),
+                Palette::Faint.style(),
             ))
         })
         .collect();
     let tabs = Tabs::new(titles)
-        .select(app.tab.index())
+        .select(app.tab().index())
         .highlight_style(selected())
         .divider("  ")
         .padding("", "");
@@ -312,7 +256,7 @@ fn draw_filter_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     };
     let (query, editing, labels, current, count) = (
-        pane.query().to_string(),
+        pane.query_text(),
         pane.editing(),
         pane.filter_labels(),
         pane.filter_index(),
@@ -334,18 +278,18 @@ fn draw_filter_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let query_text = if editing {
-        format!(" / {query}▌")
+        format!(" / {query}")
     } else if query.is_empty() {
         " / filter".to_string()
     } else {
         format!(" / {query}")
     };
     let query_style = if editing {
-        Style::new().fg(INK)
+        Palette::Ink.style()
     } else if query.is_empty() {
-        Style::new().fg(FAINT)
+        Palette::Faint.style()
     } else {
-        Style::new().fg(INK)
+        Palette::Ink.style()
     };
     let mut query_rect = push(&mut spans, Span::styled(query_text, query_style));
     // Pad so the segments don't jump around while typing.
@@ -358,64 +302,87 @@ fn draw_filter_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         let style = if i == current {
             selected()
         } else {
-            Style::new().fg(FAINT)
+            Palette::Faint.style()
         };
         let r = push(&mut spans, Span::styled(format!(" {label} "), style));
         segments.push((r, i));
         push(&mut spans, Span::raw(" "));
     }
-    push(&mut spans, faint(format!("  {count}")));
+    push(&mut spans, Palette::Faint.span(format!("  {count}")));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
-    app.hit.query = query_rect;
-    app.hit.segments = segments;
+    app.layout_mut().record_filter_bar(query_rect, segments);
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let [status_row, keys_row] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
 
-    match (&app.busy.main, app.busy.download_pct) {
+    let busy = app.session().busy();
+    match (&busy.main, busy.download_pct) {
         (Some(b), Some(pct)) => {
             let [label, bar] =
                 Layout::horizontal([Constraint::Length(28), Constraint::Min(10)]).areas(status_row);
             frame.render_widget(
-                Paragraph::new(fg(format!(" {} {b}", spinner()), INK)),
+                Paragraph::new(Palette::Ink.span(format!(" {} {b}", spinner()))),
                 label,
             );
             frame.render_widget(
                 Gauge::default()
-                    .gauge_style(Style::new().fg(INK).bg(RULE))
+                    .gauge_style(Palette::Ink.style().bg(Palette::Rule.color()))
                     .ratio((pct as f64 / 100.0).clamp(0.0, 1.0))
                     .label(format!("{pct}%")),
                 bar,
             );
         }
         _ => {
-            let mut status = match (&app.busy.main, app.last_log()) {
-                (Some(b), _) => Line::from(fg(
-                    match app.busy.step {
-                        Some((done, total)) => format!(" {} {b}  {done}/{total}", spinner()),
-                        None => format!(" {} {b}", spinner()),
-                    },
-                    INK,
-                )),
-                (None, Some(l)) => Line::from(vec![faint(" › "), dim(l.to_string())]),
+            let mut status = match (&busy.main, app.session().log().next()) {
+                (Some(b), _) => Line::from(Palette::Ink.span(match busy.step {
+                    Some((done, total)) => format!(" {} {b}  {done}/{total}", spinner()),
+                    None => format!(" {} {b}", spinner()),
+                })),
+                (None, Some(l)) => Line::from(vec![
+                    Palette::Faint.span(" › "),
+                    Palette::Muted.span(l.to_string()),
+                ]),
                 (None, None) => Line::from(""),
             };
-            if let Some(roms) = &app.busy.roms {
-                status.push_span(dim(format!("   {} {roms}", spinner())));
+            if let Some(roms) = &busy.roms {
+                status.push_span(Palette::Muted.span(format!("   {} {roms}", spinner())));
             }
-            if let Some(side) = &app.busy.side {
-                status.push_span(dim(format!("   {} {side}", spinner())));
+            if let Some(side) = &busy.side {
+                status.push_span(Palette::Muted.span(format!("   {} {side}", spinner())));
             }
             frame.render_widget(Paragraph::new(status), status_row);
         }
     }
 
-    let keys: &[(&str, &str)] = match app.tab {
+    // Legend order, same on every tab, so keys of one kind sit together
+    // and their tints (see `keycap`) form runs: open/back, library, card,
+    // names and covers, remove, filter, then help and quit. Keep new keys
+    // in this order.
+    let keys: &[(&str, &str)] = match app.tab() {
+        Tab::Games if app.games().panel().is_some() => &[
+            ("Esc", "back"),
+            ("b", "back up"),
+            ("B", "back up all saves"),
+            ("p", "put back on AP"),
+            ("x", "trash"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
+        Tab::Games => &games_keys(app),
+        Tab::Memories => &[
+            ("b", "back up"),
+            ("B", "back up all"),
+            ("p", "put back on AP"),
+            ("x", "trash"),
+            ("/", "filter"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
         Tab::Cores => &[
-            ("Enter", "install / update"),
+            ("u", "install / update"),
             ("U", "update all"),
             ("x", "remove"),
             ("/", "search"),
@@ -428,26 +395,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("?", "help"),
             ("q", "quit"),
         ],
-        Tab::Games => &[
-            // Most used first: a narrow legend drops keys from the end.
-            ("a", "import"),
-            ("S", "copy to card"),
-            ("i", "from card"),
-            ("e", "rename"),
-            ("x", "remove"),
-            ("t", "standard names"),
-            ("d", "check DAT"),
-            ("f", "fetch cover"),
-            ("b", "import cover"),
-            ("?", "help"),
-            ("q", "quit"),
-        ],
-        Tab::Device => &[
-            ("V", "saves"),
-            ("c", "clean junk"),
-            ("?", "help"),
-            ("q", "quit"),
-        ],
+        Tab::Device => &[("x", "clean junk"), ("?", "help"), ("q", "quit")],
     };
     frame.render_widget(
         Paragraph::new(key_line(keys, keys_row.width as usize)),
@@ -455,12 +403,51 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// The Games legend: what applies to the selected row first, then the
+/// tab-wide keys. Cover, DAT and naming keys are in the cover panel and `?`.
+fn games_keys(app: &App) -> Vec<(&'static str, &'static str)> {
+    // In the legend order above.
+    let s = app.session();
+    if s.library().is_none() {
+        return vec![("n", "create the library"), ("?", "help"), ("q", "quit")];
+    }
+    let row = app.games().selected();
+    let game = row.and_then(|r| r.game(s));
+    let has_saves = row.is_some_and(|r| !app.games().saves_of(r).is_empty());
+    let mut keys = Vec::new();
+    if has_saves {
+        keys.push(("Enter", "saves"));
+        keys.push(("b", "back up saves"));
+    }
+    if s.pocket().is_some() {
+        keys.push(("B", "back up all saves"));
+    }
+    if row.is_some() && game.is_none() {
+        keys.push(("i", "copy into library"));
+    }
+    keys.push(("a", "import ROMs"));
+    match (row, game) {
+        (Some(_), Some(g)) => {
+            if !g.on_card() {
+                keys.push(("s", "copy to card"));
+            }
+            keys.push(("e", "rename"));
+            keys.push(("x", "remove"));
+        }
+        (Some(_), None) => keys.push(("x", "delete from card")),
+        _ => {}
+    }
+    keys.push(("?", "help"));
+    keys.push(("q", "quit"));
+    keys
+}
+
 /// ` [key] description  [key] description …`: a button legend. When it is
 /// wider than `width`, keys are left out from the end of the list rather
 /// than cut mid-word; help and quit always stay, since `?` lists the rest.
 fn key_line(keys: &[(&str, &str)], width: usize) -> Line<'static> {
     fn entry(key: &str, what: &str) -> [Span<'static>; 2] {
-        [keycap(key), dim(format!(" {what}  "))]
+        [keycap(key), Palette::Muted.span(format!(" {what}  "))]
     }
     fn entry_width(e: &[Span<'static>; 2]) -> usize {
         e.iter().map(Span::width).sum()
@@ -491,9 +478,9 @@ fn key_line(keys: &[(&str, &str)], width: usize) -> Line<'static> {
 /// Draws the placeholder a card tab shows before the first load or without
 /// a card; `false` means the tab has nothing else to draw.
 fn card_tab(frame: &mut Frame, app: &App, area: Rect) -> bool {
-    if app.snapshot.is_none() {
+    if app.session().snapshot().is_none() {
         frame.render_widget(loading(app), area);
-    } else if app.card_view().is_none() {
+    } else if app.session().card().is_none() {
         frame.render_widget(no_card(app), area);
     } else {
         return true;
@@ -503,11 +490,11 @@ fn card_tab(frame: &mut Frame, app: &App, area: Rect) -> bool {
 
 /// The body before the first load has landed.
 fn loading(app: &App) -> Paragraph<'static> {
-    let text = match &app.busy.main {
+    let text = match &app.session().busy().main {
         Some(b) => format!("{} {b}…", spinner()),
         None => format!("{} Loading…", spinner()),
     };
-    Paragraph::new(Line::from(dim(text)))
+    Paragraph::new(Line::from(Palette::Muted.span(text)))
         .centered()
         .block(panel("").padding(Padding::top(2)))
 }
@@ -517,25 +504,25 @@ fn no_card(app: &App) -> Paragraph<'static> {
     let mut lines = vec![
         Line::from(Span::styled(
             "No SD card mounted.",
-            Style::new().fg(INK).bold(),
+            Palette::Ink.style().bold(),
         )),
         Line::from(""),
         Line::from("Plug the Pocket's card in (or mount the Pocket): it is picked up"),
         Line::from("by itself, no key needed. This tab fills in then."),
         Line::from(""),
-        Line::from("Meanwhile the Games tab (3) manages the library on this computer:"),
+        Line::from("Meanwhile the Games tab (1) manages the library on this computer:"),
         Line::from("import ROMs, rename, fetch covers. Changes reach the card on the"),
-        Line::from("next sync (S)."),
+        Line::from("next sync (s)."),
     ];
     if let Some(e) = app
-        .pocket_error
-        .as_ref()
+        .session()
+        .pocket_error()
         .filter(|e| e.code != "SD_NOT_FOUND")
     {
         lines.push(Line::from(""));
-        lines.push(fg(e.message.clone(), WARN).into());
+        lines.push(Palette::Warn.span(e.message.clone()).into());
         if let Some(h) = &e.hint {
-            lines.push(dim(h.clone()).into());
+            lines.push(Palette::Muted.span(h.clone()).into());
         }
     }
     Paragraph::new(lines)
@@ -550,8 +537,8 @@ mod key_line_tests {
     fn text(width: usize) -> String {
         let keys = [
             ("a", "import"),
+            ("s", "copy to card"),
             ("x", "remove"),
-            ("S", "copy to card"),
             ("?", "help"),
             ("q", "quit"),
         ];

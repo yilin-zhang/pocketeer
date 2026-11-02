@@ -207,13 +207,16 @@ mod card_tests {
             std::fs::read(tmp.path().join("Saves/gba/common/one/game.v2.sav")).unwrap(),
             b"other save"
         );
-        assert!(
+        // "new name.gba" now sits beside it: its saves would be shared.
+        assert_eq!(
             plan_card(
                 &pocket,
                 Path::new("Assets/gba/common/one/game.v2.gba"),
                 "new name.gb"
             )
-            .is_err()
+            .unwrap_err()
+            .code(),
+            "SAVE_OWNER_AMBIGUOUS"
         );
         let index = Index::scan(&pocket).unwrap();
         let renamed = index
@@ -230,7 +233,12 @@ mod card_tests {
         let (tmp, pocket) = sd();
         write(tmp.path(), "Assets/gb/common/game.gb", "source");
         write(tmp.path(), "Assets/gb/common/OTHER.gbc", "other");
-        assert!(plan_card(&pocket, Path::new("Assets/gb/common/game.gb"), "other.gb").is_err());
+        assert_eq!(
+            plan_card(&pocket, Path::new("Assets/gb/common/game.gb"), "other.gb")
+                .unwrap_err()
+                .code(),
+            "SAVE_OWNER_AMBIGUOUS"
+        );
         assert_eq!(
             std::fs::read(tmp.path().join("Assets/gb/common/game.gb")).unwrap(),
             b"source"

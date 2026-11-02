@@ -57,7 +57,7 @@ pub fn run(global: &Global) -> ExitCode {
                             break;
                         }
                     }
-                    if app.should_quit || !matches!(event::poll(Duration::ZERO), Ok(true)) {
+                    if app.should_quit() || !matches!(event::poll(Duration::ZERO), Ok(true)) {
                         break;
                     }
                 }
@@ -68,7 +68,7 @@ pub fn run(global: &Global) -> ExitCode {
             Ok(false) => {}
             Err(e) => break Err(e),
         }
-        if app.should_quit {
+        if app.should_quit() {
             break Ok(());
         }
     };

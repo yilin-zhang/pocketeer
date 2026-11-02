@@ -243,8 +243,14 @@ mod tests {
             std::fs::read(lib.root().join("saves/Saves/fkh/common/Foo.sav")).unwrap(),
             b"backup"
         );
-        assert!(plan(&lib, None, "Bar.fkh", "New name.fkh").is_err());
-        assert!(apply(&mut lib, &preview).is_err());
+        assert_eq!(
+            plan(&lib, None, "Bar.fkh", "New name.fkh")
+                .unwrap_err()
+                .code(),
+            "NAME_TAKEN"
+        );
+        // The preview was for the old name: applying it again is refused.
+        assert_eq!(apply(&mut lib, &preview).unwrap_err().code(), "STALE_PLAN");
     }
 
     #[test]

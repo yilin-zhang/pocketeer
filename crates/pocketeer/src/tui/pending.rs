@@ -3,7 +3,10 @@
 //! variant (how to preview and apply it). Adding an operation means adding
 //! a variant here and a key in `app/keys.rs`; nothing else.
 
-use std::{collections::HashSet, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::PathBuf,
+};
 
 use pocketeer_core::{
     Result,
@@ -19,7 +22,7 @@ use pocketeer_core::{
     plan::{Event, Plan},
     transfer::{
         from_card::CardImportPlan,
-        saves::{SaveAction, SavesPlan},
+        saves::{self, SaveAction, SavesOptions, SavesPlan, TrashPlan, TrashTarget},
         to_card::CopyPlan,
     },
 };
@@ -29,7 +32,7 @@ use crate::{
     ops::{
         Applied, Mode, Staged, apply_actions, card as card_cmd,
         card::ImportRequest as CardImportRequest, context::Context, cores as cores_cmd,
-        library as library_cmd, library::ImportRequest, saves as saves_cmd,
+        library as library_cmd, memories as memories_cmd, saves as saves_cmd,
     },
     text,
 };
@@ -50,8 +53,38 @@ pub enum Request {
         platform: Option<String>,
         roms: Vec<String>,
     },
-    Saves,
-    Import(ImportRequest),
+    /// Back up saves; `games` names the game each save belongs to.
+    Saves {
+        opts: SavesOptions,
+        games: SaveGames,
+    },
+    /// Put a save (its current backup, or an older version) back on AP.
+    Restore {
+        rel: PathBuf,
+        version: Option<i64>,
+        games: SaveGames,
+    },
+    /// Put a Memory and the files beside it back on AP.
+    RestoreMemory {
+        rel: PathBuf,
+    },
+    /// Throw away copies of a save.
+    Trash {
+        rels: Vec<PathBuf>,
+        target: TrashTarget,
+    },
+    /// Throw away a Memory, on AP (`card`) or in the library.
+    TrashMemory {
+        rel: PathBuf,
+        card: bool,
+    },
+    /// Import a folder (or one ROM / zip) from this computer, each file's
+    /// platform taken from its extension; `platform` takes the rest.
+    ImportFolder {
+        source: PathBuf,
+        platform: Option<String>,
+        known: Vec<String>,
+    },
     Standardize,
     Rename {
         platform: String,
@@ -66,6 +99,9 @@ pub enum Request {
         accepted: HashSet<(String, String)>,
     },
 }
+
+/// Card path of a save → the name of the game it belongs to.
+pub type SaveGames = BTreeMap<PathBuf, String>;
 
 /// A plan: shown in a dialog, then applied once confirmed.
 pub enum Pending {
@@ -85,14 +121,33 @@ pub enum Pending {
         actions: Vec<Action>,
     },
     Copy(CopyPlan),
-    Saves(Box<SavesPlan>),
+    Saves(Box<SavesPlan>, SaveGames),
+    Trash(Box<TrashPlan>),
     Rename(Box<RenamePlan>),
     /// Renames of existing games to standard names.
     Standardize(Vec<RenamePlan>),
     LibraryRemove(Box<LibraryRemovePlan>),
     CardImport(Box<CardImportPlan>),
     /// Import from a folder on this computer.
-    Import(Box<(ImportOptions, ImportPlan)>),
+    Import(Box<FolderImport>),
+    /// None of the files says its platform: ask which.
+    NeedPlatform {
+        source: PathBuf,
+        files: usize,
+    },
+}
+
+/// A folder import: one plan per platform, and the files left out.
+pub struct FolderImport {
+    pub parts: Vec<(ImportOptions, ImportPlan)>,
+    /// Files whose type isn't known (no platform given for them).
+    pub unknown: Vec<String>,
+}
+
+impl FolderImport {
+    fn adds(&self) -> usize {
+        self.parts.iter().map(|(_, p)| p.changes()).sum()
+    }
 }
 
 impl Pending {
@@ -118,7 +173,11 @@ impl Pending {
             }
         };
         match self {
-            Pending::Import(b) => collect(&b.0.platform, &b.1),
+            Pending::Import(b) => {
+                for (opts, plan) in &b.parts {
+                    collect(&opts.platform, plan);
+                }
+            }
             Pending::CardImport(c) => {
                 for part in &c.parts {
                     collect(&part.platform, &part.plan);
@@ -152,9 +211,63 @@ impl Pending {
                 &roms,
                 progress,
             )?),
-            Request::Saves => Pending::Saves(Box::new(saves_cmd::plan_sync(ctx, true, progress)?)),
-            Request::Import(args) => {
-                Pending::Import(Box::new(library_cmd::plan_import(ctx, &args, progress)?))
+            Request::Saves { opts, games } => {
+                Pending::Saves(Box::new(saves_cmd::plan_sync(ctx, opts, progress)?), games)
+            }
+            Request::Restore {
+                rel,
+                version,
+                games,
+            } => Pending::Saves(
+                Box::new(saves::plan_restore(
+                    &ctx.library()?,
+                    &ctx.pocket()?,
+                    &rel,
+                    version,
+                )?),
+                games,
+            ),
+            Request::RestoreMemory { rel } => {
+                let rels = memories_cmd::library_files(ctx, &rel)?;
+                let plan = saves::plan_restore_paths(&ctx.library()?, &ctx.pocket()?, &rels)?;
+                Pending::Saves(Box::new(plan), SaveGames::new())
+            }
+            Request::Trash { rels, target } => {
+                Pending::Trash(Box::new(saves_cmd::plan_trash(ctx, &rels, target)?))
+            }
+            Request::TrashMemory { rel, card } => {
+                let rels = memories_cmd::files(ctx, &rel, card)?;
+                let target = if card {
+                    TrashTarget::Card
+                } else {
+                    TrashTarget::Library
+                };
+                Pending::Trash(Box::new(saves_cmd::plan_trash(ctx, &rels, target)?))
+            }
+            Request::ImportFolder {
+                source,
+                platform,
+                known,
+            } => {
+                let sorted = library_cmd::plan_import_sorted(
+                    ctx,
+                    &source,
+                    &known,
+                    platform.as_deref(),
+                    false,
+                    progress,
+                )?;
+                if sorted.parts.is_empty() && !sorted.unknown.is_empty() {
+                    Pending::NeedPlatform {
+                        source,
+                        files: sorted.unknown.len(),
+                    }
+                } else {
+                    Pending::Import(Box::new(FolderImport {
+                        parts: sorted.parts,
+                        unknown: sorted.unknown,
+                    }))
+                }
             }
             Request::Standardize => Pending::Standardize(library_cmd::plan_standardize(ctx, None)?),
             Request::Rename {
@@ -181,8 +294,10 @@ impl Pending {
                 };
                 match import.as_mut() {
                     Pending::Import(b) => {
-                        let platform = b.0.platform.clone();
-                        apply_suggestions(&lib, &mut b.1, |name| accept(&platform, name))?;
+                        for (opts, plan) in &mut b.parts {
+                            let platform = opts.platform.clone();
+                            apply_suggestions(&lib, plan, |name| accept(&platform, name))?;
+                        }
                     }
                     Pending::CardImport(c) => {
                         for part in &mut c.parts {
@@ -261,9 +376,15 @@ impl Pending {
                 let result = card_cmd::apply_copy(ctx, &plan, progress);
                 shown(plan, result, |s| text::card::copy_report(&s))
             }
-            Pending::Saves(plan) => {
+            Pending::Saves(plan, games) => {
                 let result = saves_cmd::apply_sync(ctx, &plan, progress);
-                shown(*plan, result, |s| text::saves::saves_sync(&s))
+                shown(*plan, result, |s| {
+                    text::saves::saves_sync_by_game(&s, &games)
+                })
+            }
+            Pending::Trash(plan) => {
+                let result = saves_cmd::apply_trash(ctx, &plan);
+                shown(*plan, result, |s| text::saves::saves_trash(&s))
             }
             Pending::Rename(plan) => {
                 progress(Event::Status(format!("Renaming {}", plan.old_name)));
@@ -293,16 +414,26 @@ impl Pending {
                 })
             }
             Pending::Import(boxed) => {
-                let (options, plan) = *boxed;
-                let result = library_cmd::apply_import(ctx, &options, &plan, progress);
-                shown(plan, result, |staged| {
-                    text::library::library_import(&library_cmd::ImportReport {
-                        staged,
-                        covers: None,
-                        warnings: Vec::new(),
-                    })
-                })
+                let mut lines = Vec::new();
+                let mut failed = 0;
+                for (options, plan) in &boxed.parts {
+                    if plan.changes() == 0 {
+                        continue;
+                    }
+                    match library_cmd::apply_import(ctx, options, plan, progress) {
+                        Ok(r) => {
+                            failed += r.failed.len();
+                            lines.push(text::library::import_done(&options.platform, &r));
+                        }
+                        Err(e) => {
+                            failed += 1;
+                            lines.push(format!("✗ {}: {e}", options.platform.to_uppercase()));
+                        }
+                    }
+                }
+                applied(lines.join("\n"), failed)
             }
+            Pending::NeedPlatform { .. } => applied(String::new(), 0),
         }
     }
 
@@ -410,28 +541,35 @@ impl Pending {
                     ),
                 }
             }
-            Pending::Saves(plan) => {
+            Pending::Saves(plan, games) => {
                 if let Some(index) = plan
                     .actions
                     .iter()
                     .position(|a| matches!(a, SaveAction::Conflict { .. }))
                 {
-                    return SaveConflict { plan, index };
+                    return SaveConflict { plan, games, index };
                 }
-                let lines = text_lines(&text::saves::saves_sync(&Staged::preview((*plan).clone())));
-                if plan.changes() == 0 {
-                    info("Save backup review", lines)
-                } else {
-                    confirm(
-                        format!(
-                            "Back up {}, restore {} save(s)?",
-                            plan.summary.pull, plan.summary.push
-                        ),
-                        lines,
-                        Pending::Saves(plan),
-                    )
-                }
+                let lines = text::saves::saves_dialog(&plan, &games);
+                let s = &plan.summary;
+                let title = match (s.pull, s.push) {
+                    (0, 0) => return Notice("Saves are already backed up.".into()),
+                    (n, 0) => format!("Back up {n} save(s)?"),
+                    (0, n) => format!("Put {n} file(s) back on AP?"),
+                    (a, b) => format!("Back up {a}, put {b} back on AP?"),
+                };
+                confirm(title, lines, Pending::Saves(plan, games))
             }
+            Pending::Trash(plan) if plan.files.is_empty() => {
+                Notice("Nothing to throw away.".into())
+            }
+            Pending::Trash(plan) => confirm(
+                match plan.target {
+                    TrashTarget::Card => format!("Delete {} file(s) from AP?", plan.files.len()),
+                    _ => format!("Move {} file(s) to the trash?", plan.files.len()),
+                },
+                text::saves::trash_dialog(&plan),
+                Pending::Trash(plan),
+            ),
             Pending::Rename(plan) => confirm(
                 format!("Rename to {}?", plan.new_name),
                 text_lines(&text::library::library_rename(&Staged::preview(
@@ -447,35 +585,44 @@ impl Pending {
                 ],
             ),
             Pending::Standardize(plans) => PickRenames(plans),
-            Pending::LibraryRemove(plan) => confirm(
-                format!("Remove {} ROM(s) from the library?", plan.changes()),
-                text_lines(&text::library::library_remove(&Staged::preview(
-                    (*plan).clone(),
-                ))),
-                Pending::LibraryRemove(plan),
-            ),
+            Pending::LibraryRemove(plan) => {
+                let games: std::collections::BTreeSet<&str> =
+                    plan.items.iter().map(|i| i.game.as_str()).collect();
+                let title = match (games.len(), games.iter().next()) {
+                    (1, Some(game)) => format!("Remove {game}?"),
+                    _ => format!("Remove {} games?", games.len()),
+                };
+                let mut lines: Vec<String> = if plan.items.len() > 1 {
+                    plan.items
+                        .iter()
+                        .map(|i| format!("{}  {}", i.name, text::bytes(i.size)))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                lines.push("It goes to .trash/ in the library. Copies on the card stay.".into());
+                confirm(title, lines, Pending::LibraryRemove(plan))
+            }
             import @ (Pending::Import(_) | Pending::CardImport(_))
                 if !import.import_suggestions().is_empty() =>
             {
                 PickImportNames(import)
             }
             Pending::Import(b) => {
-                let lines = text_lines(&text::library::library_import(
-                    &library_cmd::ImportReport::preview(b.1.clone()),
-                ));
-                match b.1.changes() {
-                    0 => info("Nothing to import", lines),
-                    n => confirm(
-                        format!("Import {n} ROM(s) into the library?"),
-                        lines,
-                        Pending::Import(b),
-                    ),
+                let lines = text::library::import_brief(&b.parts, &b.unknown);
+                match b.adds() {
+                    0 => info("Nothing new to import", lines),
+                    n => confirm(format!("Import {n} ROM(s)?"), lines, Pending::Import(b)),
                 }
             }
+            Pending::NeedPlatform { source, files } => AskPlatform { source, files },
             Pending::CardImport(plan) => {
-                let lines = text_lines(&text::card::import_report(
-                    &card_cmd::ImportReport::preview((*plan).clone()),
-                ));
+                let parts: Vec<_> = plan
+                    .parts
+                    .iter()
+                    .map(|p| (p.options.clone(), p.plan.clone()))
+                    .collect();
+                let lines = text::library::import_brief(&parts, &[]);
                 match plan.changes() {
                     0 => info("Nothing to import", lines),
                     n => confirm(
@@ -502,11 +649,17 @@ pub enum Preview {
         pending: Pending,
     },
     /// A save changed on both sides: which copy wins (`index` into the plan).
-    SaveConflict { plan: Box<SavesPlan>, index: usize },
+    SaveConflict {
+        plan: Box<SavesPlan>,
+        games: SaveGames,
+        index: usize,
+    },
     /// Standard-name renames to tick.
     PickRenames(Vec<RenamePlan>),
     /// An import whose files match standard names: which names to take.
     PickImportNames(Pending),
+    /// An import whose files don't say their platform.
+    AskPlatform { source: PathBuf, files: usize },
 }
 
 pub(super) fn text_lines(text: &str) -> Vec<String> {

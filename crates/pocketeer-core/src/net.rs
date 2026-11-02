@@ -447,7 +447,14 @@ mod tests {
         let got = cache
             .fetch(&http, "cores.json", &url, "test", Policy::DEFAULT)
             .unwrap();
-        assert!(matches!(got.source, Source::Cache { age_secs: 0, .. }));
+        // A second may tick over between the two fetches.
+        assert!(matches!(
+            got.source,
+            Source::Cache {
+                age_secs: 0..=1,
+                ..
+            }
+        ));
 
         // Refresh sends If-None-Match and honours 304.
         let second = server
