@@ -11,7 +11,6 @@ use crate::{
 };
 use serde::Serialize;
 use std::{
-    collections::BTreeMap,
     fs::File,
     path::{Component, Path, PathBuf},
 };
@@ -131,19 +130,29 @@ pub struct SavesSummary {
     pub conflicts: usize,
     pub bytes: u64,
 }
+/// Both copies of a save as planning found them; applying refuses to go
+/// ahead if either has changed since.
 #[derive(Debug, Clone, PartialEq)]
 struct Observed {
     card: Option<SaveInfo>,
     computer: Option<SaveInfo>,
 }
 
+/// One planned action and what it was planned against.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct SaveItem {
+    #[serde(flatten)]
+    action: SaveAction,
+    #[serde(skip)]
+    observed: Observed,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SavesPlan {
     // Private: `summary` counts `actions`, and `recount` keeps it so.
-    actions: Vec<SaveAction>,
+    #[serde(rename = "actions")]
+    items: Vec<SaveItem>,
     summary: SavesSummary,
-    #[serde(skip)]
-    observed: BTreeMap<PathBuf, Observed>,
     #[serde(skip)]
     library: crate::library::LibraryIdentity,
     #[serde(skip)]
@@ -160,25 +169,40 @@ impl Plan for SavesPlan {
 }
 
 impl SavesPlan {
-    pub fn actions(&self) -> &[SaveAction] {
-        &self.actions
+    pub fn actions(&self) -> impl ExactSizeIterator<Item = &SaveAction> + Clone {
+        self.items.iter().map(|i| &i.action)
+    }
+
+    pub fn action(&self, i: usize) -> Option<&SaveAction> {
+        self.items.get(i).map(|i| &i.action)
     }
 
     pub fn summary(&self) -> &SavesSummary {
         &self.summary
     }
 
+    /// Settles every conflict the same way.
+    pub fn resolve_all(&mut self, choice: ConflictChoice) {
+        for i in 0..self.items.len() {
+            self.resolve(i, choice);
+        }
+    }
+
+    /// Settles conflict `i` (other actions are left alone).
     pub fn resolve(&mut self, i: usize, choice: ConflictChoice) {
+        let Some(item) = self.items.get_mut(i) else {
+            return;
+        };
         let SaveAction::Conflict {
             rel,
             card,
             computer,
             ..
-        } = self.actions[i].clone()
+        } = item.action.clone()
         else {
             return;
         };
-        self.actions[i] = match choice {
+        item.action = match choice {
             ConflictChoice::Card => SaveAction::Pull {
                 rel,
                 size: card.size,
@@ -198,8 +222,8 @@ impl SavesPlan {
     }
     fn recount(&mut self) {
         self.summary = SavesSummary::default();
-        for action in &self.actions {
-            match action {
+        for item in &self.items {
+            match &item.action {
                 SaveAction::Pull { size, .. } => {
                     self.summary.pull += 1;
                     self.summary.bytes += size;
@@ -337,9 +361,8 @@ pub fn plan(
         paths.retain(|p| only.contains(p));
     }
     let mut plan = SavesPlan {
-        actions: Vec::new(),
+        items: Vec::new(),
         summary: SavesSummary::default(),
-        observed: BTreeMap::new(),
         library: lib.identity()?,
         card_identity: crate::card::CardIdentity::read(pocket)?,
     };
@@ -350,9 +373,10 @@ pub fn plan(
         let Some(action) = decide(rel, &card, &computer) else {
             continue;
         };
-        plan.observed
-            .insert(rel.clone(), Observed { card, computer });
-        plan.actions.push(action);
+        plan.items.push(SaveItem {
+            action,
+            observed: Observed { card, computer },
+        });
         progress(Event::Step {
             done: i + 1,
             total: paths.len(),
@@ -485,13 +509,15 @@ pub fn plan_restore(
         computer: inspect(&current(lib, rel))?,
     };
     let mut plan = SavesPlan {
-        actions: vec![SaveAction::Push {
-            rel: rel.to_path_buf(),
-            source,
-            identity,
+        items: vec![SaveItem {
+            action: SaveAction::Push {
+                rel: rel.to_path_buf(),
+                source,
+                identity,
+            },
+            observed,
         }],
         summary: SavesSummary::default(),
-        observed: BTreeMap::from([(rel.to_path_buf(), observed)]),
         library: lib.identity()?,
         card_identity: crate::card::CardIdentity::read(pocket)?,
     };
@@ -509,8 +535,7 @@ pub fn plan_restore_paths(lib: &Library, pocket: &Pocket, rels: &[PathBuf]) -> R
     })??;
     for other in plans {
         let other = other?;
-        plan.actions.extend(other.actions);
-        plan.observed.extend(other.observed);
+        plan.items.extend(other.items);
     }
     plan.recount();
     Ok(plan)
@@ -538,7 +563,8 @@ pub fn apply(
 ) -> Result<SavesResult> {
     let mut result = SavesResult::default();
     let mut done = 0;
-    for action in &plan.actions {
+    for item in &plan.items {
+        let action = &item.action;
         let pull = match action {
             SaveAction::Pull { .. } => true,
             SaveAction::Push { .. } => false,
@@ -546,7 +572,7 @@ pub fn apply(
         };
         let rel = action.path();
         validate_path(rel)?;
-        match copy_one(lib, pocket, plan, action) {
+        match copy_one(lib, pocket, plan, item) {
             Ok((archived, size)) => {
                 if pull {
                     result.pulled += 1;
@@ -578,12 +604,13 @@ fn copy_one(
     lib: &Library,
     pocket: &Pocket,
     plan: &SavesPlan,
-    action: &SaveAction,
+    item: &SaveItem,
 ) -> Result<(bool, u64)> {
+    let action = &item.action;
     let rel = action.path();
     lib.check(&plan.library)?;
     plan.card_identity.check(pocket)?;
-    let observed = plan.observed.get(rel).expect("planned action");
+    let observed = &item.observed;
     let on_card = pocket.root().join(rel);
     let in_library = current(lib, rel);
     if observed.card != inspect(&on_card)? || observed.computer != inspect(&in_library)? {
@@ -788,8 +815,7 @@ mod tests {
         apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
         assert_eq!(std::fs::read(pocket.root().join(REL)).unwrap(), b"AP two");
         let i = plan
-            .actions
-            .iter()
+            .actions()
             .position(|a| matches!(a, SaveAction::Conflict { .. }))
             .unwrap();
         plan.resolve(i, ConflictChoice::Computer);
@@ -828,7 +854,7 @@ mod tests {
         );
         let plan = plan_backup(&lib, &pocket);
         assert_eq!(plan.summary.up_to_date, 1);
-        assert_eq!(plan.actions.len(), 1);
+        assert_eq!(plan.actions().len(), 1);
     }
 
     #[test]
@@ -845,7 +871,7 @@ mod tests {
             only: None,
         };
         let planned = plan(&lib, &pocket, memories, &mut |_| {}).unwrap();
-        let paths: Vec<&Path> = planned.actions.iter().map(SaveAction::path).collect();
+        let paths: Vec<&Path> = planned.actions().map(SaveAction::path).collect();
         assert_eq!(paths, [Path::new(sav), Path::new(sta)]);
         apply(&mut lib, &pocket, &planned, &mut |_| {}).unwrap();
         // Cartridge saves alone leave Memories out.
@@ -854,8 +880,8 @@ mod tests {
             only: None,
         };
         let plan_saves = plan(&lib, &pocket, saves, &mut |_| {}).unwrap();
-        assert_eq!(plan_saves.actions.len(), 1);
-        assert_eq!(plan_saves.actions[0].path(), Path::new(REL));
+        assert_eq!(plan_saves.actions().len(), 1);
+        assert_eq!(plan_saves.action(0).unwrap().path(), Path::new(REL));
 
         // Both files go back together; the card's copies are archived first.
         write(pocket.root(), sta, "newer state", 200);
@@ -891,8 +917,7 @@ mod tests {
             write(pocket.root(), rel, "x", 100);
         }
         let mut seen: Vec<String> = plan_backup(&lib, &pocket)
-            .actions
-            .iter()
+            .actions()
             .map(|a| a.path().display().to_string())
             .collect();
         seen.sort();

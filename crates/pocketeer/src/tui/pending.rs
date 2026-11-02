@@ -306,7 +306,6 @@ impl Pending for SaveSync {
         let conflict = self
             .plan
             .actions()
-            .iter()
             .position(|a| matches!(a, SaveAction::Conflict { .. }));
         if let Some(index) = conflict {
             return Preview::SaveConflict {

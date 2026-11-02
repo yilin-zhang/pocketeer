@@ -52,9 +52,7 @@ pub fn backup(
     let opts = SavesOptions { scope, only: None };
     let mut plan = plan_sync(ctx, opts, progress)?;
     if let Some(choice) = conflicts {
-        for i in 0..plan.actions().len() {
-            plan.resolve(i, choice);
-        }
+        plan.resolve_all(choice);
     }
     stage(ctx, mode, plan, progress)
 }

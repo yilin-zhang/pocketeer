@@ -281,12 +281,12 @@ pub enum Step {
 
 /// The first conflict in `plan`: which copy wins. The answer re-plans the rest.
 pub fn ask_conflict(cx: &mut Cx, backup: Box<SaveSync>, index: usize) {
-    let SaveAction::Conflict {
+    let Some(SaveAction::Conflict {
         rel,
         card,
         computer,
         ..
-    } = &backup.plan.actions()[index]
+    }) = backup.plan.action(index)
     else {
         return;
     };

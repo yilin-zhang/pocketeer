@@ -72,7 +72,6 @@ pub fn saves_sync_by_game(
             report
                 .plan
                 .actions()
-                .iter()
                 .filter_map(|a| action_line(a, &a.path().display().to_string())),
         );
     } else {
