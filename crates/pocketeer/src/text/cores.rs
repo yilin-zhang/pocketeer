@@ -4,13 +4,13 @@ use std::fmt::Write;
 
 use pocketeer_core::card::{
     cores::{CoreInfo, CoreListReport},
-    install::{Changes, InstallPlan, UninstallPlan},
+    install::{InstallPlan, UninstallPlan},
 };
 use pocketeer_core::catalog::inventory::InventoryStatus;
 
-use super::{actions, bytes, mode_footer, source, table};
+use super::{actions, batch_report, bytes, source, table};
 use crate::ops::{
-    Batch, BatchState, Mode,
+    Mode,
     cores::{InstallReport, RemoveReport, SearchReport},
 };
 
@@ -29,7 +29,9 @@ pub fn core_list(report: &CoreListReport) -> String {
                     (Some(l), _) if c.update_available => (l.version.clone(), "update available"),
                     (Some(l), _) => (l.version.clone(), "up to date"),
                     (None, true) => ("-".into(), "no release in inventory"),
-                    (None, false) if report.inventory.is_loaded() => ("-".into(), "not in inventory"),
+                    (None, false) if report.inventory.is_loaded() => {
+                        ("-".into(), "not in inventory")
+                    }
                     (None, false) => ("?".into(), ""),
                 };
                 [
@@ -163,16 +165,20 @@ pub fn core_info(info: &CoreInfo) -> String {
 }
 
 pub fn install_report(r: &InstallReport) -> String {
-    batch_report(r, install_plan, |a| {
-        let mut parts = vec![format!("{} file(s) written", a.installed)];
-        if a.removed > 0 {
-            parts.push(format!("{} removed", a.removed));
-        }
-        if a.moved_files > 0 {
-            parts.push(format!("{} moved", a.moved_files));
-        }
-        parts.join(", ")
-    })
+    batch_report(
+        r,
+        |out, p, mode| install_plan(out, &p.plan, mode),
+        |a| {
+            let mut parts = vec![format!("{} file(s) written", a.installed)];
+            if a.removed > 0 {
+                parts.push(format!("{} removed", a.removed));
+            }
+            if a.moved_files > 0 {
+                parts.push(format!("{} moved", a.moved_files));
+            }
+            parts.join(", ")
+        },
+    )
 }
 
 pub fn remove_report(r: &RemoveReport) -> String {
@@ -181,44 +187,6 @@ pub fn remove_report(r: &RemoveReport) -> String {
         |out, plan, _| remove_plan(out, plan),
         |a| format!("{} item(s) removed", a.removed),
     )
-}
-
-/// Each item's plan (`plan`), then how applying it went (`done` sums up
-/// the changes).
-fn batch_report<P>(
-    r: &Batch<P>,
-    plan: impl Fn(&mut String, &P, Mode),
-    done: impl Fn(&Changes) -> String,
-) -> String {
-    let mut out = String::new();
-    for (i, item) in r.items.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        match &item.state {
-            BatchState::Unplanned { error } => {
-                let _ = writeln!(
-                    out,
-                    "{}: error [{}] {}",
-                    item.target, error.code, error.message
-                );
-                if let Some(hint) = &error.hint {
-                    let _ = writeln!(out, "  hint: {hint}");
-                }
-            }
-            BatchState::Planned { plan: p } => plan(&mut out, p, r.mode),
-            BatchState::Applied { plan: p, result } => {
-                plan(&mut out, p, r.mode);
-                let _ = writeln!(out, "  ✓ done: {}", done(result));
-            }
-            BatchState::Failed { plan: p, error } => {
-                plan(&mut out, p, r.mode);
-                let _ = writeln!(out, "  ✗ failed [{}] {}", error.code, error.message);
-            }
-        }
-    }
-    mode_footer(&mut out, r.mode);
-    out
 }
 
 /// Plan renderings as standalone strings for the TUI's confirm dialogs

@@ -12,13 +12,9 @@ use super::{
     dialog::{Answer, Step as DialogStep},
     games::GameRef,
 };
-use crate::{
-    ops::{Staged, library::StandardizePlan},
-    text,
-    tui::{
-        pending::{Pending, Request, text_lines},
-        worker::Job,
-    },
+use crate::tui::{
+    pending::{Pending, Request},
+    worker::Job,
 };
 
 /// Where a rename is.
@@ -261,11 +257,10 @@ pub fn answer(cx: &mut Cx, step: Step, answer: Answer) {
             if chosen.is_empty() {
                 return;
             }
-            let lines = text_lines(&text::library::library_standardize(&Staged::preview(
-                StandardizePlan {
-                    renames: chosen.clone(),
-                },
-            )));
+            let lines = chosen
+                .iter()
+                .map(|p| format!("  [{}] {}  →  {}", p.platform, p.old_name, p.new_name))
+                .collect();
             cx.dialog.confirm(
                 format!("Rename {} game(s) to standard names?", chosen.len()),
                 lines,

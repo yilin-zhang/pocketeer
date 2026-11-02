@@ -7,7 +7,7 @@ use std::{
 
 use pocketeer_core::{
     Result,
-    plan::Event,
+    plan::{Event, Progress},
     transfer::saves::{
         self, ConflictChoice, SaveEntry, SaveVersion, SavesOptions, SavesPlan, SavesResult, Scope,
         TrashPlan, TrashResult, TrashTarget,
@@ -15,9 +15,9 @@ use pocketeer_core::{
 };
 use serde::Serialize;
 
-use super::{Mode, Staged, context::Context, stage};
+use super::{Apply, Mode, Staged, context::Context, stage};
 
-pub type SyncReport = Staged<SavesPlan, SavesResult>;
+pub type SyncReport = Staged<SavesPlan>;
 
 pub fn plan_sync(
     ctx: &Context,
@@ -27,17 +27,16 @@ pub fn plan_sync(
     saves::plan(&ctx.library()?, &ctx.pocket()?, opts, progress)
 }
 
-pub fn apply_sync(
-    ctx: &Context,
-    plan: &SavesPlan,
-    progress: &mut dyn FnMut(Event),
-) -> Result<SavesResult> {
-    let mut lib = ctx.library()?;
-    let result = saves::apply(&mut lib, &ctx.pocket()?, plan, progress)?;
-    // New backups are linked to their games by name.
-    let games = lib.list_games(None, None)?;
-    saves::link_owners(&lib, &games, &BTreeMap::new())?;
-    Ok(result)
+impl Apply for SavesPlan {
+    type Output = SavesResult;
+    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<SavesResult> {
+        let mut lib = ctx.library()?;
+        let result = saves::apply(&mut lib, &ctx.pocket()?, self, progress)?;
+        // New backups are linked to their games by name.
+        let games = lib.list_games(None, None)?;
+        saves::link_owners(&lib, &games, &BTreeMap::new())?;
+        Ok(result)
+    }
 }
 
 /// `saves backup`: pull newer card saves into the library. `conflicts`
@@ -57,7 +56,7 @@ pub fn backup(
             plan.resolve(i, choice);
         }
     }
-    stage(mode, plan, |p| apply_sync(ctx, p, progress))
+    stage(ctx, mode, plan, progress)
 }
 
 /// `saves restore`: push the library's copy (or an older version) to the card.
@@ -69,7 +68,7 @@ pub fn restore(
     progress: &mut dyn FnMut(Event),
 ) -> Result<SyncReport> {
     let plan = saves::plan_restore(&ctx.library()?, &ctx.pocket()?, rel, version)?;
-    stage(mode, plan, |p| apply_sync(ctx, p, progress))
+    stage(ctx, mode, plan, progress)
 }
 
 #[derive(Debug, Serialize)]
@@ -101,7 +100,7 @@ pub fn versions(ctx: &Context, rel: &Path) -> Result<VersionsReport> {
     })
 }
 
-pub type TrashReport = Staged<TrashPlan, TrashResult>;
+pub type TrashReport = Staged<TrashPlan>;
 
 /// Plans throwing away copies of the saves at card paths `rels`. Only
 /// deleting from the card needs the card.
@@ -113,16 +112,19 @@ pub fn plan_trash(ctx: &Context, rels: &[PathBuf], target: TrashTarget) -> Resul
     saves::plan_trash(&ctx.library()?, pocket.as_ref(), rels, target)
 }
 
-pub fn apply_trash(ctx: &Context, plan: &TrashPlan) -> Result<TrashResult> {
-    let pocket = match plan.target {
-        TrashTarget::Card => Some(ctx.pocket()?),
-        _ => None,
-    };
-    saves::apply_trash(&mut ctx.library()?, pocket.as_ref(), plan)
+impl Apply for TrashPlan {
+    type Output = TrashResult;
+    fn apply(&mut self, ctx: &Context, _: Progress<'_>) -> Result<TrashResult> {
+        let pocket = match self.target {
+            TrashTarget::Card => Some(ctx.pocket()?),
+            _ => None,
+        };
+        saves::apply_trash(&mut ctx.library()?, pocket.as_ref(), self)
+    }
 }
 
 /// `saves trash`.
 pub fn trash(ctx: &Context, rel: &Path, target: TrashTarget, mode: Mode) -> Result<TrashReport> {
     let plan = plan_trash(ctx, &[rel.to_path_buf()], target)?;
-    stage(mode, plan, |p| apply_trash(ctx, p))
+    stage(ctx, mode, plan, &mut |_| {})
 }

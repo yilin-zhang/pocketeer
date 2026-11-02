@@ -16,7 +16,7 @@ use pocketeer_core::{
     library::{covers::FetchReport, import::ImportOptions},
     names::RenameKind,
     net::{Policy, Source},
-    plan::Event,
+    plan::{Event, Progress},
     transfer::{
         self, Comparison,
         from_card::{self, CardImportPlan, PlatformImport},
@@ -26,7 +26,7 @@ use pocketeer_core::{
 use serde::Serialize;
 
 use super::{
-    Mode, Staged, apply_actions,
+    Apply, Mode, Staged, apply_actions,
     context::Context,
     library::{ImportSettings, metadata_after_import, suggest_standard_names},
     load_dat, stage, stage_if, verdict,
@@ -79,7 +79,14 @@ pub fn bios_check(ctx: &Context, ids: &[String], present: bool) -> Result<BiosRe
     Ok(report)
 }
 
-pub type PlaceReport = Staged<PlacePlan, install::Changes>;
+pub type PlaceReport = Staged<PlacePlan>;
+
+impl Apply for PlacePlan {
+    type Output = install::Changes;
+    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<install::Changes> {
+        apply_actions(&ctx.pocket()?, "bios-place", &self.actions, progress)
+    }
+}
 
 pub fn bios_place(
     ctx: &Context,
@@ -89,17 +96,26 @@ pub fn bios_place(
     let pocket = ctx.pocket()?;
     let installed = pocketeer_core::card::cores::list_installed(&pocket)?;
     let report = bios::check(&pocket, &installed, None)?;
-    stage(mode, bios::plan_place(&report), |plan| {
-        apply_actions(&pocket, "bios-place", &plan.actions, progress)
-    })
+    stage(ctx, mode, bios::plan_place(&report), progress)
 }
 
-pub type CleanReport = Staged<CleanPlan, CleanResult>;
+pub type CleanReport = Staged<CleanPlan>;
 
-pub fn clean(ctx: &Context, system: bool, mode: Mode) -> Result<CleanReport> {
-    let pocket = ctx.pocket()?;
-    let plan = clean::plan(&pocket, system)?;
-    stage(mode, plan, |plan| clean::apply(&pocket, plan))
+impl Apply for CleanPlan {
+    type Output = CleanResult;
+    fn apply(&mut self, ctx: &Context, _: Progress<'_>) -> Result<CleanResult> {
+        clean::apply(&ctx.pocket()?, self)
+    }
+}
+
+pub fn clean(
+    ctx: &Context,
+    system: bool,
+    mode: Mode,
+    progress: Progress<'_>,
+) -> Result<CleanReport> {
+    let plan = clean::plan(&ctx.pocket()?, system)?;
+    stage(ctx, mode, plan, progress)
 }
 
 #[derive(Debug, Serialize)]
@@ -159,7 +175,7 @@ pub fn roms(
     })
 }
 
-pub type CopyReport = Staged<to_card::CopyPlan, to_card::CopyResult>;
+pub type CopyReport = Staged<to_card::CopyPlan>;
 
 pub fn plan_copy(
     ctx: &Context,
@@ -170,38 +186,37 @@ pub fn plan_copy(
     to_card::plan(&ctx.library()?, &ctx.pocket()?, platform, roms, progress)
 }
 
-pub fn apply_copy(
-    ctx: &Context,
-    plan: &to_card::CopyPlan,
-    progress: &mut dyn FnMut(Event),
-) -> Result<to_card::CopyResult> {
-    to_card::apply(&ctx.pocket()?, plan, progress)
+impl Apply for to_card::CopyPlan {
+    type Output = to_card::CopyResult;
+    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<Self::Output> {
+        to_card::apply(&ctx.pocket()?, self, progress)
+    }
 }
 
-pub type RenameReport = Staged<card_rename::CardRenamePlan, card_rename::CardRenameResult>;
+pub type RenameReport = Staged<card_rename::CardRenamePlan>;
 
 pub fn plan_rename(ctx: &Context, path: &Path, name: &str) -> Result<card_rename::CardRenamePlan> {
     card_rename::plan_card(&ctx.pocket()?, path, name)
 }
 
-pub fn apply_rename(
-    ctx: &Context,
-    plan: &card_rename::CardRenamePlan,
-) -> Result<card_rename::CardRenameResult> {
-    let result = card_rename::apply_card(&ctx.pocket()?, plan)?;
-    // Backed-up saves follow, or the next backup would see them as new.
-    let saves: Vec<_> = plan
-        .moves
-        .iter()
-        .filter(|m| m.kind == RenameKind::Save)
-        .map(|m| (m.from.clone(), m.to.clone()))
-        .collect();
-    if !saves.is_empty()
-        && let Ok(lib) = ctx.library()
-    {
-        pocketeer_core::transfer::saves::follow_renames(&lib, &saves)?;
+impl Apply for card_rename::CardRenamePlan {
+    type Output = card_rename::CardRenameResult;
+    fn apply(&mut self, ctx: &Context, _: Progress<'_>) -> Result<Self::Output> {
+        let result = card_rename::apply_card(&ctx.pocket()?, self)?;
+        // Backed-up saves follow, or the next backup would see them as new.
+        let saves: Vec<_> = self
+            .moves
+            .iter()
+            .filter(|m| m.kind == RenameKind::Save)
+            .map(|m| (m.from.clone(), m.to.clone()))
+            .collect();
+        if !saves.is_empty()
+            && let Ok(lib) = ctx.library()
+        {
+            pocketeer_core::transfer::saves::follow_renames(&lib, &saves)?;
+        }
+        Ok(result)
     }
-    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -217,10 +232,10 @@ pub struct ImportRequest {
     pub settings: ImportSettings,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct ImportReport {
     #[serde(flatten)]
-    pub staged: Staged<CardImportPlan, Vec<PlatformImport>>,
+    pub staged: Staged<CardImportPlan>,
     /// Names asked for that aren't orphans on the card.
     pub not_found: Vec<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -286,12 +301,11 @@ pub fn plan_import(
 }
 
 /// Copies the planned ROMs into the library. The card itself is not changed.
-pub fn apply_import(
-    ctx: &Context,
-    plan: &CardImportPlan,
-    progress: &mut dyn FnMut(Event),
-) -> Result<Vec<PlatformImport>> {
-    from_card::apply_import(&mut ctx.library()?, &ctx.pocket()?, plan, progress)
+impl Apply for CardImportPlan {
+    type Output = Vec<PlatformImport>;
+    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<Self::Output> {
+        from_card::apply_import(&mut ctx.library()?, &ctx.pocket()?, self, progress)
+    }
 }
 
 pub fn import(
@@ -301,9 +315,7 @@ pub fn import(
     progress: &mut dyn FnMut(Event),
 ) -> Result<ImportReport> {
     let (plan, not_found) = plan_import(ctx, req, progress)?;
-    let staged = stage_if(mode, not_found.is_empty(), plan, |plan| {
-        apply_import(ctx, plan, progress)
-    })?;
+    let staged = stage_if(ctx, mode, not_found.is_empty(), plan, progress)?;
     let added = staged
         .result
         .as_ref()

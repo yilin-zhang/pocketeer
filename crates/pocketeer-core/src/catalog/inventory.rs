@@ -210,7 +210,9 @@ pub enum InventoryStatus {
         #[serde(flatten)]
         source: Source,
     },
-    Unavailable { error: ErrorInfo },
+    Unavailable {
+        error: ErrorInfo,
+    },
 }
 
 impl InventoryStatus {

@@ -13,8 +13,8 @@ use pocketeer_core::{
 };
 
 use super::{
-    bytes, cover_news, covers_summary, import_actions, plan_lines, skipped_summary, staged_footer,
-    suggestion_footer, table, unmapped_hint, warning_lines,
+    batch_report, bytes, cover_news, covers_summary, import_actions, plan_lines, skipped_summary,
+    staged_footer, suggestion_footer, table, unmapped_hint, warning_lines,
 };
 use crate::ops::{
     Mode,
@@ -325,46 +325,17 @@ pub fn library_remove(r: &RemoveReport) -> String {
 }
 
 pub fn library_standardize(r: &StandardizeReport) -> String {
-    let mut out = String::new();
-    let renames = &r.plan.renames;
-    if renames.is_empty() {
-        let _ = writeln!(
-            out,
-            "Every unverified game already has a standard name, or no standard name matches."
-        );
-        return out;
+    if r.items.is_empty() {
+        return "Every unverified game already has a standard name, or no standard name matches.\n"
+            .into();
     }
-    for p in renames {
-        let _ = writeln!(out, "  [{}] {}  →  {}", p.platform, p.old_name, p.new_name);
-    }
-    if r.result.is_none() {
-        let _ = writeln!(
-            out,
-            "{} game(s) would be renamed (library file and game).",
-            renames.len()
-        );
-    }
-    staged_footer(
-        &mut out,
-        r.mode,
-        r.result.as_ref(),
-        renames.len(),
-        "",
-        |out, res| {
-            let ok = res.iter().filter(|x| x.is_ok()).count();
-            let _ = writeln!(out, "✓ renamed {ok} of {} game(s)", res.len());
-            for (plan, result) in renames.iter().zip(res.iter()) {
-                if let Err(error) = result {
-                    let _ = writeln!(
-                        out,
-                        "✗ [{}] {}: {}",
-                        plan.platform, plan.old_name, error.message
-                    );
-                }
-            }
+    batch_report(
+        r,
+        |out, p, _| {
+            let _ = writeln!(out, "  [{}] {}  →  {}", p.platform, p.old_name, p.new_name);
         },
-    );
-    out
+        |_| "renamed".into(),
+    )
 }
 
 pub fn covers_fetch_text(r: &FetchReport) -> String {

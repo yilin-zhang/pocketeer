@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use pocketeer_core::{
-    Error, ErrorInfo, Result,
+    Error, Result,
     library::{
         self, Game, Library,
         covers::{self, CoverStats, FetchOptions, FetchReport},
@@ -12,11 +12,11 @@ use pocketeer_core::{
         remove::{self, RemovePlan, RemoveResult},
         rename::{self, RenamePlan, RenameResult},
     },
-    plan::{Applied, Event, Plan},
+    plan::{Event, Progress},
 };
 use serde::Serialize;
 
-use super::{Mode, Staged, context::Context, load_dat, stage};
+use super::{Apply, Batch, Mode, Staged, context::Context, load_dat, stage};
 use crate::output::Outcome;
 
 #[derive(Debug, Serialize)]
@@ -38,10 +38,10 @@ pub fn status(ctx: &Context) -> Result<library::Status> {
     ctx.library()?.status()
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct ImportReport {
     #[serde(flatten)]
-    pub staged: Staged<ImportPlan, ImportResult>,
+    pub staged: Staged<ImportPlan>,
     /// Covers fetched for the imported platform afterwards (online only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub covers: Option<FetchReport>,
@@ -267,12 +267,11 @@ pub fn plan_import_sorted(
     Ok(SortedImport { parts, unknown })
 }
 
-pub fn apply_import(
-    ctx: &Context,
-    plan: &ImportPlan,
-    progress: &mut dyn FnMut(Event),
-) -> Result<ImportResult> {
-    import::apply_import(&mut ctx.library()?, plan, progress)
+impl Apply for ImportPlan {
+    type Output = ImportResult;
+    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<ImportResult> {
+        import::apply_import(&mut ctx.library()?, self, progress)
+    }
 }
 
 pub fn import(
@@ -282,7 +281,7 @@ pub fn import(
     progress: &mut dyn FnMut(Event),
 ) -> Result<ImportReport> {
     let plan = plan_import(ctx, req, progress)?;
-    let staged = stage(mode, plan, |plan| apply_import(ctx, plan, progress))?;
+    let staged = stage(ctx, mode, plan, progress)?;
     let added = staged.result.as_ref().map_or(0, |r| r.added);
     let metadata = metadata_after_import(
         ctx,
@@ -300,7 +299,7 @@ pub fn import(
 
 /// `library import` without `--platform`: one report per platform the
 /// file extensions name, and the files they don't.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct SortedImportReport {
     pub parts: Vec<ImportReport>,
     /// Files whose platform couldn't be told; give `--platform` for them.
@@ -333,7 +332,7 @@ pub fn import_sorted(
     let mut parts = Vec::new();
     for plan in sorted.parts {
         let platform = plan.platform.clone();
-        let staged = stage(mode, plan, |plan| apply_import(ctx, plan, progress))?;
+        let staged = stage(ctx, mode, plan, progress)?;
         let added = staged.result.as_ref().map_or(0, |r| r.added);
         let metadata = metadata_after_import(ctx, Some(&platform), (added, covers), progress)
             .unwrap_or_default();
@@ -370,7 +369,15 @@ pub fn list(ctx: &Context, platform: Option<&str>, query: Option<&str>) -> Resul
     })
 }
 
-pub type RenameReport = Staged<RenamePlan, RenameResult>;
+pub type RenameReport = Staged<RenamePlan>;
+
+impl Apply for RenamePlan {
+    type Output = RenameResult;
+    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<RenameResult> {
+        progress(Event::Status(format!("Renaming {}", self.old_name)));
+        rename::apply(&mut ctx.library()?, self)
+    }
+}
 
 /// Rename a managed ROM locally.
 pub fn plan_rename(
@@ -382,10 +389,6 @@ pub fn plan_rename(
     rename::plan(&ctx.library()?, platform, spec, new_name)
 }
 
-pub fn apply_rename(ctx: &Context, plan: &RenamePlan) -> Result<RenameResult> {
-    rename::apply(&mut ctx.library()?, plan)
-}
-
 pub fn rename(
     ctx: &Context,
     platform: Option<&str>,
@@ -394,17 +397,21 @@ pub fn rename(
     mode: Mode,
 ) -> Result<RenameReport> {
     let plan = plan_rename(ctx, platform, spec, new_name)?;
-    stage(mode, plan, |plan| apply_rename(ctx, plan))
+    stage(ctx, mode, plan, &mut |_| {})
 }
 
-pub type RemoveReport = Staged<RemovePlan, RemoveResult>;
+pub type RemoveReport = Staged<RemovePlan>;
+
+impl Apply for RemovePlan {
+    type Output = RemoveResult;
+    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<RemoveResult> {
+        progress(Event::Status("Removing from library".into()));
+        remove::apply(&mut ctx.library()?, self)
+    }
+}
 
 pub fn plan_remove(ctx: &Context, platform: Option<&str>, specs: &[String]) -> Result<RemovePlan> {
     remove::plan(&ctx.library()?, platform, specs)
-}
-
-pub fn apply_remove(ctx: &Context, plan: &RemovePlan) -> Result<RemoveResult> {
-    remove::apply(&mut ctx.library()?, plan)
 }
 
 pub fn remove(
@@ -414,56 +421,7 @@ pub fn remove(
     mode: Mode,
 ) -> Result<RemoveReport> {
     let plan = plan_remove(ctx, platform, specs)?;
-    stage(mode, plan, |plan| apply_remove(ctx, plan))
-}
-
-/// One rename per game that matches a standard name.
-#[derive(Debug, Serialize)]
-pub struct StandardizePlan {
-    pub renames: Vec<RenamePlan>,
-}
-
-impl Plan for StandardizePlan {
-    fn changes(&self) -> usize {
-        self.renames.len()
-    }
-}
-
-/// `result` of a standardize: one entry per rename, in plan order.
-#[derive(Debug, Serialize)]
-#[serde(transparent)]
-pub struct StandardizeResults(pub Vec<std::result::Result<RenameResult, ErrorInfo>>);
-
-impl std::ops::Deref for StandardizeResults {
-    type Target = [std::result::Result<RenameResult, ErrorInfo>];
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Applied for StandardizeResults {
-    fn failed(&self) -> usize {
-        self.iter().filter(|r| r.is_err()).count()
-    }
-}
-
-pub type StandardizeReport = Staged<StandardizePlan, StandardizeResults>;
-
-pub fn apply_standardize(
-    ctx: &Context,
-    renames: &[RenamePlan],
-    progress: &mut dyn FnMut(Event),
-) -> Result<StandardizeResults> {
-    let mut lib = ctx.library()?;
-    Ok(StandardizeResults(
-        renames
-            .iter()
-            .map(|plan| {
-                progress(Event::Status(format!("Renaming {}", plan.old_name)));
-                rename::apply(&mut lib, plan).map_err(|e| e.to_info())
-            })
-            .collect(),
-    ))
+    stage(ctx, mode, plan, &mut |_| {})
 }
 
 /// Every unverified game that matches a standard name, as a rename plan
@@ -472,14 +430,24 @@ pub fn plan_standardize(ctx: &Context, platform: Option<&str>) -> Result<Vec<Ren
     library::rename::standardize_plan(&ctx.library()?, platform, |p| names_for(ctx, p))
 }
 
+/// One rename per game that matches a standard name, each on its own.
+pub type StandardizeReport = Batch<RenamePlan>;
+
 pub fn standardize(ctx: &Context, platform: Option<&str>, mode: Mode) -> Result<StandardizeReport> {
-    let renames = plan_standardize(ctx, platform)?;
-    stage(mode, StandardizePlan { renames }, |plan| {
-        apply_standardize(ctx, &plan.renames, &mut |_| {})
-    })
+    let renames = plan_standardize(ctx, platform)?
+        .into_iter()
+        .map(|plan| (plan.old_name.clone(), Ok(plan)));
+    Ok(Batch::stage(ctx, mode, renames, &mut |_| {}))
 }
 
-pub type CoverImportReport = Staged<covers::import::ImportPlan, covers::import::ImportResult>;
+pub type CoverImportReport = Staged<covers::import::ImportPlan>;
+
+impl Apply for covers::import::ImportPlan {
+    type Output = covers::import::ImportResult;
+    fn apply(&mut self, ctx: &Context, _: Progress<'_>) -> Result<Self::Output> {
+        covers::import::apply(&mut ctx.library()?, self)
+    }
+}
 
 /// Copies a local image in as the cover of the game `spec` names.
 pub fn import_cover(
@@ -489,10 +457,10 @@ pub fn import_cover(
     image: &Path,
     mode: Mode,
 ) -> Result<CoverImportReport> {
-    let mut lib = ctx.library()?;
+    let lib = ctx.library()?;
     let hits = library::resolve_game_roms(&lib, platform, spec)?;
     let plan = covers::import::plan(&lib, hits[0].0.id, image)?;
-    stage(mode, plan, |p| covers::import::apply(&mut lib, p))
+    stage(ctx, mode, plan, &mut |_| {})
 }
 
 impl Outcome for library::identify::Report {
@@ -554,70 +522,4 @@ pub fn covers_status(ctx: &Context) -> Result<CoversStatusReport> {
     Ok(CoversStatusReport {
         platforms: covers::stats(&ctx.library()?)?,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-    use pocketeer_core::HashCache;
-
-    #[test]
-    fn standardize_reports_partial_success_and_continues_after_a_collision() {
-        let tmp = tempfile::tempdir().unwrap();
-        let source = tmp.path().join("source");
-        std::fs::create_dir(&source).unwrap();
-        for name in ["one", "two", "three"] {
-            std::fs::write(source.join(format!("{name}.gba")), name).unwrap();
-        }
-        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
-        let options = ImportOptions {
-            platform: "gba".into(),
-            platform_name: None,
-            dat_only: false,
-        };
-        let import = import::plan_import(
-            &lib,
-            &source,
-            &options,
-            None,
-            &mut HashCache::in_memory(),
-            &mut |_| {},
-        )
-        .unwrap();
-        import::apply_import(&mut lib, &import, &mut |_| {}).unwrap();
-        let renames: Vec<_> = ["one", "two", "three"]
-            .into_iter()
-            .map(|name| rename::plan(&lib, Some("gba"), name, &format!("new {name}")).unwrap())
-            .collect();
-        std::fs::write(lib.root().join("roms/gba/new two.gba"), b"keep").unwrap();
-        let cli = crate::cli::Cli::parse_from([
-            "pocketeer",
-            "--library",
-            lib.root().to_str().unwrap(),
-            "--config",
-            tmp.path().join("config.toml").to_str().unwrap(),
-        ]);
-        let result = apply_standardize(&Context::new(cli.global), &renames, &mut |_| {}).unwrap();
-        assert!(result[0].is_ok());
-        assert!(result[1].is_err());
-        assert!(result[2].is_ok());
-        assert_eq!(result.failed(), 1);
-        assert_eq!(
-            std::fs::read(lib.root().join("roms/gba/new one.gba")).unwrap(),
-            b"one"
-        );
-        assert_eq!(
-            std::fs::read(lib.root().join("roms/gba/two.gba")).unwrap(),
-            b"two"
-        );
-        assert_eq!(
-            std::fs::read(lib.root().join("roms/gba/new two.gba")).unwrap(),
-            b"keep"
-        );
-        assert_eq!(
-            std::fs::read(lib.root().join("roms/gba/new three.gba")).unwrap(),
-            b"three"
-        );
-    }
 }

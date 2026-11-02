@@ -3,15 +3,15 @@
 use std::path::PathBuf;
 
 use pocketeer_core::{
-    Error, Pocket, Result,
+    Error, Result,
     card::cores::{self, CoreInfo, CoreListReport, SearchFilter, SearchHit},
-    card::install::{self, InstallPlan, PlanOptions, Prepared, UninstallPlan},
+    card::install::{self, Changes, PlanOptions, Prepared, UninstallPlan},
     catalog::inventory::{Inventory, InventoryStatus},
-    plan::Event,
+    plan::{Event, Progress},
 };
 use serde::Serialize;
 
-use super::{Batch, BatchItem, Mode, context::Context};
+use super::{Apply, Batch, Mode, context::Context};
 
 pub fn list(ctx: &Context, outdated: bool) -> Result<CoreListReport> {
     let pocket = ctx.pocket()?;
@@ -71,7 +71,7 @@ pub struct InstallRequest {
     pub keep_platforms: bool,
 }
 
-pub type InstallReport = Batch<InstallPlan>;
+pub type InstallReport = Batch<Prepared>;
 
 /// Resolves `specs` (`id` or `id@version`) against the inventory and
 /// downloads what each install needs. One entry per spec, failures included.
@@ -121,7 +121,7 @@ pub fn install(
         }
         None => prepare(ctx, &ctx.inventory()?, &req.specs, opts, progress)?,
     };
-    Ok(apply_prepared(&pocket, mode, prepared, progress))
+    Ok(Batch::stage(ctx, mode, prepared, progress))
 }
 
 pub fn update(
@@ -172,31 +172,18 @@ pub fn update(
         ..Default::default()
     };
     prepared.extend(prepare(ctx, &inventory, &targets, opts, progress)?);
-    Ok(apply_prepared(&pocket, mode, prepared, progress))
+    Ok(Batch::stage(ctx, mode, prepared, progress))
 }
 
-/// Applies (or, in a dry run, just reports) prepared installs one by one;
-/// a failure stays with its core instead of aborting the batch.
-pub fn apply_prepared(
-    pocket: &Pocket,
-    mode: Mode,
-    prepared: Vec<(String, Result<Prepared>)>,
-    progress: &mut dyn FnMut(Event),
-) -> InstallReport {
-    let items = prepared
-        .into_iter()
-        .map(|(spec, result)| match result {
-            Err(e) => BatchItem::unplanned(spec, &e),
-            Ok(prep) => BatchItem::stage(spec, mode, prep.plan.clone(), |plan| {
-                progress(Event::Status(format!(
-                    "Installing {} {}",
-                    plan.core_id, plan.version
-                )));
-                prep.apply(pocket, progress)
-            }),
-        })
-        .collect();
-    Batch { mode, items }
+impl Apply for Prepared {
+    type Output = Changes;
+    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<Changes> {
+        progress(Event::Status(format!(
+            "Installing {} {}",
+            self.plan.core_id, self.plan.version
+        )));
+        Prepared::apply(self, &ctx.pocket()?, progress)
+    }
 }
 
 pub type RemoveReport = Batch<UninstallPlan>;
@@ -210,34 +197,19 @@ pub fn remove(
 ) -> Result<RemoveReport> {
     let pocket = ctx.pocket()?;
     let installed = cores::list_installed(&pocket)?;
-    let plans = ids
-        .iter()
-        .map(|id| {
-            (
-                id.clone(),
-                install::plan_remove(&pocket, &installed, id, purge),
-            )
-        })
-        .collect();
-    Ok(apply_removes(&pocket, mode, plans, progress))
+    let plans = ids.iter().map(|id| {
+        let plan = install::plan_remove(&pocket, &installed, id, purge);
+        // Named as installed, whatever case was typed.
+        let target = plan.as_ref().map_or(id.clone(), |p| p.core_id.clone());
+        (target, plan)
+    });
+    Ok(Batch::stage(ctx, mode, plans, progress))
 }
 
-/// Applies (or, in a dry run, just reports) remove plans one by one.
-pub fn apply_removes(
-    pocket: &Pocket,
-    mode: Mode,
-    plans: Vec<(String, Result<UninstallPlan>)>,
-    progress: &mut dyn FnMut(Event),
-) -> RemoveReport {
-    let items = plans
-        .into_iter()
-        .map(|(id, plan)| match plan {
-            Err(e) => BatchItem::unplanned(id, &e),
-            Ok(plan) => BatchItem::stage(plan.core_id.clone(), mode, plan, |plan| {
-                progress(Event::Status(format!("Removing {}", plan.core_id)));
-                install::apply_remove(pocket, plan, progress)
-            }),
-        })
-        .collect();
-    Batch { mode, items }
+impl Apply for UninstallPlan {
+    type Output = Changes;
+    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<Changes> {
+        progress(Event::Status(format!("Removing {}", self.core_id)));
+        install::apply_remove(&ctx.pocket()?, self, progress)
+    }
 }

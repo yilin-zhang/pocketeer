@@ -30,9 +30,9 @@ use pocketeer_core::{
 use super::worker::{Msg, applied, failed};
 use crate::{
     ops::{
-        Applied, Mode, Staged, apply_actions, card as card_cmd,
-        card::ImportRequest as CardImportRequest, context::Context, cores as cores_cmd,
-        library as library_cmd, memories as memories_cmd, saves as saves_cmd,
+        Apply, Batch, Mode, Staged, apply_actions, card as card_cmd,
+        card::ImportRequest as CardImportRequest, context::Context, library as library_cmd,
+        memories as memories_cmd, saves as saves_cmd,
     },
     text,
 };
@@ -292,48 +292,30 @@ impl Pending {
     /// the CLI prints (`Mode::Interactive`: no CLI flags in it).
     pub fn apply(self, ctx: &Context, progress: &mut dyn FnMut(Event)) -> Msg {
         match self {
-            Pending::ImportCover(plan) => {
-                let result = ctx
-                    .library()
-                    .and_then(|mut lib| covers::import::apply(&mut lib, &plan));
+            Pending::ImportCover(mut plan) => {
+                let result = plan.apply(ctx, progress);
                 shown(plan, result, |s| text::library::cover_import(&s))
             }
-            Pending::CardRename(plan) => {
-                let result = card_cmd::apply_rename(ctx, &plan);
+            Pending::CardRename(mut plan) => {
+                let result = plan.apply(ctx, progress);
                 shown(plan, result, |s| text::card::rename_report(&s))
             }
             Pending::Install { preps, .. } => {
-                let pocket = match ctx.pocket() {
-                    Ok(p) => p,
-                    Err(e) => return failed(e),
-                };
-                let prepared = preps
-                    .into_iter()
-                    .map(|p| (p.plan.core_id.clone(), Ok(p)))
-                    .collect();
-                let report = cores_cmd::apply_prepared(&pocket, Mode::Applied, prepared, progress);
+                let prepared = preps.into_iter().map(|p| (p.plan.core_id.clone(), Ok(p)));
+                let report = Batch::stage(ctx, Mode::Applied, prepared, progress);
                 applied(text::cores::install_report(&report), report.failed())
             }
             Pending::Remove(plans) => {
-                let pocket = match ctx.pocket() {
-                    Ok(p) => p,
-                    Err(e) => return failed(e),
-                };
-                let plans = plans
-                    .into_iter()
-                    .map(|p| (p.core_id.clone(), Ok(p)))
-                    .collect();
-                let report = cores_cmd::apply_removes(&pocket, Mode::Applied, plans, progress);
+                let plans = plans.into_iter().map(|p| (p.core_id.clone(), Ok(p)));
+                let report = Batch::stage(ctx, Mode::Applied, plans, progress);
                 applied(text::cores::remove_report(&report), report.failed())
             }
-            Pending::Place(plan) => {
-                let result = ctx
-                    .pocket()
-                    .and_then(|p| apply_actions(&p, "bios-place", &plan.actions, progress));
+            Pending::Place(mut plan) => {
+                let result = plan.apply(ctx, progress);
                 shown(plan, result, |s| text::card::place_report(&s))
             }
-            Pending::Clean(plan) => {
-                let result = ctx.pocket().and_then(|p| clean::apply(&p, &plan));
+            Pending::Clean(mut plan) => {
+                let result = plan.apply(ctx, progress);
                 shown(plan, result, |s| text::card::clean_report(&s))
             }
             Pending::DeleteCardRom { name, path } => {
@@ -351,39 +333,36 @@ impl Pending {
                     Err(e) => applied(format!("✗ {label}: {e}"), 1),
                 }
             }
-            Pending::Copy(plan) => {
-                let result = card_cmd::apply_copy(ctx, &plan, progress);
+            Pending::Copy(mut plan) => {
+                let result = plan.apply(ctx, progress);
                 shown(plan, result, |s| text::card::copy_report(&s))
             }
-            Pending::Saves(plan, games) => {
-                let result = saves_cmd::apply_sync(ctx, &plan, progress);
+            Pending::Saves(mut plan, games) => {
+                let result = plan.apply(ctx, progress);
                 shown(*plan, result, |s| {
                     text::saves::saves_sync_by_game(&s, &games)
                 })
             }
-            Pending::Trash(plan) => {
-                let result = saves_cmd::apply_trash(ctx, &plan);
+            Pending::Trash(mut plan) => {
+                let result = plan.apply(ctx, progress);
                 shown(*plan, result, |s| text::saves::saves_trash(&s))
             }
-            Pending::Rename(plan) => {
-                progress(Event::Status(format!("Renaming {}", plan.old_name)));
-                let result = library_cmd::apply_rename(ctx, &plan);
+            Pending::Rename(mut plan) => {
+                let result = plan.apply(ctx, progress);
                 shown(*plan, result, |s| text::library::library_rename(&s))
             }
             Pending::Standardize(renames) => {
-                let result = library_cmd::apply_standardize(ctx, &renames, progress);
-                shown(library_cmd::StandardizePlan { renames }, result, |s| {
-                    text::library::library_standardize(&s)
-                })
+                let plans = renames.into_iter().map(|p| (p.old_name.clone(), Ok(p)));
+                let report = Batch::stage(ctx, Mode::Applied, plans, progress);
+                applied(text::library::library_standardize(&report), report.failed())
             }
-            Pending::LibraryRemove(plan) => {
-                progress(Event::Status("Removing from library".into()));
-                let result = library_cmd::apply_remove(ctx, &plan);
+            Pending::LibraryRemove(mut plan) => {
+                let result = plan.apply(ctx, progress);
                 shown(*plan, result, |s| text::library::library_remove(&s))
             }
             Pending::Import(import) => match *import {
-                Import::Card(plan) => {
-                    let result = card_cmd::apply_import(ctx, &plan, progress);
+                Import::Card(mut plan) => {
+                    let result = plan.apply(ctx, progress);
                     shown(plan, result, |staged| {
                         text::card::import_report(&card_cmd::ImportReport {
                             staged,
@@ -393,11 +372,11 @@ impl Pending {
                         })
                     })
                 }
-                Import::Folder(folder) => {
+                Import::Folder(mut folder) => {
                     let mut lines = Vec::new();
                     let mut failed = 0;
-                    for plan in folder.parts.iter().filter(|p| p.changes() > 0) {
-                        match library_cmd::apply_import(ctx, plan, progress) {
+                    for plan in folder.parts.iter_mut().filter(|p| p.changes() > 0) {
+                        match plan.apply(ctx, progress) {
                             Ok(r) => {
                                 failed += r.failed.len();
                                 lines.push(text::library::import_done(&plan.platform, &r));
@@ -627,10 +606,10 @@ pub(super) fn text_lines(text: &str) -> Vec<String> {
 }
 
 /// A plan and what applying it produced, rendered like the CLI would.
-fn shown<P: Plan, R: Applied>(
+fn shown<P: Apply>(
     plan: P,
-    result: Result<R>,
-    render: impl FnOnce(Staged<P, R>) -> String,
+    result: Result<P::Output>,
+    render: impl FnOnce(Staged<P>) -> String,
 ) -> Msg {
     match result {
         Ok(r) => {

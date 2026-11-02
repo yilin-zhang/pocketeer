@@ -209,7 +209,11 @@ impl Cores {
             return;
         }
         let id = row.id.clone();
-        let list = cx.session.card().map(CardSnapshot::installed).unwrap_or_default();
+        let list = cx
+            .session
+            .card()
+            .map(CardSnapshot::installed)
+            .unwrap_or_default();
         match install::plan_remove(&pocket, &list, &id, false) {
             Ok(plan) if plan.actions.is_empty() => cx
                 .session

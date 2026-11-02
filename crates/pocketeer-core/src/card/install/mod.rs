@@ -26,8 +26,21 @@ pub struct Prepared {
     zip: CoreZip,
 }
 
+/// A prepared install reads (and reports) as its plan.
+impl serde::Serialize for Prepared {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        self.plan.serialize(s)
+    }
+}
+
+impl crate::plan::Plan for Prepared {
+    fn changes(&self) -> usize {
+        self.plan.changes()
+    }
+}
+
 impl Prepared {
-    pub fn apply(mut self, pocket: &Pocket, progress: Progress<'_>) -> Result<Changes> {
+    pub fn apply(&mut self, pocket: &Pocket, progress: Progress<'_>) -> Result<Changes> {
         let label = self.plan.core_id.clone();
         let zip = &mut self.zip;
         apply::apply(

@@ -65,7 +65,7 @@ fn main() -> ExitCode {
         }
         Command::Bios(cmd) => run_bios(&ctx, &out, cmd, &mut progress),
         Command::Clean { system, apply } => out.emit_outcome(
-            card::clean(&ctx, system, apply.into()),
+            card::clean(&ctx, system, apply.into(), &mut progress),
             text::card::clean_report,
         ),
         Command::Cores(cmd) => run_cores(&ctx, &out, cmd, &mut progress),
@@ -255,7 +255,7 @@ fn run_card(
             apply,
         } => {
             let result = card::plan_rename(ctx, &path, &new_name)
-                .and_then(|plan| ops::stage(apply.into(), plan, |p| card::apply_rename(ctx, p)));
+                .and_then(|plan| ops::stage(ctx, apply.into(), plan, progress));
             out.emit_outcome(result, text::card::rename_report)
         }
         CardCommand::Copy {
@@ -263,10 +263,8 @@ fn run_card(
             platform,
             apply,
         } => {
-            let result =
-                card::plan_copy(ctx, platform.as_deref(), &roms, progress).and_then(|plan| {
-                    ops::stage(apply.into(), plan, |p| card::apply_copy(ctx, p, progress))
-                });
+            let result = card::plan_copy(ctx, platform.as_deref(), &roms, progress)
+                .and_then(|plan| ops::stage(ctx, apply.into(), plan, progress));
             out.emit_outcome(result, text::card::copy_report)
         }
         CardCommand::Import(args) => {

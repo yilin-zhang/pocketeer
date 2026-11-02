@@ -16,7 +16,7 @@ use serde::Serialize;
 use super::{
     Mode,
     context::Context,
-    saves::{SyncReport, TrashReport, apply_sync, apply_trash, plan_trash},
+    saves::{SyncReport, TrashReport, plan_trash},
     stage,
 };
 
@@ -145,7 +145,7 @@ pub fn restore(
 ) -> Result<SyncReport> {
     let rels = library_files(ctx, rel)?;
     let plan = saves::plan_restore_paths(&ctx.library()?, &ctx.pocket()?, &rels)?;
-    stage(mode, plan, |p| apply_sync(ctx, p, progress))
+    stage(ctx, mode, plan, progress)
 }
 
 /// `memories trash`: from the card (archived first) or from the library.
@@ -157,5 +157,5 @@ pub fn trash(ctx: &Context, rel: &Path, card: bool, mode: Mode) -> Result<TrashR
         TrashTarget::Library
     };
     let plan = plan_trash(ctx, &rels, target)?;
-    stage(mode, plan, |p| apply_trash(ctx, p))
+    stage(ctx, mode, plan, &mut |_| {})
 }

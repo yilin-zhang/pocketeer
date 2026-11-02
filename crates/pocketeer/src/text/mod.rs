@@ -24,7 +24,7 @@ use pocketeer_core::{
 use crate::{
     cli::DocsReport,
     ops::{
-        Mode,
+        Apply, Batch, BatchState, Mode,
         context::{ConfigPathReport, ConfigShowReport},
     },
 };
@@ -419,6 +419,44 @@ pub fn config_show(r: &ConfigShowReport) -> String {
 
 pub fn docs_text(r: &DocsReport) -> String {
     r.markdown.clone()
+}
+
+/// Each item's plan (`plan`), then how applying it went (`done` sums up
+/// the changes).
+fn batch_report<P: Apply>(
+    r: &Batch<P>,
+    plan: impl Fn(&mut String, &P, Mode),
+    done: impl Fn(&P::Output) -> String,
+) -> String {
+    let mut out = String::new();
+    for (i, item) in r.items.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        match &item.state {
+            BatchState::Unplanned { error } => {
+                let _ = writeln!(
+                    out,
+                    "{}: error [{}] {}",
+                    item.target, error.code, error.message
+                );
+                if let Some(hint) = &error.hint {
+                    let _ = writeln!(out, "  hint: {hint}");
+                }
+            }
+            BatchState::Planned { plan: p } => plan(&mut out, p, r.mode),
+            BatchState::Applied { plan: p, result } => {
+                plan(&mut out, p, r.mode);
+                let _ = writeln!(out, "  ✓ done: {}", done(result));
+            }
+            BatchState::Failed { plan: p, error } => {
+                plan(&mut out, p, r.mode);
+                let _ = writeln!(out, "  ✗ failed [{}] {}", error.code, error.message);
+            }
+        }
+    }
+    mode_footer(&mut out, r.mode);
+    out
 }
 
 #[cfg(test)]
