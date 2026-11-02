@@ -12,17 +12,24 @@ use crate::{
     },
 };
 
-/// A minimal but complete `core.json` (spiritualized.GBA 1.3.0).
-pub(crate) const CORE_JSON: &str = r#"{"core":{"magic":"APF_VER_1","metadata":{"platform_ids":["gba"],"shortname":"GBA","author":"spiritualized","version":"1.3.0"},"cores":[{"name":"default","id":0,"filename":"gba.rev"}]}}"#;
+/// A minimal but complete `core.json` (spiritualized.GBA 1.3.0), shared
+/// with the CLI tests.
+pub(crate) const CORE_JSON: &str = include_str!("../../../tests/fixtures/core-gba-1.3.0.json");
 
 /// An empty but valid Pocket SD card in a temp dir.
 pub(crate) fn sd() -> (tempfile::TempDir, Pocket) {
     let tmp = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(tmp.path().join("Assets")).unwrap();
-    std::fs::create_dir_all(tmp.path().join("Cores")).unwrap();
-    std::fs::write(tmp.path().join("Analogue_Pocket.json"), "{}").unwrap();
-    let pocket = Pocket::open(tmp.path()).unwrap();
+    let pocket = card_at(tmp.path());
     (tmp, pocket)
+}
+
+/// An empty but valid Pocket SD card at `dir`.
+pub(crate) fn card_at(dir: &Path) -> Pocket {
+    for folder in [crate::card::ASSETS_DIR, crate::card::CORES_DIR] {
+        std::fs::create_dir_all(dir.join(folder)).unwrap();
+    }
+    std::fs::write(dir.join(crate::card::POCKET_JSON), "{}").unwrap();
+    Pocket::open(dir).unwrap()
 }
 
 /// Swaps the card under a plan: moves it to `aside` and puts a copy with the

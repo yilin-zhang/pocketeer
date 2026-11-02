@@ -11,3 +11,6 @@ Synthetic SD card layouts. Nothing here comes from a real card.
 - `spiritualized.GBA/data.json`: requires `gba_bios.bin` (md5 of the string `GBA BIOS`)
 - `agg23.Arduboy/data.json` + `Assets/arduboy/agg23.Arduboy/game1.json`: instance JSON wanting `games/game1.hex`; `_alternatives/` must be ignored
 - `Cores/.DS_Store`: junk for `clean`
+
+`core-gba-1.3.0.json`: the minimal spiritualized.GBA core.json that the
+core and CLI tests both build cards and core zips from.

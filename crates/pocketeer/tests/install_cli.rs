@@ -14,7 +14,7 @@ fn env() -> Harness {
     Harness::new().with_card().with_inventory()
 }
 
-const GBA_130: &str = r#"{"core":{"magic":"APF_VER_1","metadata":{"platform_ids":["gba"],"shortname":"GBA","author":"spiritualized","version":"1.3.0"},"cores":[{"name":"default","id":0,"filename":"gba.rev"}]}}"#;
+const GBA_130: &str = include_str!("../../../tests/fixtures/core-gba-1.3.0.json");
 
 fn gba_zip_files() -> Vec<(&'static str, &'static [u8])> {
     vec![

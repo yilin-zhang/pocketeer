@@ -356,13 +356,8 @@ impl Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::card_at;
     use std::fs;
-
-    fn make_pocket(dir: &Path) {
-        fs::create_dir_all(dir.join("Assets")).unwrap();
-        fs::create_dir_all(dir.join("Cores")).unwrap();
-        fs::write(dir.join("Analogue_Pocket.json"), "{}").unwrap();
-    }
 
     #[test]
     fn open_rejects_folder_missing_markers() {
@@ -388,7 +383,7 @@ mod tests {
     fn detect_finds_single_pocket() {
         let mounts = tempfile::tempdir().unwrap();
         fs::create_dir(mounts.path().join("USB_STICK")).unwrap();
-        make_pocket(&mounts.path().join("POCKET"));
+        card_at(&mounts.path().join("POCKET"));
         let pocket = Pocket::detect_in(mounts.path()).unwrap();
         assert_eq!(pocket.root(), mounts.path().join("POCKET"));
     }
@@ -406,8 +401,8 @@ mod tests {
     #[test]
     fn detect_refuses_to_guess_between_two() {
         let mounts = tempfile::tempdir().unwrap();
-        make_pocket(&mounts.path().join("A"));
-        make_pocket(&mounts.path().join("B"));
+        card_at(&mounts.path().join("A"));
+        card_at(&mounts.path().join("B"));
         let err = Pocket::detect_in(mounts.path()).unwrap_err();
         assert_eq!(err.code(), "MULTIPLE_SD_CARDS");
     }
