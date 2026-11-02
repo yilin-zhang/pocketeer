@@ -2,7 +2,7 @@
 //! panel) and the Memories tab.
 
 use super::*;
-use pocketeer_core::transfer::saves::SaveAction;
+use pocketeer_core::{card::memories::Header, transfer::saves::SaveAction};
 
 use crate::{
     ops::memories::{MemoryEntry, Place},
@@ -185,13 +185,13 @@ pub(super) fn draw_memories(frame: &mut Frame, app: &mut App, area: Rect) {
                 Place::Library => Palette::Muted,
             };
             let mut cells = vec![
-                match &h.platform {
+                match h.platform() {
                     Some(p) => platform_cell(p),
                     None => Cell::from("CART").style(Palette::Muted.style()),
                 },
                 Cell::from(m.game()),
                 Cell::from(m.place.label()).style(color.style()),
-                Cell::from(h.core.clone().unwrap_or_default()).style(Style::new().dim()),
+                Cell::from(h.core().unwrap_or_default().to_string()).style(Style::new().dim()),
                 Cell::from(text::time_ago(m.memory.mtime)).style(Style::new().dim()),
                 Cell::from(text::bytes(m.memory.size)).style(Style::new().dim()),
             ];
@@ -274,20 +274,26 @@ fn memory_details(app: &App, m: &MemoryEntry) -> Vec<Line<'static>> {
     {
         lines.push(kv_text("Library", found.name.clone()));
     }
-    if h.cartridge {
-        lines.push(kv_text("Made with", "a cartridge"));
-    } else {
-        if let Some(core) = &h.core {
-            lines.push(kv_text(
-                "Core",
-                match &h.core_version {
-                    Some(v) => format!("{core} {v}"),
-                    None => core.clone(),
-                },
-            ));
-        }
-        if let Some(author) = &h.author {
-            lines.push(kv_text("Author", author.clone()));
+    match h {
+        Header::Cartridge { .. } => lines.push(kv_text("Made with", "a cartridge")),
+        Header::Core {
+            core,
+            core_version,
+            author,
+            ..
+        } => {
+            if let Some(core) = core {
+                lines.push(kv_text(
+                    "Core",
+                    match core_version {
+                        Some(v) => format!("{core} {v}"),
+                        None => core.clone(),
+                    },
+                ));
+            }
+            if let Some(author) = author {
+                lines.push(kv_text("Author", author.clone()));
+            }
         }
     }
     lines.push(kv_text("Path", m.memory.rel_path.display().to_string()));
@@ -300,7 +306,7 @@ fn memory_details(app: &App, m: &MemoryEntry) -> Vec<Line<'static>> {
                 .into_owned(),
         ));
     }
-    if !h.cartridge {
+    if matches!(h, Header::Core { .. }) {
         lines.push(Line::from(""));
         lines.push(Line::from(
             Palette::Faint.span("Loads only in the core that made it."),

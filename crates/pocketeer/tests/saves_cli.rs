@@ -101,8 +101,8 @@ fn memories_list_back_up_and_trash_with_the_files_beside_them() {
     assert_eq!(code, 0, "{list}");
     let found = &list["data"]["memories"];
     assert_eq!(found.as_array().unwrap().len(), 1);
-    assert_eq!(found[0]["game"], "KIRB");
-    assert_eq!(found[0]["cartridge"], true);
+    assert_eq!(found[0]["made_with"], "cartridge");
+    assert_eq!(found[0]["title"], "KIRB");
     assert_eq!(found[0]["place"], "card");
 
     // Only Memories: the cartridge save stays out of it.

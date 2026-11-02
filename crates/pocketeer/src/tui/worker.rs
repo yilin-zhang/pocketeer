@@ -143,20 +143,16 @@ impl LibraryView {
     /// platform; the library may know the ROM by that name, or the card copy
     /// may carry it.
     pub fn game_of(&self, memory: &Header) -> Option<&Game> {
-        let platform = memory.platform.as_deref()?;
+        let (platform, rom) = (memory.platform()?, memory.game());
         self.games
             .iter()
             .find(|g| {
                 g.game.platform.eq_ignore_ascii_case(platform)
-                    && (g
-                        .game
-                        .roms
-                        .iter()
-                        .any(|r| r.name.eq_ignore_ascii_case(&memory.game))
+                    && (g.game.roms.iter().any(|r| r.name.eq_ignore_ascii_case(rom))
                         || g.matches
                             .iter()
                             .flat_map(|x| &x.copies)
-                            .any(|c| c.name.eq_ignore_ascii_case(&memory.game)))
+                            .any(|c| c.name.eq_ignore_ascii_case(rom)))
             })
             .map(|g| &g.game)
     }

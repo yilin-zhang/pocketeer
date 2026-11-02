@@ -26,20 +26,49 @@ pub struct Memory {
     pub header: Header,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
-pub struct Header {
-    /// `true` for a state made while playing a cartridge.
-    pub cartridge: bool,
-    /// The ROM file name (cores) or the cartridge title; empty if unknown.
-    pub game: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub platform: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub core: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub core_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub author: Option<String>,
+/// What a state says about where it came from.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "made_with", rename_all = "snake_case")]
+pub enum Header {
+    /// Made while playing a cartridge; the title it reports (empty if unknown).
+    Cartridge { title: String },
+    /// Made by a core running a ROM.
+    Core {
+        /// The ROM file name; empty if unknown.
+        game: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        platform: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        core: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        core_version: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+    },
+}
+
+impl Header {
+    /// The ROM file name, or the cartridge title; empty if unknown.
+    pub fn game(&self) -> &str {
+        match self {
+            Header::Cartridge { title } => title,
+            Header::Core { game, .. } => game,
+        }
+    }
+
+    pub fn platform(&self) -> Option<&str> {
+        match self {
+            Header::Cartridge { .. } => None,
+            Header::Core { platform, .. } => platform.as_deref(),
+        }
+    }
+
+    pub fn core(&self) -> Option<&str> {
+        match self {
+            Header::Cartridge { .. } => None,
+            Header::Core { core, .. } => core.as_deref(),
+        }
+    }
 }
 
 /// Where the core header starts, and the size of what we read.
@@ -54,15 +83,12 @@ fn read_header(bytes: &[u8], cartridge: bool) -> Header {
     let field =
         |range: std::ops::Range<usize>| bytes.get(range).map(decode_text).filter(|s| !s.is_empty());
     if cartridge {
-        return Header {
-            cartridge: true,
-            game: field(CARTRIDGE_TITLE).unwrap_or_default(),
-            ..Header::default()
+        return Header::Cartridge {
+            title: field(CARTRIDGE_TITLE).unwrap_or_default(),
         };
     }
     let at = |from: usize, to: usize| field(CORE_HEADER + from..CORE_HEADER + to);
-    Header {
-        cartridge: false,
+    Header::Core {
         author: at(0, 32),
         core: at(32, 64),
         core_version: at(64, 96),
@@ -193,22 +219,30 @@ pub(crate) mod tests {
     #[test]
     fn reads_core_and_cartridge_headers() {
         let h = read_header(&core_state("GB", "SUPER MARIOLAND.gb", "gb"), false);
-        assert_eq!(h.game, "SUPER MARIOLAND.gb");
-        assert_eq!(h.core.as_deref(), Some("GB"));
-        assert_eq!(h.core_version.as_deref(), Some("1.3.0"));
-        assert_eq!(h.author.as_deref(), Some("Spiritualized"));
-        // The platform name after the id never leaks in.
-        assert_eq!(h.platform.as_deref(), Some("gb"));
+        assert_eq!(
+            h,
+            Header::Core {
+                game: "SUPER MARIOLAND.gb".into(),
+                core: Some("GB".into()),
+                core_version: Some("1.3.0".into()),
+                author: Some("Spiritualized".into()),
+                // The platform name after the id never leaks in.
+                platform: Some("gb".into()),
+            }
+        );
 
         let mut cart = vec![0u8; 1024];
         cart[28..32].copy_from_slice(b"Pok\x82");
         let h = read_header(&cart, true);
-        assert!(h.cartridge);
-        assert_eq!(h.game, "Poké");
-        assert_eq!(h.core, None);
+        assert_eq!(
+            h,
+            Header::Cartridge {
+                title: "Poké".into()
+            }
+        );
 
         // A short or empty file gives an empty header, not an error.
-        assert_eq!(read_header(&[], false).game, "");
+        assert_eq!(read_header(&[], false).game(), "");
     }
 
     #[test]
@@ -226,13 +260,19 @@ pub(crate) mod tests {
         std::fs::write(dir.join(".DS_Store"), b"").unwrap();
         let found = scan(tmp.path()).unwrap();
         assert_eq!(found.len(), 2);
-        let core = found.iter().find(|m| !m.header.cartridge).unwrap();
+        let core = found
+            .iter()
+            .find(|m| matches!(m.header, Header::Core { .. }))
+            .unwrap();
         assert_eq!(
             core.rel_path,
             Path::new("Memories/Save States/Spiritualized.GB/mario_20251101.sta")
         );
-        assert_eq!(core.header.game, "Mario.gb");
-        let cart = found.iter().find(|m| m.header.cartridge).unwrap();
+        assert_eq!(core.header.game(), "Mario.gb");
+        let cart = found
+            .iter()
+            .find(|m| matches!(m.header, Header::Cartridge { .. }))
+            .unwrap();
         assert_eq!(
             cart.companions,
             [PathBuf::from("Memories/Save States/cart_1.sav")]

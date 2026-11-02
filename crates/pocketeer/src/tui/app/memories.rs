@@ -90,11 +90,7 @@ impl Memories {
                 let h = &m.memory.header;
                 matches(
                     q.as_deref(),
-                    &[
-                        &h.game,
-                        h.core.as_deref().unwrap_or(""),
-                        h.platform.as_deref().unwrap_or(""),
-                    ],
+                    &[h.game(), h.core().unwrap_or(""), h.platform().unwrap_or("")],
                 )
             })
             .map(|(i, _)| i)

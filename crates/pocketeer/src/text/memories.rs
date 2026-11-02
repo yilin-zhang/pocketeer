@@ -3,18 +3,21 @@
 use std::fmt::Write;
 
 use super::{Reader, Text, bytes, table, time_ago};
+use pocketeer_core::card::memories::Header;
+
 use crate::ops::memories::{MemoriesReport, MemoryEntry, Place};
 
 impl MemoryEntry {
     /// What the Memory is of: the ROM (with its core) or the cartridge.
     pub fn game(&self) -> String {
-        let h = &self.memory.header;
-        match (h.game.is_empty(), h.cartridge) {
+        match &self.memory.header {
+            Header::Cartridge { title } if title.is_empty() => "cartridge".into(),
+            Header::Cartridge { title } => title.clone(),
             // A core names the ROM file; the extension adds nothing here.
-            (false, false) => pocketeer_core::names::stem(&h.game).to_string(),
-            (false, true) => h.game.clone(),
-            (true, true) => "cartridge".into(),
-            (true, false) => self
+            Header::Core { game, .. } if !game.is_empty() => {
+                pocketeer_core::names::stem(game).to_string()
+            }
+            Header::Core { .. } => self
                 .memory
                 .rel_path
                 .file_name()
@@ -59,7 +62,7 @@ impl Text for MemoriesReport {
                 let h = &e.memory.header;
                 [
                     e.game(),
-                    h.core.clone().unwrap_or_else(|| "cartridge".into()),
+                    h.core().unwrap_or("cartridge").to_string(),
                     e.place.label().to_string(),
                     time_ago(e.memory.mtime),
                     bytes(e.memory.size),
