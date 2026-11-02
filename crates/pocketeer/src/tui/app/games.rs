@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use pocketeer_core::{
-    card::roms::CardRom,
+    card::roms::{self, CardRom},
     catalog,
     library::{Library, covers},
     names,
@@ -32,7 +32,7 @@ use crate::{
         library as library_ops,
     },
     tui::{
-        pending::{self, CardDelete, Import},
+        pending::{self, Import},
         worker::GameRow,
     },
 };
@@ -422,14 +422,12 @@ impl Games {
     /// deleted from the card.
     fn remove(&self, cx: &mut Cx) {
         if let Some(o) = self.selected_card_rom(cx.session).cloned() {
-            cx.dialog.confirm(
-                format!("Delete {} from the card?", o.name),
-                vec!["The library has no copy; i copies it there first.".into()],
-                Box::new(CardDelete {
-                    name: o.name,
-                    path: o.rel_path,
-                }),
-            );
+            cx.session.plan("Planning", move |ctx, _| {
+                Ok(pending::preview(roms::plan_delete(
+                    &ctx.pocket()?,
+                    &o.rel_path,
+                )?))
+            });
             return;
         }
         let Some(game) = self.selected_game(cx.session) else {

@@ -10,7 +10,7 @@ use pocketeer_core::{
         bios::{self, BiosReport, PlacePlan},
         clean::{self, CleanPlan, CleanResult},
         install, rename as card_rename,
-        roms::{CardRom, Index},
+        roms::{self, CardRom, Index},
     },
     catalog::inventory::{Inventory, Platforms},
     library::import::{ImportPlan, ImportResult},
@@ -26,7 +26,7 @@ use pocketeer_core::{
 use serde::Serialize;
 
 use super::{
-    Apply, Mode, Staged, apply_actions,
+    Apply, Mode, Staged,
     context::Context,
     library::{ImportSettings, Imported, ImportsRoms, suggest_standard_names},
     load_dat, stage,
@@ -84,7 +84,7 @@ pub type PlaceReport = Staged<PlacePlan>;
 impl Apply for PlacePlan {
     type Output = install::Changes;
     fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<install::Changes> {
-        apply_actions(&ctx.pocket()?, "bios-place", &self.actions, progress)
+        bios::apply_place(&ctx.pocket()?, self, progress)
     }
 }
 
@@ -96,7 +96,7 @@ pub fn bios_place(
     let pocket = ctx.pocket()?;
     let installed = pocketeer_core::card::cores::list_installed(&pocket)?;
     let report = bios::check(&pocket, &installed, None)?;
-    stage(ctx, mode, bios::plan_place(&report), progress)
+    stage(ctx, mode, bios::plan_place(&pocket, &report)?, progress)
 }
 
 pub type CleanReport = Staged<CleanPlan>;
@@ -184,6 +184,13 @@ pub fn plan_copy(
     progress: &mut dyn FnMut(Event),
 ) -> Result<to_card::CopyPlan> {
     to_card::plan(&ctx.library()?, &ctx.pocket()?, platform, roms, progress)
+}
+
+impl Apply for roms::DeletePlan {
+    type Output = install::Changes;
+    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<install::Changes> {
+        roms::apply_delete(&ctx.pocket()?, self, progress)
+    }
 }
 
 impl Apply for to_card::CopyPlan {

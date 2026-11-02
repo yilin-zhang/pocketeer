@@ -395,6 +395,8 @@ pub struct PlacePlan {
     pub summary: install::plan::Summary,
     /// Zipped root files we won't unpack automatically.
     pub zipped: Vec<RequiredFile>,
+    #[serde(skip)]
+    identity: crate::card::CardIdentity,
 }
 
 impl Plan for PlacePlan {
@@ -403,7 +405,8 @@ impl Plan for PlacePlan {
     }
 }
 
-pub fn plan_place(report: &BiosReport) -> PlacePlan {
+/// Plans moving the root files `report` (of `pocket`) found into place.
+pub fn plan_place(pocket: &Pocket, report: &BiosReport) -> Result<PlacePlan> {
     let mut actions = Vec::new();
     let mut zipped = Vec::new();
     let mut seen_sources: Vec<PathBuf> = Vec::new();
@@ -426,11 +429,28 @@ pub fn plan_place(report: &BiosReport) -> PlacePlan {
             _ => {}
         }
     }
-    PlacePlan {
+    Ok(PlacePlan {
         summary: install::plan::summarize(&actions),
         actions,
         zipped,
-    }
+        identity: crate::card::CardIdentity::read(pocket)?,
+    })
+}
+
+/// Moves the planned files, on the card the plan was made for.
+pub fn apply_place(
+    pocket: &Pocket,
+    plan: &PlacePlan,
+    progress: crate::plan::Progress<'_>,
+) -> Result<install::Changes> {
+    plan.identity.check(pocket)?;
+    install::apply::apply(
+        pocket,
+        "bios-place",
+        &plan.actions,
+        &mut |_, _| unreachable!("place plans have no installs"),
+        progress,
+    )
 }
 
 #[cfg(test)]
@@ -475,6 +495,19 @@ mod tests {
             write(tmp.path(), rel, body);
         }
         (tmp, pocket)
+    }
+
+    #[test]
+    fn placing_on_a_swapped_card_is_refused() {
+        let (tmp, pocket) = bios_card();
+        fs::write(tmp.path().join("game1.hex"), "hex").unwrap();
+        let plan = plan_place(&pocket, &report(&pocket)).unwrap();
+        assert_eq!(plan.actions.len(), 1);
+        let aside = tempfile::tempdir().unwrap();
+        crate::testutil::swap_card(&pocket, aside.path());
+        let err = apply_place(&pocket, &plan, &mut |_| {}).unwrap_err();
+        assert_eq!(err.code(), "STALE_PLAN");
+        assert!(pocket.root().join("game1.hex").exists());
     }
 
     fn report(pocket: &Pocket) -> BiosReport {
@@ -544,7 +577,7 @@ mod tests {
             FileStatus::Present
         );
 
-        let plan = plan_place(&r);
+        let plan = plan_place(&pocket, &r).unwrap();
         assert_eq!(plan.actions.len(), 1);
         assert!(matches!(
             &plan.actions[0],
@@ -566,7 +599,7 @@ mod tests {
                 inner: "bios/gba_bios.bin".into()
             }
         );
-        let plan = plan_place(&r);
+        let plan = plan_place(&pocket, &r).unwrap();
         assert!(plan.actions.is_empty());
         assert_eq!(plan.zipped.len(), 1);
     }

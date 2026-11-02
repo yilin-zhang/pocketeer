@@ -349,28 +349,12 @@ fn place(cx: &mut Cx) {
     if cx.session.require_card().is_none() {
         return;
     }
-    let Some(snap) = cx.session.card() else {
+    let Some(report) = cx.session.card().map(|s| s.bios.clone()) else {
         return;
     };
-    let plan = bios::plan_place(&snap.bios);
-    if !plan.actions.is_empty() {
-        cx.planned(plan);
-    } else if plan.zipped.is_empty() {
-        cx.session
-            .notice("No file at the SD card root matches a missing file.");
-    } else {
-        let lines = plan
-            .zipped
-            .iter()
-            .map(|z| {
-                format!(
-                    "{} is inside a zip at the root; unzip it first.",
-                    z.path.display()
-                )
-            })
-            .collect();
-        cx.dialog.info("Nothing to place yet", lines);
-    }
+    cx.session.plan("Planning", move |ctx, _| {
+        Ok(pending::preview(bios::plan_place(&ctx.pocket()?, &report)?))
+    });
 }
 
 // ---------------------------------------------------------------------------

@@ -43,7 +43,7 @@ pub struct JunkEntry {
     pub is_dir: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CleanPlan {
     pub entries: Vec<JunkEntry>,
     pub bytes: u64,
@@ -54,6 +54,8 @@ pub struct CleanPlan {
     /// under them is unknown. Relative to the SD root.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<PathBuf>,
+    #[serde(skip)]
+    identity: crate::card::CardIdentity,
 }
 
 impl Plan for CleanPlan {
@@ -65,8 +67,12 @@ impl Plan for CleanPlan {
 pub fn plan(pocket: &Pocket, include_system: bool) -> Result<CleanPlan> {
     let root = pocket.root();
     let mut plan = CleanPlan {
+        entries: Vec::new(),
+        bytes: 0,
         include_system,
-        ..Default::default()
+        system_dirs_present: Vec::new(),
+        skipped: Vec::new(),
+        identity: crate::card::CardIdentity::read(pocket)?,
     };
 
     let old_backups = pocket.pocketeer_dir().join("backup");
@@ -159,6 +165,7 @@ impl Applied for CleanResult {
 /// Deletes everything in the plan. Junk isn't backed up. Per-entry failures
 /// are reported in the result, not returned.
 pub fn apply(pocket: &Pocket, plan: &CleanPlan) -> Result<CleanResult> {
+    plan.identity.check(pocket)?;
     let mut result = CleanResult::default();
     for entry in &plan.entries {
         let full = pocket.root().join(&entry.path);
@@ -186,6 +193,16 @@ pub fn apply(pocket: &Pocket, plan: &CleanPlan) -> Result<CleanResult> {
 mod tests {
     use super::*;
     use crate::testutil::write;
+
+    #[test]
+    fn a_swapped_card_is_refused() {
+        let (_tmp, pocket) = junk_card();
+        let plan = plan(&pocket, false).unwrap();
+        let aside = tempfile::tempdir().unwrap();
+        crate::testutil::swap_card(&pocket, aside.path());
+        assert_eq!(apply(&pocket, &plan).unwrap_err().code(), "STALE_PLAN");
+        assert!(pocket.root().join("Cores/.DS_Store").exists());
+    }
 
     /// A card littered with the junk macOS leaves behind.
     fn junk_card() -> (tempfile::TempDir, Pocket) {

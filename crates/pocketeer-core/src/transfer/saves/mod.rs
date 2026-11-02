@@ -941,13 +941,7 @@ mod tests {
         let mut lib = Library::init(&elsewhere.path().join("library")).unwrap();
         write(pocket.root(), REL, "one", 100);
         let plan = plan_backup(&lib, &pocket);
-        // Another card with the same contents mounted at the same place.
-        let root = pocket.root().to_path_buf();
-        std::fs::rename(&root, elsewhere.path().join("old card")).unwrap();
-        std::fs::create_dir_all(root.join("Assets")).unwrap();
-        std::fs::create_dir_all(root.join("Cores")).unwrap();
-        std::fs::write(root.join("Analogue_Pocket.json"), "{}").unwrap();
-        write(&root, REL, "one", 100);
+        crate::testutil::swap_card(&pocket, elsewhere.path());
         let result = apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
         assert_eq!(result.failed.len(), 1);
         assert_eq!(result.failed[0].error.code, "STALE_PLAN");

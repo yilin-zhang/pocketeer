@@ -25,6 +25,27 @@ pub(crate) fn sd() -> (tempfile::TempDir, Pocket) {
     (tmp, pocket)
 }
 
+/// Swaps the card under a plan: moves it to `aside` and puts a copy with the
+/// same files at the same mount point, which a plan made before must treat
+/// as another card.
+pub(crate) fn swap_card(pocket: &Pocket, aside: &Path) {
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+    let old = aside.join("old card");
+    std::fs::rename(pocket.root(), &old).unwrap();
+    copy_tree(&old, pocket.root());
+}
+
 /// Writes `root/rel`, creating parent folders.
 pub(crate) fn write(root: &Path, rel: &str, body: impl AsRef<[u8]>) {
     let p = root.join(rel);

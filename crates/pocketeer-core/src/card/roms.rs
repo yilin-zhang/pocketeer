@@ -483,10 +483,67 @@ fn sample(file: &mut File, size: u64, cancelled: &dyn Fn() -> bool) -> io::Resul
     Ok(digest.finalize().into())
 }
 
+// ---------------------------------------------------------------------------
+// Delete
+
+/// Deleting one ROM file from the card (one the library has no copy of).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct DeletePlan {
+    /// Relative to the card root.
+    pub path: PathBuf,
+    #[serde(skip)]
+    identity: CardIdentity,
+}
+
+impl crate::plan::Plan for DeletePlan {
+    fn changes(&self) -> usize {
+        1
+    }
+}
+
+pub fn plan_delete(pocket: &Pocket, path: &Path) -> Result<DeletePlan> {
+    Ok(DeletePlan {
+        path: path.to_path_buf(),
+        identity: CardIdentity::read(pocket)?,
+    })
+}
+
+/// Deletes the file, on the card the plan was made for.
+pub fn apply_delete(
+    pocket: &Pocket,
+    plan: &DeletePlan,
+    progress: crate::plan::Progress<'_>,
+) -> Result<crate::card::install::Changes> {
+    plan.identity.check(pocket)?;
+    let actions = [crate::card::install::Action::Remove {
+        path: plan.path.clone(),
+        reason: crate::card::install::plan::RemoveReason::Uninstall,
+    }];
+    crate::card::install::apply::apply(
+        pocket,
+        "delete-rom",
+        &actions,
+        &mut |_, _| unreachable!("a delete installs nothing"),
+        progress,
+    )
+}
+
 #[cfg(test)]
 mod index_tests {
     use super::*;
     use crate::testutil::{sd, write};
+
+    #[test]
+    fn deleting_from_a_swapped_card_is_refused() {
+        let (_tmp, pocket) = sd();
+        write(pocket.root(), "Assets/gba/common/a.gba", "rom");
+        let plan = plan_delete(&pocket, Path::new("Assets/gba/common/a.gba")).unwrap();
+        let aside = tempfile::tempdir().unwrap();
+        crate::testutil::swap_card(&pocket, aside.path());
+        let err = apply_delete(&pocket, &plan, &mut |_| {}).unwrap_err();
+        assert_eq!(err.code(), "STALE_PLAN");
+        assert!(pocket.root().join("Assets/gba/common/a.gba").exists());
+    }
 
     #[test]
     fn nested_duplicates_cache_roundtrip_and_external_rename() {

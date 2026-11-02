@@ -20,10 +20,14 @@ pub use apply::Changes;
 pub use plan::{Action, InstallPlan, PlanOptions};
 pub use zipfile::{CoreZip, ZipSource};
 
+use crate::card::CardIdentity;
+
 /// A plan plus the zip it was made from, ready to apply.
 pub struct Prepared {
     pub plan: InstallPlan,
     zip: CoreZip,
+    /// The card it was planned for.
+    identity: CardIdentity,
 }
 
 /// A prepared install reads (and reports) as its plan.
@@ -41,6 +45,7 @@ impl crate::plan::Plan for Prepared {
 
 impl Prepared {
     pub fn apply(&mut self, pocket: &Pocket, progress: Progress<'_>) -> Result<Changes> {
+        self.identity.check(pocket)?;
         let label = self.plan.core_id.clone();
         let zip = &mut self.zip;
         apply::apply(
@@ -115,7 +120,12 @@ impl Installer<'_> {
             ..opts
         };
         let plan = plan::plan_install(self.pocket, &mut zip, installed, &opts)?;
-        Ok(Prepared { plan, zip })
+        let identity = CardIdentity::read(self.pocket)?;
+        Ok(Prepared {
+            plan,
+            zip,
+            identity,
+        })
     }
 
     /// Plans an install from a zip on disk.
@@ -129,7 +139,12 @@ impl Installer<'_> {
         progress(Event::Status(format!("Reading {}", path.display())));
         let mut zip = CoreZip::from_file(path)?;
         let plan = plan::plan_install(self.pocket, &mut zip, installed, &opts)?;
-        Ok(Prepared { plan, zip })
+        let identity = CardIdentity::read(self.pocket)?;
+        Ok(Prepared {
+            plan,
+            zip,
+            identity,
+        })
     }
 }
 
@@ -141,6 +156,8 @@ pub struct UninstallPlan {
     pub purge: bool,
     pub actions: Vec<Action>,
     pub summary: plan::Summary,
+    #[serde(skip)]
+    identity: CardIdentity,
 }
 
 impl Plan for UninstallPlan {
@@ -181,6 +198,7 @@ pub fn plan_remove(
         purge,
         summary: plan::summarize(&actions),
         actions,
+        identity: CardIdentity::read(pocket)?,
     })
 }
 
@@ -189,6 +207,7 @@ pub fn apply_remove(
     plan: &UninstallPlan,
     progress: Progress<'_>,
 ) -> Result<Changes> {
+    plan.identity.check(pocket)?;
     apply::apply(
         pocket,
         &format!("remove-{}", plan.core_id),
@@ -196,4 +215,27 @@ pub fn apply_remove(
         &mut |_, _| unreachable!("remove plans have no installs"),
         progress,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::{CORE_JSON, sd, swap_card, write};
+
+    #[test]
+    fn removing_from_a_swapped_card_is_refused() {
+        let (_tmp, pocket) = sd();
+        write(
+            pocket.root(),
+            "Cores/spiritualized.GBA/core.json",
+            CORE_JSON,
+        );
+        let installed = crate::card::cores::list_installed(&pocket).unwrap();
+        let plan = plan_remove(&pocket, &installed, "spiritualized.GBA", false).unwrap();
+        let aside = tempfile::tempdir().unwrap();
+        swap_card(&pocket, aside.path());
+        let err = apply_remove(&pocket, &plan, &mut |_| {}).unwrap_err();
+        assert_eq!(err.code(), "STALE_PLAN");
+        assert!(pocket.root().join("Cores/spiritualized.GBA").is_dir());
+    }
 }

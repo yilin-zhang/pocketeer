@@ -11,14 +11,15 @@ use pocketeer_core::{
     card::{
         bios::PlacePlan,
         clean::CleanPlan,
-        install::{Action, Prepared, UninstallPlan, plan::RemoveReason},
+        install::{Prepared, UninstallPlan},
         rename::CardRenamePlan,
+        roms::DeletePlan,
     },
     library::{
         covers::import::ImportPlan as CoverImportPlan, import::ImportPlan,
         remove::RemovePlan as LibraryRemovePlan, rename::RenamePlan,
     },
-    plan::{Event, Plan, Progress},
+    plan::{Plan, Progress},
     transfer::{
         from_card::CardImportPlan,
         saves::{SaveAction, SavesPlan, TrashPlan, TrashTarget},
@@ -29,7 +30,7 @@ use pocketeer_core::{
 use super::worker::{Msg, applied, failed};
 use crate::{
     ops::{
-        Apply, Batch, Mode, Staged, apply_actions,
+        Apply, Batch, Mode, Staged,
         context::Context,
         library::{Imported, ImportsRoms},
     },
@@ -186,12 +187,6 @@ impl Ask for CardRenamePlan {
     }
 }
 
-impl Ask for PlacePlan {
-    fn question(&self) -> std::result::Result<String, Nothing> {
-        Ok(format!("Move {} file(s) into place?", self.actions.len()))
-    }
-}
-
 impl Ask for CleanPlan {
     fn question(&self) -> std::result::Result<String, Nothing> {
         if self.entries.is_empty() {
@@ -241,6 +236,36 @@ impl Pending for LibraryRemovePlan {
         };
         lines.push("It goes to .trash/ in the library. Copies on the card stay.".into());
         confirm(title, lines, *self)
+    }
+
+    fn apply(self: Box<Self>, ctx: &Context, progress: Progress<'_>) -> Msg {
+        apply_plan(*self, ctx, progress)
+    }
+}
+
+impl Pending for PlacePlan {
+    /// Zipped root files are named; pocketeer doesn't unpack them.
+    fn preview(self: Box<Self>) -> Preview {
+        if !self.actions.is_empty() {
+            return confirm_plan(
+                format!("Move {} file(s) into place?", self.actions.len()),
+                *self,
+            );
+        }
+        if self.zipped.is_empty() {
+            return Preview::Notice("No file at the SD card root matches a missing file.".into());
+        }
+        let lines = self
+            .zipped
+            .iter()
+            .map(|z| {
+                format!(
+                    "{} is inside a zip at the root; unzip it first.",
+                    z.path.display()
+                )
+            })
+            .collect();
+        info("Nothing to place yet", lines)
     }
 
     fn apply(self: Box<Self>, ctx: &Context, progress: Progress<'_>) -> Msg {
@@ -454,30 +479,24 @@ where
 }
 
 /// A ROM only the card has, deleted from it.
-pub struct CardDelete {
-    pub name: String,
-    pub path: PathBuf,
-}
-
-impl Pending for CardDelete {
+impl Pending for DeletePlan {
     fn preview(self: Box<Self>) -> Preview {
-        let lines = vec![format!("  - {}", self.path.display())];
-        confirm(format!("Delete {} from the card?", self.name), lines, *self)
+        let name = self.path.file_name().unwrap_or_default().to_string_lossy();
+        let title = format!("Delete {name} from the card?");
+        let lines = vec![
+            format!("  - {}", self.path.display()),
+            "The library has no copy; i copies it there first.".into(),
+        ];
+        confirm(title, lines, *self)
     }
 
-    fn apply(self: Box<Self>, ctx: &Context, progress: Progress<'_>) -> Msg {
-        let label = format!("delete {}", self.name);
-        let actions = [Action::Remove {
-            path: self.path,
-            reason: RemoveReason::Uninstall,
-        }];
-        progress(Event::Status(label.clone()));
-        match ctx
-            .pocket()
-            .and_then(|p| apply_actions(&p, &label, &actions, progress))
-        {
-            Ok(_) => applied(format!("✓ deleted {} from the card", self.name), 0),
-            Err(e) => applied(format!("✗ {label}: {e}"), 1),
+    fn apply(mut self: Box<Self>, ctx: &Context, progress: Progress<'_>) -> Msg {
+        match Apply::apply(&mut *self, ctx, progress) {
+            Ok(_) => applied(
+                format!("✓ deleted {} from the card", self.path.display()),
+                0,
+            ),
+            Err(e) => failed(e),
         }
     }
 }

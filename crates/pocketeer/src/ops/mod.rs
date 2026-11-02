@@ -17,12 +17,7 @@ pub mod saves;
 use std::path::Path;
 
 pub use pocketeer_core::plan::{Applied, Plan};
-use pocketeer_core::{
-    Error, ErrorInfo, Pocket, Result,
-    card::install::{self, Action},
-    catalog::Dat,
-    plan::{Event, Progress},
-};
+use pocketeer_core::{Error, ErrorInfo, Result, catalog::Dat, plan::Progress};
 use serde::Serialize;
 
 use crate::output::Outcome;
@@ -279,33 +274,11 @@ pub fn load_dat(path: Option<&Path>) -> Result<Option<Dat>> {
     path.map(Dat::read).transpose()
 }
 
-// ---------------------------------------------------------------------------
-// Plain file actions (moves, deletes) that aren't a core install.
-
-/// Runs file actions that aren't a core install (moves, deletes); `label`
-/// names the staging folder on the card.
-pub fn apply_actions(
-    pocket: &Pocket,
-    label: &str,
-    actions: &[Action],
-    progress: &mut dyn FnMut(Event),
-) -> Result<install::Changes> {
-    progress(Event::Status(format!(
-        "Applying {} file action(s)",
-        actions.len()
-    )));
-    install::apply::apply(
-        pocket,
-        label,
-        actions,
-        &mut |_, _| unreachable!("file actions never install a core"),
-        progress,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pocketeer_core::card::install::Changes;
+
     use crate::cli::Global;
 
     /// Applying fails when `fails` is set.
@@ -321,11 +294,11 @@ mod tests {
     }
 
     impl Apply for Fake {
-        type Output = install::Changes;
-        fn apply(&mut self, _: &Context, _: Progress<'_>) -> Result<install::Changes> {
+        type Output = Changes;
+        fn apply(&mut self, _: &Context, _: Progress<'_>) -> Result<Changes> {
             match self.fails {
                 true => Err(Error::NoHomeDir),
-                false => Ok(install::Changes::default()),
+                false => Ok(Changes::default()),
             }
         }
     }
