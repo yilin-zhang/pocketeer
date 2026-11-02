@@ -25,47 +25,18 @@ use crate::{
 // ---------------------------------------------------------------------------
 // Scan
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct RomEntry {
-    /// Path relative to the owner folder, including any nested directories.
-    pub name: String,
-    pub size: u64,
-}
-
-/// One folder under a platform: `common` or a core's own folder.
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct RomDir {
-    /// `common` or `<author>.<core>`.
-    pub owner: String,
-    /// Relative to the SD root.
-    pub path: PathBuf,
-    /// Files recursively, sorted by relative path (case-insensitive). Hidden files skipped.
-    pub files: Vec<RomEntry>,
-    pub bytes: u64,
-    /// Number of visible descendant directories.
-    pub subdirs: usize,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct PlatformRoms {
-    pub platform: String,
-    pub dirs: Vec<RomDir>,
-    pub files: usize,
-    pub bytes: u64,
-}
-
-/// Lists one directory as a [`RomDir`]; `None` if it doesn't exist.
-fn scan_dir(pocket: &Pocket, rel: &Path, owner: &str, recursive: bool) -> Result<Option<RomDir>> {
+/// The visible files under one folder, relative to the SD root, sorted by
+/// path (case-insensitive); empty if the folder doesn't exist.
+fn files_in(pocket: &Pocket, rel: &Path, recursive: bool) -> Result<Vec<PathBuf>> {
     let full = pocket.root().join(rel);
-    match std::fs::symlink_metadata(&full) {
-        Ok(meta) if meta.is_symlink() => return Ok(None),
+    match fs::symlink_metadata(&full) {
+        Ok(meta) if meta.is_symlink() => return Ok(Vec::new()),
         Ok(meta) if !meta.is_dir() => return Err(Error::NotADirectory { path: full }),
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(Error::io(&full, e)),
     }
     let mut files = Vec::new();
-    let mut subdirs = 0;
     for entry in walkdir::WalkDir::new(&full)
         .min_depth(1)
         .max_depth(if recursive { usize::MAX } else { 1 })
@@ -73,116 +44,79 @@ fn scan_dir(pocket: &Pocket, rel: &Path, owner: &str, recursive: bool) -> Result
         .into_iter()
         .filter_entry(|e| !fsutil::is_hidden(e.file_name()))
     {
-        let entry = entry.map_err(|e| {
-            Error::io(
-                e.path().unwrap_or(&full),
-                std::io::Error::other(e.to_string()),
-            )
-        })?;
-        if entry.file_type().is_dir() {
-            subdirs += 1;
-        } else if entry.file_type().is_file() {
-            let meta = entry
-                .metadata()
-                .map_err(|e| Error::io(entry.path(), std::io::Error::other(e.to_string())))?;
-            files.push(RomEntry {
-                name: entry
-                    .path()
-                    .strip_prefix(&full)
-                    .expect("descendant")
-                    .to_string_lossy()
-                    .into_owned(),
-                size: meta.len(),
-            });
+        let entry = entry
+            .map_err(|e| Error::io(e.path().unwrap_or(&full), io::Error::other(e.to_string())))?;
+        if entry.file_type().is_file() {
+            files.push(rel.join(entry.path().strip_prefix(&full).expect("descendant")));
         }
     }
-    files.sort_by_key(|f| f.name.to_lowercase());
-    Ok(Some(RomDir {
-        owner: owner.to_string(),
-        path: rel.to_path_buf(),
-        bytes: files.iter().map(|f| f.size).sum(),
-        files,
-        subdirs,
-    }))
+    files.sort_by_key(|f| f.to_string_lossy().to_lowercase());
+    Ok(files)
 }
 
-/// The `common` and per-core folders of one platform (empty if none exist).
-fn platform_dirs(pocket: &Pocket, platform: &str) -> Result<Vec<RomDir>> {
-    let base = pocket.assets_dir().join(platform);
-    let entries = match std::fs::read_dir(&base) {
+/// The visible subfolder names of `dir`, sorted case-insensitively; empty if
+/// `dir` doesn't exist.
+fn subfolders(dir: &Path) -> Result<Vec<String>> {
+    let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(Error::io(&base, e)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(Error::io(dir, e)),
     };
-    let mut owners = Vec::new();
+    let mut names = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|e| Error::io(&base, e))?;
+        let entry = entry.map_err(|e| Error::io(dir, e))?;
         if entry
             .file_type()
             .map_err(|e| Error::io(entry.path(), e))?
             .is_dir()
             && !fsutil::is_hidden(&entry.file_name())
         {
-            owners.push(entry.file_name().to_string_lossy().into_owned());
+            names.push(entry.file_name().to_string_lossy().into_owned());
         }
     }
-    // `common` first, then cores alphabetically.
-    owners.sort_by_key(|o| (o != "common", o.to_lowercase()));
-    let mut dirs = Vec::new();
-    for owner in owners {
-        if let Some(dir) = scan_dir(
-            pocket,
-            &crate::card::assets_rel(platform, &owner),
-            &owner,
-            true,
-        )? {
-            dirs.push(dir);
-        }
-    }
-    Ok(dirs)
+    names.sort_by_key(|n| n.to_lowercase());
+    Ok(names)
 }
 
-/// Every platform folder under `Assets/`, with its `common` and per-core
-/// folders. Platforms whose folders hold no files at all are still listed
-/// (they exist because a core was installed), so the user sees the gap.
-pub fn scan(pocket: &Pocket) -> Result<Vec<PlatformRoms>> {
+/// Every ROM file on the card as (platform, owner, path from the SD root):
+/// `Assets/<platform>/<common|core id>/**` and the `.pocket` files in
+/// `GB Studio/`. Platforms in order, `common` before the cores' own folders.
+fn walk(pocket: &Pocket) -> Result<Vec<(String, String, PathBuf)>> {
     let assets = pocket.assets_dir();
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(&assets).map_err(|e| Error::io(&assets, e))? {
-        let entry = entry.map_err(|e| Error::io(&assets, e))?;
-        if fsutil::is_hidden(&entry.file_name())
-            || !entry
-                .file_type()
-                .map_err(|e| Error::io(entry.path(), e))?
-                .is_dir()
-        {
-            continue;
+    // A card without `Assets/` is not a card; every other folder may be missing.
+    fs::metadata(&assets).map_err(|e| Error::io(&assets, e))?;
+    let mut platforms: Vec<(String, Vec<(String, PathBuf)>)> = Vec::new();
+    for platform in subfolders(&assets)? {
+        let mut owners = subfolders(&assets.join(&platform))?;
+        owners.sort_by_key(|o| o != "common");
+        let mut files = Vec::new();
+        for owner in owners {
+            for path in files_in(pocket, &super::assets_rel(&platform, &owner), true)? {
+                files.push((owner.clone(), path));
+            }
         }
-        let platform = entry.file_name().to_string_lossy().into_owned();
-        let dirs = platform_dirs(pocket, &platform)?;
-        out.push(PlatformRoms {
-            files: dirs.iter().map(|d| d.files.len()).sum(),
-            bytes: dirs.iter().map(|d| d.bytes).sum(),
-            platform,
-            dirs,
-        });
+        platforms.push((platform, files));
     }
-    if let Some(mut dir) = scan_dir(pocket, Path::new(super::GB_STUDIO_DIR), "", false)? {
-        dir.files.retain(|f| {
-            Path::new(&f.name)
-                .extension()
+    let gb_studio: Vec<_> = files_in(pocket, Path::new(super::GB_STUDIO_DIR), false)?
+        .into_iter()
+        .filter(|f| {
+            f.extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("pocket"))
-        });
-        dir.bytes = dir.files.iter().map(|f| f.size).sum();
-        out.push(PlatformRoms {
-            platform: super::GB_STUDIO_PLATFORM.into(),
-            files: dir.files.len(),
-            bytes: dir.bytes,
-            dirs: vec![dir],
-        });
+        })
+        .map(|f| (String::new(), f))
+        .collect();
+    if !gb_studio.is_empty() {
+        platforms.push((super::GB_STUDIO_PLATFORM.into(), gb_studio));
     }
-    out.sort_by_key(|p| p.platform.to_lowercase());
-    Ok(out)
+    platforms.sort_by_key(|(p, _)| p.to_lowercase());
+    Ok(platforms
+        .into_iter()
+        .flat_map(|(platform, files)| {
+            files
+                .into_iter()
+                .map(move |(owner, path)| (platform.clone(), owner, path))
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -279,38 +213,30 @@ impl Index {
             Err(e) => (BTreeMap::new(), Some(format!("Cannot read ROM cache: {e}"))),
         };
         let mut roms = Vec::new();
-        for platform in scan(pocket)? {
-            for dir in platform.dirs {
-                for file in dir.files {
-                    let path = dir.path.join(file.name);
-                    if declared.contains(&path)
-                        || fsutil::is_sidecar(&path)
-                        || fsutil::is_junk(&path)
-                    {
-                        continue;
-                    }
-                    let stamp = Stamp::of(&pocket.root().join(&path))?;
-                    let cached = entries.get(&path).filter(|c| c.stamp == stamp);
-                    roms.push(CardRom {
-                        platform: platform.platform.clone(),
-                        owner: dir.owner.clone(),
-                        name: path
-                            .file_name()
-                            .expect("file")
-                            .to_string_lossy()
-                            .into_owned(),
-                        size: stamp.size,
-                        identity: match cached {
-                            Some(c) => Identity::Cached {
-                                sha1: hash::hex(&c.sha1),
-                            },
-                            None => Identity::Pending,
-                        },
-                        rel_path: path,
-                        stamp,
-                    });
-                }
+        for (platform, owner, path) in walk(pocket)? {
+            if declared.contains(&path) || fsutil::is_sidecar(&path) || fsutil::is_junk(&path) {
+                continue;
             }
+            let stamp = Stamp::of(&pocket.root().join(&path))?;
+            let cached = entries.get(&path).filter(|c| c.stamp == stamp);
+            roms.push(CardRom {
+                platform,
+                owner,
+                name: path
+                    .file_name()
+                    .expect("file")
+                    .to_string_lossy()
+                    .into_owned(),
+                size: stamp.size,
+                identity: match cached {
+                    Some(c) => Identity::Cached {
+                        sha1: hash::hex(&c.sha1),
+                    },
+                    None => Identity::Pending,
+                },
+                rel_path: path,
+                stamp,
+            });
         }
         // Only prune after a complete, successful directory scan.
         let before = entries.len();
@@ -680,34 +606,41 @@ mod index_tests {
 mod scan_tests {
     use super::*;
     use crate::testutil::{sd, write};
-    use std::fs;
 
     #[test]
-    fn scans_platforms_common_first() {
+    fn lists_every_rom_on_the_card_common_folder_first() {
         let (tmp, pocket) = sd();
-        let w = |rel: &str, body: &str| write(tmp.path(), rel, body);
-        w("Assets/gba/common/b.gba", "22");
-        w("Assets/gba/common/A.gba", "1");
-        w("Assets/gba/common/.DS_Store", "x");
-        w("Assets/gba/z.Core/game.json", "{}");
-        w("Assets/gba/z.Core/sub/inner.bin", "xxx");
-        w("Assets/arduboy/common/.gitkeep", "");
-        fs::create_dir_all(tmp.path().join("Assets/.hidden/common")).unwrap();
+        let w = |rel: &str| write(tmp.path(), rel, "x");
+        w("Assets/gba/z.Core/sub/inner.gba");
+        w("Assets/gba/common/b.gba");
+        w("Assets/gba/common/A.gba");
+        w("Assets/gba/common/.DS_Store");
+        w("Assets/.hidden/common/c.gba");
+        w("Assets/arduboy/common/game.hex");
+        w("GB Studio/demo.pocket");
+        w("GB Studio/readme.txt");
 
-        let plats = scan(&pocket).unwrap();
-        assert_eq!(plats.len(), 2);
-        assert_eq!(plats[0].platform, "arduboy");
-        assert_eq!(plats[0].files, 0);
-        let gba = &plats[1];
-        assert_eq!(gba.platform, "gba");
-        assert_eq!(gba.files, 4);
-        assert_eq!(gba.bytes, 8);
-        assert_eq!(gba.dirs[0].owner, "common");
-        let names: Vec<&str> = gba.dirs[0].files.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, ["A.gba", "b.gba"]);
-        assert_eq!(gba.dirs[1].owner, "z.Core");
-        assert_eq!(gba.dirs[1].subdirs, 1);
-        assert_eq!(gba.dirs[1].files[1].name, "sub/inner.bin");
-        assert_eq!(gba.dirs[1].path, Path::new("Assets/gba/z.Core"));
+        let index = Index::scan(&pocket).unwrap();
+        let listed: Vec<_> = index
+            .roms
+            .iter()
+            .map(|r| {
+                (
+                    r.platform.as_str(),
+                    r.owner.as_str(),
+                    r.rel_path.to_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("arduboy", "common", "Assets/arduboy/common/game.hex"),
+                ("gba", "common", "Assets/gba/common/A.gba"),
+                ("gba", "common", "Assets/gba/common/b.gba"),
+                ("gba", "z.Core", "Assets/gba/z.Core/sub/inner.gba"),
+                ("gbstudio", "", "GB Studio/demo.pocket"),
+            ]
+        );
     }
 }
