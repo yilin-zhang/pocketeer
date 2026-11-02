@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use super::{
     PlatformStats,
-    covers::{CoverRecord, CoverStatus},
+    covers::{Cover, CoverStatus},
     identify::{DatStatus, Identification},
 };
 use crate::{Error, Result, fsutil};
@@ -593,17 +593,24 @@ pub fn save_identification(conn: &Connection, rom: &Rom, state: &Identification)
 // ---------------------------------------------------------------------------
 // Covers
 
-pub fn cover_record(conn: &Connection, game_id: i64) -> Result<Option<CoverRecord>> {
+pub fn cover(conn: &Connection, game_id: i64) -> Result<Option<Cover>> {
     conn.query_row(
-        "SELECT game_id, rel_path, status, fetched_at, imported FROM covers WHERE game_id = ?1",
+        "SELECT status, rel_path, imported FROM covers WHERE game_id = ?1",
         params![game_id],
         |r| {
-            Ok(CoverRecord {
-                game_id: r.get(0)?,
-                rel_path: r.get::<_, Option<String>>(1)?.map(PathBuf::from),
-                status: r.get(2)?,
-                fetched_at: r.get(3)?,
-                imported: r.get(4)?,
+            let path = r.get::<_, Option<String>>(1)?.map(PathBuf::from);
+            Ok(match (r.get(0)?, path, r.get(2)?) {
+                (CoverStatus::Ok, Some(path), false) => Cover::Fetched { path },
+                (CoverStatus::Ok, Some(path), true) => Cover::Imported { path },
+                (CoverStatus::Ok, None, _) => {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Null,
+                        "a cover marked ok has no path".into(),
+                    ));
+                }
+                (CoverStatus::NotFound, ..) => Cover::NotFound,
+                (CoverStatus::Error, ..) => Cover::Failed,
             })
         },
     )
@@ -880,8 +887,7 @@ mod tests {
         assert_eq!(rom.name, "Hello (USA).gba");
         assert_eq!(rom.rel_path, Path::new("roms/gba/Hello (USA).gba"));
         assert_eq!(rom.dat.status, DatStatus::Matched);
-        let cover = cover_record(&c, 1).unwrap().unwrap();
-        assert_eq!(cover.status, CoverStatus::Ok);
+        assert!(matches!(cover(&c, 1).unwrap(), Some(Cover::Fetched { .. })));
         assert_eq!(save_games(&c).unwrap().values().next(), Some(&Some(1)));
     }
 

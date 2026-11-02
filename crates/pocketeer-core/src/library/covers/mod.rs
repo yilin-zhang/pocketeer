@@ -26,22 +26,35 @@ pub enum CoverStatus {
     Error,
 }
 
+/// What the library has recorded about a game's cover. Paths are relative
+/// to the library root.
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct CoverRecord {
-    pub game_id: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rel_path: Option<PathBuf>,
-    pub status: CoverStatus,
-    pub fetched_at: i64,
-    pub imported: bool,
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum Cover {
+    /// Downloaded from libretro-thumbnails.
+    Fetched { path: PathBuf },
+    /// The user's own image; automatic fetches leave it alone.
+    Imported { path: PathBuf },
+    /// libretro has none under this name; not retried unless asked.
+    NotFound,
+    /// The last fetch failed; retried next time.
+    Failed,
 }
 
-/// Absolute path of a game's cover if it was fetched.
+impl Cover {
+    /// The image on disk, if there is one.
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Cover::Fetched { path } | Cover::Imported { path } => Some(path),
+            Cover::NotFound | Cover::Failed => None,
+        }
+    }
+}
+
+/// Absolute path of a game's cover, if it has one on disk.
 pub fn path_for(lib: &Library, game_id: i64) -> Result<Option<PathBuf>> {
-    Ok(db::cover_record(lib.conn(), game_id)?
-        .filter(|r| r.status == CoverStatus::Ok)
-        .and_then(|r| r.rel_path)
-        .map(|rel| lib.root().join(rel))
+    Ok(db::cover(lib.conn(), game_id)?
+        .and_then(|c| c.path().map(|rel| lib.root().join(rel)))
         .filter(|p| p.is_file()))
 }
 
@@ -164,19 +177,17 @@ pub fn fetch(
     let mut report = FetchReport::default();
     let todo: Vec<_> = games
         .iter()
-        .filter(
-            |g| match db::cover_record(lib.conn(), g.id).ok().flatten() {
-                Some(r) if r.status == CoverStatus::Ok => {
-                    report.summary.already += 1;
-                    false
-                }
-                Some(r) if r.status == CoverStatus::NotFound && !opts.retry_missing => {
-                    report.summary.not_found += 1;
-                    false
-                }
-                _ => true,
-            },
-        )
+        .filter(|g| match db::cover(lib.conn(), g.id).ok().flatten() {
+            Some(Cover::Fetched { .. } | Cover::Imported { .. }) => {
+                report.summary.already += 1;
+                false
+            }
+            Some(Cover::NotFound) if !opts.retry_missing => {
+                report.summary.not_found += 1;
+                false
+            }
+            _ => true,
+        })
         .collect();
     progress(Event::Status(format!("Fetching {} cover(s)", todo.len())));
 
@@ -305,7 +316,7 @@ mod tests {
             }
         }).unwrap();
         old.assert();
-        assert!(db::cover_record(lib.conn(), game.id).unwrap().is_none());
+        assert!(db::cover(lib.conn(), game.id).unwrap().is_none());
         let new = server
             .mock("GET", "/Sys/master/Named_Boxarts/Identified%20title.png")
             .with_body(b"correct art")
@@ -365,12 +376,10 @@ mod tests {
         assert_eq!(report.summary.already, 1);
         let kept = path_for(&lib, game.id).unwrap().unwrap();
         assert_eq!(std::fs::read(kept).unwrap(), std::fs::read(source).unwrap());
-        assert!(
-            db::cover_record(lib.conn(), game.id)
-                .unwrap()
-                .unwrap()
-                .imported
-        );
+        assert!(matches!(
+            db::cover(lib.conn(), game.id).unwrap(),
+            Some(Cover::Imported { .. })
+        ));
     }
 
     #[test]

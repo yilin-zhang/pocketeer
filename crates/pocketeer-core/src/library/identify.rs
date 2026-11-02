@@ -470,7 +470,7 @@ mod tests {
         .unwrap();
         store(&cache, XML);
         offline(&mut lib, &cache);
-        assert!(db::cover_record(lib.conn(), id).unwrap().is_none());
+        assert!(db::cover(lib.conn(), id).unwrap().is_none());
         let game = db::get_game(lib.conn(), id).unwrap().unwrap();
         assert_eq!(covers::cover_name(&game), "Hello World (USA)");
         let source = tmp.path().join("cover.png");
@@ -479,7 +479,7 @@ mod tests {
             .unwrap();
         let plan = covers::import::plan(&lib, id, &source).unwrap();
         covers::import::apply(&mut lib, &plan).unwrap();
-        let before = db::cover_record(lib.conn(), id).unwrap();
+        let before = db::cover(lib.conn(), id).unwrap();
         store(
             &cache,
             String::from_utf8(XML.to_vec())
@@ -488,6 +488,6 @@ mod tests {
                 .as_bytes(),
         );
         offline(&mut lib, &cache);
-        assert_eq!(db::cover_record(lib.conn(), id).unwrap(), before);
+        assert_eq!(db::cover(lib.conn(), id).unwrap(), before);
     }
 }

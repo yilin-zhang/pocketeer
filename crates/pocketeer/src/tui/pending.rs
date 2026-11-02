@@ -172,12 +172,10 @@ where
 
 impl Ask for CoverImportPlan {
     fn question(&self) -> std::result::Result<String, Nothing> {
-        Ok(
-            match self.previous.as_ref().is_some_and(|p| p.rel_path.is_some()) {
-                true => "Replace this game's cover?".into(),
-                false => "Import this game's cover?".into(),
-            },
-        )
+        Ok(match self.replaces_cover() {
+            true => "Replace this game's cover?".into(),
+            false => "Import this game's cover?".into(),
+        })
     }
 }
 

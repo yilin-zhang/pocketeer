@@ -1,6 +1,6 @@
 //! Validated local cover copies, independent of ROM names and source paths.
 
-use super::CoverRecord;
+use super::Cover;
 use crate::library::{Library, db};
 use crate::plan::{Applied, Plan};
 use crate::{Error, Result, fsutil};
@@ -24,12 +24,20 @@ pub struct CoverImportPlan {
     pub width: u32,
     pub height: u32,
     pub bytes: usize,
-    pub previous: Option<CoverRecord>,
+    /// The cover the game had when planned.
+    pub previous: Option<Cover>,
     #[serde(skip)]
     library: crate::library::LibraryIdentity,
     // The confirmation applies these exact validated bytes, even if the source moves.
     #[serde(skip)]
     image: Arc<[u8]>,
+}
+
+impl CoverImportPlan {
+    /// Whether the game already has an image this one takes the place of.
+    pub fn replaces_cover(&self) -> bool {
+        self.previous.as_ref().and_then(Cover::path).is_some()
+    }
 }
 
 impl Plan for CoverImportPlan {
@@ -76,7 +84,7 @@ pub fn plan(lib: &Library, game_id: i64, source: &Path) -> Result<CoverImportPla
         .map_err(|e| invalid(source, format!("Cannot decode cover image: {e}")))?;
     let digest = format!("{:x}", Sha1::digest(&bytes));
     Ok(CoverImportPlan {
-        previous: db::cover_record(lib.conn(), game_id)?,
+        previous: db::cover(lib.conn(), game_id)?,
         game,
         source: source.to_path_buf(),
         destination: PathBuf::from("covers/imported")
@@ -112,7 +120,7 @@ pub fn apply(lib: &mut Library, plan: &CoverImportPlan) -> Result<CoverImportRes
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| Error::db(e, "begin cover import"))?;
     if db::get_game(&tx, plan.game.id)?.as_ref() != Some(&plan.game)
-        || db::cover_record(&tx, plan.game.id)? != plan.previous
+        || db::cover(&tx, plan.game.id)? != plan.previous
     {
         return Err(Error::Stale {
             what: format!("{} or its cover", plan.game.name),
@@ -142,9 +150,7 @@ pub fn apply(lib: &mut Library, plan: &CoverImportPlan) -> Result<CoverImportRes
         return Err(e);
     }
     let mut warnings = Vec::new();
-    if let Some(previous) = &plan.previous
-        && previous.imported
-        && let Some(rel) = &previous.rel_path
+    if let Some(Cover::Imported { path: rel }) = &plan.previous
         && rel != &plan.destination
         && rel.parent() == plan.destination.parent()
         && let Err(e) = fs::remove_file(root.join(rel))
@@ -156,7 +162,7 @@ pub fn apply(lib: &mut Library, plan: &CoverImportPlan) -> Result<CoverImportRes
     }
     Ok(CoverImportResult {
         path: plan.destination.clone(),
-        replaced: plan.previous.as_ref().is_some_and(|p| p.rel_path.is_some()),
+        replaced: plan.replaces_cover(),
         warnings,
     })
 }
@@ -208,12 +214,10 @@ mod tests {
             fs::read(lib.root().join(result.path)).unwrap(),
             fs::read(&source).unwrap()
         );
-        assert!(
-            db::cover_record(lib.conn(), game.id)
-                .unwrap()
-                .unwrap()
-                .imported
-        );
+        assert!(matches!(
+            db::cover(lib.conn(), game.id).unwrap(),
+            Some(Cover::Imported { .. })
+        ));
         // The first preview is out of date now.
         assert_eq!(apply(&mut lib, &preview).unwrap_err().code(), "STALE_PLAN");
     }
@@ -244,12 +248,12 @@ mod tests {
         image(&source, 10);
         let first = plan(&lib, game.id, &source).unwrap();
         apply(&mut lib, &first).unwrap();
-        let before = db::cover_record(lib.conn(), game.id).unwrap();
+        let before = db::cover(lib.conn(), game.id).unwrap();
         image(&source, 90);
         let next = plan(&lib, game.id, &source).unwrap();
         lib.conn().execute_batch("CREATE TRIGGER reject_cover BEFORE UPDATE ON covers BEGIN SELECT RAISE(FAIL, 'test failure'); END;").unwrap();
         assert!(apply(&mut lib, &next).is_err());
-        assert_eq!(db::cover_record(lib.conn(), game.id).unwrap(), before);
+        assert_eq!(db::cover(lib.conn(), game.id).unwrap(), before);
         assert_eq!(
             fs::read(lib.root().join(&first.destination)).unwrap(),
             first.image.as_ref()

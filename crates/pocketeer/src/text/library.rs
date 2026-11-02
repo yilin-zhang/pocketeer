@@ -506,7 +506,7 @@ impl Text for CoverImportReport {
             bytes(plan.bytes as u64),
             plan.destination.display()
         );
-        if plan.previous.as_ref().is_some_and(|p| p.rel_path.is_some()) {
+        if plan.replaces_cover() {
             out.push_str("Replaces the current cover after the new copy is saved.\n");
         }
         out.push_str("The source image is kept. Automatic downloads will keep this cover.\n");
