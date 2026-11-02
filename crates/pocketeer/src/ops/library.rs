@@ -46,6 +46,10 @@ pub struct ImportReport {
     /// Covers fetched for the imported platform afterwards (online only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub covers: Option<FetchReport>,
+    /// Problems identifying or fetching covers for the new games; the
+    /// import itself succeeded.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl ImportReport {
@@ -54,6 +58,7 @@ impl ImportReport {
         ImportReport {
             staged: Staged::preview(plan),
             covers: None,
+            warnings: Vec::new(),
         }
     }
 }
@@ -78,34 +83,70 @@ pub struct ImportRequest {
     pub covers: bool,
 }
 
-/// Best-effort cover fetch once an import added `added` games: nothing
-/// happens when it added none, when `--no-covers` was given or offline, and
-/// errors are swallowed (the import already succeeded).
-pub fn covers_after_import(
+/// What re-checking the library's metadata did: DAT identification, then
+/// (when asked and online) cover downloads. Neither step aborts the other.
+#[derive(Debug, Default, Serialize)]
+pub struct MetadataReport {
+    /// `None` when identification could not run at all (see `errors`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identify: Option<library::identify::Report>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covers: Option<FetchReport>,
+    /// A step that failed as a whole (no library, no HTTP client, …).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+impl MetadataReport {
+    /// Whether the library's rows or files changed (names learned, covers saved).
+    pub fn changed(&self) -> bool {
+        self.identify
+            .as_ref()
+            .is_some_and(|r| r.matched + r.no_match + r.ambiguous > 0)
+            || self.covers.as_ref().is_some_and(|c| c.summary.fetched > 0)
+    }
+
+    /// Every problem worth telling the user: whole-step failures, then the
+    /// per-platform ones each step reported.
+    pub fn problems(&self) -> impl Iterator<Item = &str> {
+        self.errors
+            .iter()
+            .chain(self.identify.iter().flat_map(|r| r.errors.iter()))
+            .map(String::as_str)
+    }
+}
+
+/// Identifies `platform`'s ROMs (all platforms when `None`) against DATs,
+/// then fetches missing covers if `covers` is set and we're online.
+pub fn refresh_metadata(
     ctx: &Context,
-    lib: &Library,
     platform: Option<&str>,
-    (added, enabled): (usize, bool),
+    covers: bool,
     progress: &mut dyn FnMut(Event),
-) -> Option<FetchReport> {
-    if added > 0 {
-        let _ = identify(ctx, platform, progress);
+) -> MetadataReport {
+    let mut report = MetadataReport::default();
+    match identify(ctx, platform, progress) {
+        Ok(r) => report.identify = Some(r),
+        Err(e) => report.errors.push(format!("DAT check: {e}")),
     }
-    if added == 0 || !enabled || ctx.offline() {
-        return None;
+    if covers && !ctx.offline() {
+        match covers_fetch(ctx, platform, false, None, progress) {
+            Ok(c) => report.covers = Some(c),
+            Err(e) => report.errors.push(format!("Covers: {e}")),
+        }
     }
-    let http = ctx.http().ok()?;
-    covers::fetch(
-        lib,
-        &http,
-        &FetchOptions {
-            platform: platform.map(str::to_owned),
-            retry_missing: false,
-            system: None,
-        },
-        progress,
-    )
-    .ok()
+    report
+}
+
+/// After an import that added games: identify them and fetch their covers.
+/// Nothing happens when the import added none.
+pub fn metadata_after_import(
+    ctx: &Context,
+    platform: Option<&str>,
+    (added, covers): (usize, bool),
+    progress: &mut dyn FnMut(Event),
+) -> Option<MetadataReport> {
+    (added > 0).then(|| refresh_metadata(ctx, platform, covers, progress))
 }
 
 /// Standard-name list for a platform (online only; `None` means no suggestions).
@@ -184,14 +225,13 @@ pub fn import(
     let (opts, plan) = plan_import(ctx, req, progress)?;
     let staged = stage(mode, plan, |plan| apply_import(ctx, &opts, plan, progress))?;
     let added = staged.result.as_ref().map_or(0, |r| r.added);
-    let covers = covers_after_import(
-        ctx,
-        &ctx.library()?,
-        Some(&req.platform),
-        (added, req.covers),
-        progress,
-    );
-    Ok(ImportReport { staged, covers })
+    let metadata = metadata_after_import(ctx, Some(&req.platform), (added, req.covers), progress)
+        .unwrap_or_default();
+    Ok(ImportReport {
+        staged,
+        warnings: metadata.problems().map(str::to_owned).collect(),
+        covers: metadata.covers,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -360,15 +400,13 @@ pub fn identify(
         }
         p => p,
     };
-    let base = std::env::var("POCKETEER_DAT_BASE")
-        .unwrap_or_else(|_| pocketeer_core::catalog::libretro::DAT_BASE.into());
     library::identify::run(
         &mut ctx.library()?,
         &ctx.http()?,
         &ctx.cache()?,
         library::identify::Options {
             policy,
-            base: &base,
+            base: ctx.dat_base(),
             platform,
         },
         progress,
@@ -389,13 +427,7 @@ pub fn covers_fetch(
         retry_missing: retry,
         system: system.map(str::to_owned),
     };
-    // Undocumented: lets tests (or a mirror) replace the libretro host.
-    match std::env::var("POCKETEER_THUMBNAILS_BASE") {
-        Ok(base) if !base.is_empty() => {
-            covers::fetch_with_base(&lib, &http, &opts, &base, progress)
-        }
-        _ => covers::fetch(&lib, &http, &opts, progress),
-    }
+    covers::fetch(&lib, &http, &opts, ctx.thumbnails_base(), progress)
 }
 
 #[derive(Debug, Serialize)]

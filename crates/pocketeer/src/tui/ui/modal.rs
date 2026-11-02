@@ -347,6 +347,7 @@ mod tests {
                 library: Some(tmp.path().join("lib")),
                 config: Some(tmp.path().join("config")),
                 github_token: None,
+                ..Default::default()
             },
             Picker::halfblocks(),
         );

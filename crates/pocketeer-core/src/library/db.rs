@@ -164,14 +164,6 @@ pub struct Rom {
     pub mode: ImportMode,
 }
 
-impl Rom {
-    /// The stored crc32 (8 hex digits) as a number; `None` if the column is
-    /// malformed, which only a hand-edited database can produce.
-    pub fn crc32_u32(&self) -> Option<u32> {
-        u32::from_str_radix(&self.crc32, 16).ok()
-    }
-}
-
 /// Inserts (or finds) a game and returns its id.
 pub fn upsert_game(conn: &Connection, platform: &str, name: &str) -> Result<i64> {
     conn.execute(
@@ -634,8 +626,26 @@ pub struct Identification {
 /// Writes a DAT result for `rom`, provided the row still holds the bytes
 /// it was computed for. `true` when a row was updated.
 pub fn save_identification(conn: &Connection, rom: &Rom, state: &Identification) -> Result<bool> {
-    let changed = conn.execute("UPDATE roms SET dat_status=?2,dat_game_name=?3,dat_rom_name=?4,dat_revision=?5,dat_source=?6,dat_checked_at=?7,dat_error=?8,verified=?9 WHERE id=?1 AND sha1=?10 AND size=?11",
-        params![rom.id,state.status.as_str(),state.game_name,state.rom_name,state.revision,state.source,state.checked_at,state.error,state.status == Status::Matched,rom.sha1,rom.size as i64])
+    let changed = conn
+        .execute(
+            "UPDATE roms SET dat_status = ?2, dat_game_name = ?3, dat_rom_name = ?4,
+                 dat_revision = ?5, dat_source = ?6, dat_checked_at = ?7, dat_error = ?8,
+                 verified = ?9
+             WHERE id = ?1 AND sha1 = ?10 AND size = ?11",
+            params![
+                rom.id,
+                state.status.as_str(),
+                state.game_name,
+                state.rom_name,
+                state.revision,
+                state.source,
+                state.checked_at,
+                state.error,
+                state.status == Status::Matched,
+                rom.sha1,
+                rom.size as i64,
+            ],
+        )
         .map_err(|e| Error::db(e, "save DAT result"))?;
     Ok(changed > 0)
 }
@@ -844,7 +854,19 @@ pub fn insert_save_version(
     mtime: i64,
     stored: &Path,
 ) -> Result<()> {
-    conn.execute("INSERT INTO save_versions (rel_path,size,sha1,mtime,stored_path,created_at) VALUES (?1,?2,?3,?4,?5,?6)",params![rel.to_string_lossy(),size as i64,sha1,mtime,stored.to_string_lossy(),fsutil::now_secs()]).map_err(|e| Error::db(e,"record save history"))?;
+    conn.execute(
+        "INSERT INTO save_versions (rel_path, size, sha1, mtime, stored_path, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            rel.to_string_lossy(),
+            size as i64,
+            sha1,
+            mtime,
+            stored.to_string_lossy(),
+            fsutil::now_secs(),
+        ],
+    )
+    .map_err(|e| Error::db(e, "record save history"))?;
     Ok(())
 }
 

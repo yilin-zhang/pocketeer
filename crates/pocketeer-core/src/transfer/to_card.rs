@@ -53,12 +53,6 @@ pub fn plan(
     specs: &[String],
     progress: Progress<'_>,
 ) -> Result<CopyPlan> {
-    if specs.is_empty() {
-        return Err(Error::Usage {
-            message: "Select at least one library ROM to copy".into(),
-            hint: None,
-        });
-    }
     let mut selected = Vec::new();
     for spec in specs {
         let (game, rom) = resolve_rom(lib, platform, spec)?;

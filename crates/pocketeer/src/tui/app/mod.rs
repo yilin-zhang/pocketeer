@@ -22,7 +22,7 @@ use pocketeer_core::{
     card::cores::{self, CoreList, SearchFilter},
     card::roms::CardRom,
     library::rename::RenamePlan,
-    plan::{Event, Plan},
+    plan::Event,
 };
 use ratatui::layout::Rect;
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
@@ -51,6 +51,8 @@ use crate::{
 
 pub struct App {
     global: Global,
+    /// Settings as loaded at the last reload; every job gets a clone.
+    base: Context,
     worker: Worker,
     path_input: path_input::PathLookup,
     pub pocket: Option<Pocket>,
@@ -73,14 +75,7 @@ pub struct App {
     dragging: Option<(Splitter, Rect)>,
     pub log: VecDeque<String>,
     pub should_quit: bool,
-    /// DAT identification and covers run once per session (and after imports).
-    auto_metadata_done: bool,
-    /// A change check is in flight on the side worker.
-    fingerprint_pending: bool,
-    /// The running main-worker job adds games one by one; refresh the Games
-    /// tab after each step (at most one refresh in flight).
-    importing: bool,
-    refresh_pending: bool,
+    auto: AutoRefresh,
     verify: Verification,
 }
 
@@ -97,6 +92,21 @@ pub struct Busy {
     pub side: Option<String>,
     /// Background ROM verification ("ROM check 3/12").
     pub roms: Option<String>,
+}
+
+/// What the app re-reads or re-checks without being asked.
+#[derive(Default)]
+struct AutoRefresh {
+    /// The background DAT and cover check ran this session; cleared after
+    /// an import so new games get one too.
+    metadata_done: bool,
+    /// A change check is in flight on the side worker.
+    fingerprint_inflight: bool,
+    /// The running main-worker job adds games one by one; refresh the Games
+    /// tab after each step.
+    importing: bool,
+    /// One such library re-read is in flight (never more).
+    library_inflight: bool,
 }
 
 /// Where the one-file-at-a-time ROM verification is.
@@ -124,6 +134,7 @@ impl App {
             Tab::Games
         };
         App {
+            base: ctx,
             worker: Worker::spawn(),
             path_input: path_input::PathLookup::spawn(),
             pocket,
@@ -143,10 +154,7 @@ impl App {
             dragging: None,
             log: VecDeque::new(),
             should_quit: false,
-            auto_metadata_done: false,
-            fingerprint_pending: false,
-            importing: false,
-            refresh_pending: false,
+            auto: AutoRefresh::default(),
             verify: Verification::default(),
             global,
         }
@@ -158,7 +166,7 @@ impl App {
     /// What a job needs: the CLI's context, told which card we have (if any)
     /// instead of detecting one.
     fn ctx(&self) -> Context {
-        Context::new(self.global.clone()).with_pocket(self.pocket.clone())
+        self.base.clone().with_pocket(self.pocket.clone())
     }
 
     /// For actions that need the library to exist; `None` says so.
@@ -196,8 +204,10 @@ impl App {
     /// Re-reads everything: the card if one is mounted (looking for one
     /// first if none was), and the library.
     pub fn reload(&mut self) {
+        // Pick up an edited config file.
+        self.base = Context::new(self.global.clone());
         if self.pocket.is_none() {
-            match Context::new(self.global.clone()).pocket() {
+            match self.base.pocket() {
                 Ok(p) => {
                     self.pocket = Some(p);
                     self.pocket_error = None;
@@ -278,13 +288,13 @@ impl App {
                 }
                 Msg::Progress(Event::Step { done, total }) => {
                     self.busy.step = Some((done, total));
-                    if self.importing && !self.refresh_pending {
-                        self.refresh_pending = true;
+                    if self.auto.importing && !self.auto.library_inflight {
+                        self.auto.library_inflight = true;
                         self.submit_side(Job::RefreshLibrary);
                     }
                 }
                 Msg::LibraryRefreshed(result) => {
-                    self.refresh_pending = false;
+                    self.auto.library_inflight = false;
                     let selected = self.game_selection();
                     if let (Ok(view), Some(snap)) = (result, &mut self.snapshot) {
                         snap.library = Some(*view);
@@ -323,7 +333,7 @@ impl App {
                     }
                 }
                 Msg::Fingerprint(fp) => {
-                    self.fingerprint_pending = false;
+                    self.auto.fingerprint_inflight = false;
                     let changed = self.snapshot.as_ref().is_some_and(|s| s.fingerprint != fp);
                     // Don't pull the rug from under a dialog or a running job.
                     if changed && self.busy.main.is_none() && self.modal.is_none() {
@@ -336,28 +346,27 @@ impl App {
                     self.busy.side = Some(format!("covers {done}/{total}"))
                 }
                 Msg::SideProgress(_) => {}
-                Msg::SideDone { lines, failed } => {
+                Msg::SideDone(done) => {
                     self.busy.side = None;
-                    let fetched_any = !lines.is_empty();
-                    for line in &lines {
+                    for line in &done.lines {
                         self.log(line.clone());
                     }
-                    if failed > 0 {
-                        self.info("Background library task failed", lines);
+                    if done.failed > 0 {
+                        self.info("Background library task failed", done.lines);
                     }
-                    // New files on disk: refresh the Games tab when nothing else is running.
-                    if fetched_any && self.busy.main.is_none() && self.modal.is_none() {
+                    // New names or files: refresh the Games tab when nothing else is running.
+                    if done.changed && self.busy.main.is_none() && self.modal.is_none() {
                         self.reload();
                     }
                 }
-                Msg::Applied { lines, failed } => {
-                    self.importing = false;
+                Msg::Applied(done) => {
+                    self.auto.importing = false;
                     self.clear_busy();
-                    for line in &lines {
+                    for line in &done.lines {
                         self.log(line.clone());
                     }
-                    if failed > 0 {
-                        self.info(&format!("{failed} operation(s) failed"), lines);
+                    if done.failed > 0 {
+                        self.info(&format!("{} operation(s) failed", done.failed), done.lines);
                     }
                     self.reload();
                 }
@@ -394,18 +403,19 @@ impl App {
         );
     }
 
-    /// A plan came back: show it, say there is nothing to do, or start the
-    /// dialog flow it needs first.
-    fn planned(&mut self, pending: Pending) {
+    /// A plan came back: open the dialog it asks for.
+    pub(super) fn planned(&mut self, pending: Pending) {
         match pending.preview() {
             Preview::Notice(line) => self.notice(line),
             Preview::Info { title, lines } => self.info(&title, lines),
-            Preview::Confirm { title, lines } => self.confirm(title, lines, pending),
-            Preview::Flow => match pending {
-                Pending::Saves(plan) => self.review_saves(plan),
-                Pending::Standardize(plans) => self.offer_standardize(plans),
-                import => self.offer_import(import),
-            },
+            Preview::Confirm {
+                title,
+                lines,
+                pending,
+            } => self.confirm(title, lines, pending),
+            Preview::SaveConflict { plan, index } => self.ask_save_conflict(plan, index),
+            Preview::PickRenames(plans) => self.offer_standardize(plans),
+            Preview::PickImportNames(import) => self.offer_import(import),
         }
     }
 
@@ -419,7 +429,7 @@ impl App {
         match &self.pocket {
             // No card: look for one, so plugging it in is enough.
             None => {
-                if let Ok(p) = Context::new(self.global.clone()).pocket() {
+                if let Ok(p) = self.base.pocket() {
                     self.pocket = Some(p);
                     self.pocket_error = None;
                     self.notice("SD card detected");
@@ -443,10 +453,10 @@ impl App {
             }
             Some(_) => {}
         }
-        if self.fingerprint_pending || self.snapshot.is_none() {
+        if self.auto.fingerprint_inflight || self.snapshot.is_none() {
             return;
         }
-        self.fingerprint_pending = true;
+        self.auto.fingerprint_inflight = true;
         self.submit_side(Job::Fingerprint);
     }
 

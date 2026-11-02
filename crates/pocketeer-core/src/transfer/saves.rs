@@ -193,10 +193,10 @@ fn validate_path(rel: &Path) -> Result<()> {
             .iter()
             .any(|r| rel.starts_with(r) && rel != Path::new(r))
     {
-        return Err(Error::Usage {
-            message: "Expected a card-relative save path within Saves, GB Studio/Saves or Memories"
+        return Err(Error::InvalidPath {
+            path: rel.to_path_buf(),
+            reason: "expected a card-relative save path inside Saves, GB Studio/Saves or Memories"
                 .into(),
-            hint: None,
         });
     }
     Ok(())
@@ -346,9 +346,9 @@ pub fn plan_restore(
         Some(id) => {
             let v = versions_by_id(lib, id)?;
             if v.rel_path != rel {
-                return Err(Error::Usage {
-                    message: "Version belongs to a different save path".into(),
-                    hint: None,
+                return Err(Error::InvalidPath {
+                    path: rel.to_path_buf(),
+                    reason: format!("save version {id} belongs to {}", v.rel_path.display()),
                 });
             }
             let stored = lib.root().join(v.stored_path);
@@ -414,65 +414,16 @@ pub fn apply(
     let mut result = SavesResult::default();
     let mut done = 0;
     for action in &plan.actions {
-        if matches!(
-            action,
-            SaveAction::Skip { .. } | SaveAction::Conflict { .. }
-        ) {
-            continue;
-        }
+        let pull = match action {
+            SaveAction::Pull { .. } => true,
+            SaveAction::Push { .. } => false,
+            SaveAction::Conflict { .. } | SaveAction::Skip { .. } => continue,
+        };
         let rel = action.path();
         validate_path(rel)?;
-        let outcome = (|| -> Result<(bool, u64)> {
-            if lib.root() != plan.library_root {
-                return Err(Error::Stale {
-                    what: "the library".into(),
-                });
-            }
-            plan.card_identity.check(pocket)?;
-            let observed = plan.observed.get(rel).expect("planned action");
-            if observed.card != inspect(&pocket.root().join(rel))?
-                || observed.computer != inspect(&current(lib, rel))?
-            {
-                return Err(Error::Stale {
-                    what: rel.display().to_string(),
-                });
-            }
-            match action {
-                SaveAction::Pull { .. } => {
-                    let source = pocket.root().join(rel);
-                    let destination = current(lib, rel);
-                    let identity = observed.card.as_ref().expect("pull source");
-                    let archived = if let Some(old) = &observed.computer {
-                        archive(lib, rel, &destination, old)?
-                    } else {
-                        false
-                    };
-                    copy_checked(&source, &destination, identity)?;
-                    Ok((archived, identity.size))
-                }
-                SaveAction::Push {
-                    source, identity, ..
-                } => {
-                    if inspect(source)?.as_ref() != Some(identity) {
-                        return Err(Error::Stale {
-                            what: source.display().to_string(),
-                        });
-                    }
-                    let destination = pocket.root().join(rel);
-                    let archived = if let Some(old) = &observed.card {
-                        archive(lib, rel, &destination, old)?
-                    } else {
-                        false
-                    };
-                    copy_checked(source, &destination, identity)?;
-                    Ok((archived, identity.size))
-                }
-                _ => unreachable!(),
-            }
-        })();
-        match outcome {
+        match copy_one(lib, pocket, plan, action) {
             Ok((archived, size)) => {
-                if matches!(action, SaveAction::Pull { .. }) {
+                if pull {
                     result.pulled += 1;
                 } else {
                     result.pushed += 1;
@@ -492,6 +443,63 @@ pub fn apply(
         });
     }
     Ok(result)
+}
+
+/// Copies one save across (card → library for a pull, the other way for a
+/// push) once both sides are confirmed to be as planned. The copy it
+/// overwrites is archived first. Returns whether an archive was made, and
+/// the bytes copied.
+fn copy_one(
+    lib: &Library,
+    pocket: &Pocket,
+    plan: &SavesPlan,
+    action: &SaveAction,
+) -> Result<(bool, u64)> {
+    let rel = action.path();
+    if lib.root() != plan.library_root {
+        return Err(Error::Stale {
+            what: "the library".into(),
+        });
+    }
+    plan.card_identity.check(pocket)?;
+    let observed = plan.observed.get(rel).expect("planned action");
+    let on_card = pocket.root().join(rel);
+    let in_library = current(lib, rel);
+    if observed.card != inspect(&on_card)? || observed.computer != inspect(&in_library)? {
+        return Err(Error::Stale {
+            what: rel.display().to_string(),
+        });
+    }
+    let (source, destination, identity, replaced) = match action {
+        SaveAction::Pull { .. } => (
+            on_card.as_path(),
+            in_library.as_path(),
+            observed.card.as_ref().expect("pull source"),
+            &observed.computer,
+        ),
+        SaveAction::Push {
+            source, identity, ..
+        } => {
+            if inspect(source)?.as_ref() != Some(identity) {
+                return Err(Error::Stale {
+                    what: source.display().to_string(),
+                });
+            }
+            (
+                source.as_path(),
+                on_card.as_path(),
+                identity,
+                &observed.card,
+            )
+        }
+        SaveAction::Conflict { .. } | SaveAction::Skip { .. } => return Ok((false, 0)),
+    };
+    let archived = match replaced {
+        Some(old) => archive(lib, rel, destination, old)?,
+        None => false,
+    };
+    copy_checked(source, destination, identity)?;
+    Ok((archived, identity.size))
 }
 
 fn copy_checked(source: &Path, destination: &Path, identity: &SaveInfo) -> Result<()> {

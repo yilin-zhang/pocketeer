@@ -70,31 +70,15 @@ impl App {
         &mut self,
         results: Vec<(String, Result<install::Prepared, Error>)>,
     ) {
-        let mut text = Vec::new();
         let mut preps = Vec::new();
-        let mut changes = 0;
+        let mut errors = Vec::new();
         for (spec, result) in results {
             match result {
-                Ok(prep) => {
-                    text.push(text::cores::install_plan_text(&prep.plan));
-                    if prep.plan.changed {
-                        changes += 1;
-                    }
-                    preps.push(prep);
-                }
-                Err(e) => text.push(format!("{spec}: error: {e}\n")),
+                Ok(prep) => preps.push(prep),
+                Err(e) => errors.push(format!("{spec}: error: {e}\n")),
             }
         }
-        let lines = text_lines(&text.join("\n"));
-        if changes == 0 {
-            self.info("Nothing to do", lines);
-        } else {
-            self.confirm(
-                format!("Install {changes} core(s)?"),
-                lines,
-                Pending::Install(preps),
-            );
-        }
+        self.planned(Pending::Install { preps, errors });
     }
 
     pub(super) fn remove_selected(&mut self) {
@@ -246,13 +230,13 @@ impl App {
                     .any(|r| r.dat.status == pocketeer_core::library::identify::Status::Unchecked)
             })
         });
-        if (self.auto_metadata_done && !unchecked)
+        if (self.auto.metadata_done && !unchecked)
             || self.busy.side.is_some()
             || self.library_view().is_none()
         {
             return;
         }
-        self.auto_metadata_done = true;
+        self.auto.metadata_done = true;
         self.identify_library();
     }
 
@@ -508,54 +492,40 @@ impl App {
 }
 
 impl App {
-    pub(super) fn review_saves(&mut self, plan: Box<pocketeer_core::transfer::saves::SavesPlan>) {
+    /// The first save conflict in `plan`: which copy wins. The answer comes
+    /// back through `submit_pick`, which re-plans the rest.
+    pub(super) fn ask_save_conflict(
+        &mut self,
+        plan: Box<pocketeer_core::transfer::saves::SavesPlan>,
+        index: usize,
+    ) {
         use pocketeer_core::transfer::saves::SaveAction;
-        if let Some((
-            index,
-            SaveAction::Conflict {
-                rel,
-                card,
-                computer,
-                ..
-            },
-        )) = plan
-            .actions
-            .iter()
-            .enumerate()
-            .find(|(_, a)| matches!(a, SaveAction::Conflict { .. }))
-        {
-            self.modal = Some(Modal::Pick {
-                title: format!("Save conflict: {}", rel.display()),
-                items: vec![
-                    format!(
-                        "Use AP → backup ({}; {})",
-                        text::bytes(card.size),
-                        text::time_ago(card.mtime)
-                    ),
-                    format!(
-                        "Use computer → restore AP ({}; {})",
-                        text::bytes(computer.size),
-                        text::time_ago(computer.mtime)
-                    ),
-                    "Leave both unchanged".into(),
-                ],
-                selected: 2,
-                kind: PickKind::SaveConflict { plan, index },
-            });
+        let SaveAction::Conflict {
+            rel,
+            card,
+            computer,
+            ..
+        } = &plan.actions[index]
+        else {
             return;
-        }
-        let lines = text_lines(&text::saves::saves_sync(&Staged::preview((*plan).clone())));
-        if plan.changes() == 0 {
-            self.info("Save backup review", lines);
-        } else {
-            self.confirm(
+        };
+        self.modal = Some(Modal::Pick {
+            title: format!("Save conflict: {}", rel.display()),
+            items: vec![
                 format!(
-                    "Back up {}, restore {} save(s)?",
-                    plan.summary.pull, plan.summary.push
+                    "Use AP → backup ({}; {})",
+                    text::bytes(card.size),
+                    text::time_ago(card.mtime)
                 ),
-                lines,
-                Pending::Saves(plan),
-            );
-        }
+                format!(
+                    "Use computer → restore AP ({}; {})",
+                    text::bytes(computer.size),
+                    text::time_ago(computer.mtime)
+                ),
+                "Leave both unchanged".into(),
+            ],
+            selected: 2,
+            kind: PickKind::SaveConflict { plan, index },
+        });
     }
 }

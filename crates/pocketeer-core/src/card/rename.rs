@@ -56,9 +56,9 @@ pub fn plan_card(pocket: &crate::Pocket, path: &Path, new_name: &str) -> Result<
         to: destination,
         kind: RenameKind::Rom,
     }];
-    let save_dir = crate::card::save_dir_for(path).ok_or_else(|| Error::Usage {
-        message: "Unsupported ROM location".into(),
-        hint: None,
+    let save_dir = crate::card::save_dir_for(path).ok_or_else(|| Error::InvalidPath {
+        path: path.to_path_buf(),
+        reason: "not inside a ROM folder pocketeer knows the saves of".into(),
     })?;
     let old_stem = stem(&rom.name);
     let new_stem = stem(&new_name);
@@ -70,7 +70,9 @@ pub fn plan_card(pocket: &crate::Pocket, path: &Path, new_name: &str) -> Result<
                     .iter()
                     .any(|s| s.eq_ignore_ascii_case(stem(&r.name)))
         }) {
-            return Err(Error::Usage { message: "Another ROM in this folder shares the save filename; the save owner is ambiguous".into(), hint: None });
+            return Err(Error::SaveOwnerAmbiguous {
+                path: path.to_path_buf(),
+            });
         }
         let dir = pocket.root().join(&save_dir);
         match std::fs::read_dir(&dir) {

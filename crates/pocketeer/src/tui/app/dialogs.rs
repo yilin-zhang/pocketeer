@@ -2,7 +2,6 @@
 //! small text helpers those dialogs need.
 
 use super::path_input::expand_home;
-use pocketeer_core::library::import::apply_suggestions;
 
 use super::*;
 use crate::ops::library::ImportRequest;
@@ -178,7 +177,7 @@ impl App {
                     _ => ConflictChoice::Skip,
                 };
                 plan.resolve(index, choice);
-                self.review_saves(plan);
+                self.planned(Pending::Saves(plan));
             }
             PickKind::RenameActions(mut actions) => {
                 if selected < actions.len() {
@@ -206,31 +205,10 @@ impl App {
                     .filter(|(_, (_, on))| *on)
                     .map(|(k, _)| k)
                     .collect();
-                let mut import = *import;
-                let applied = self.ctx().library().and_then(|lib| match &mut import {
-                    Pending::Import(b) => {
-                        let platform = b.0.platform.clone();
-                        apply_suggestions(&lib, &mut b.1, |name| {
-                            accepted.contains(&(platform.clone(), name.to_string()))
-                        })
-                    }
-                    Pending::CardImport(c) => {
-                        let mut n = 0;
-                        for part in &mut c.parts {
-                            let platform = part.platform.clone();
-                            n += apply_suggestions(&lib, &mut part.plan, |name| {
-                                accepted.contains(&(platform.clone(), name.to_string()))
-                            })?;
-                        }
-                        Ok(n)
-                    }
-                    _ => Ok(0),
-                });
-                if let Err(e) = applied {
-                    self.error("Standard names", &e);
-                    return;
-                }
-                self.planned(import);
+                self.submit(
+                    "Applying standard names",
+                    Job::Plan(Request::AcceptNames { import, accepted }),
+                );
             }
             ToggleKind::Standardize { plans } => {
                 let chosen: Vec<_> = plans

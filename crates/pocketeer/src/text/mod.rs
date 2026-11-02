@@ -16,7 +16,7 @@ use pocketeer_core::{
     },
     catalog::inventory::InventoryStatus,
     library::{
-        covers::FetchReport,
+        covers::{CoverStatus, FetchReport},
         import::{ImportAction, ImportSkip},
     },
     net::Source,
@@ -410,29 +410,66 @@ pub(crate) fn suggestion_footer<'a>(
     }
 }
 
-/// One line about the covers fetched after an import.
+/// What a cover fetch did this run, as counts with what happened ("3",
+/// "downloaded"); empty when it did nothing. Games already marked missing
+/// are not news.
+pub(crate) fn cover_news(c: &FetchReport) -> Vec<(usize, &'static str)> {
+    let missing = c
+        .items
+        .iter()
+        .filter(|i| i.status == CoverStatus::None)
+        .count();
+    [
+        (c.summary.fetched, "downloaded"),
+        (missing, "not on libretro"),
+        (c.summary.errors, "failed"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .collect()
+}
+
+/// How to give a libretro system name for platforms without a mapping.
+pub(crate) fn unmapped_hint(c: &FetchReport, mode: Mode) -> Option<String> {
+    (!c.unsupported_platforms.is_empty()).then(|| {
+        format!(
+            "No libretro mapping for {}; {}.",
+            c.unsupported_platforms.join(", "),
+            if mode == Mode::Interactive {
+                "press f on one of its games and give the system name"
+            } else {
+                "pass `covers fetch --platform <id> --libretro-system <name>`"
+            }
+        )
+    })
+}
+
+/// One line about the covers fetched after an import, plus the mapping hint.
 pub fn covers_summary(out: &mut String, covers: Option<&FetchReport>, mode: Mode) {
     if let Some(c) = covers {
+        let news = cover_news(c);
         let _ = writeln!(
             out,
-            "✓ covers: {} fetched, {} not on libretro, {} error(s){}",
-            c.summary.fetched,
-            c.summary.not_found,
-            c.summary.errors,
-            if c.unsupported_platforms.is_empty() {
-                String::new()
+            "✓ covers: {}",
+            if news.is_empty() {
+                "nothing new".to_string()
             } else {
-                format!(
-                    " (no libretro mapping for {}; {})",
-                    c.unsupported_platforms.join(", "),
-                    if mode == Mode::Interactive {
-                        "press f again and give the system name"
-                    } else {
-                        "`covers fetch --libretro-system`"
-                    }
-                )
+                news.iter()
+                    .map(|(n, what)| format!("{n} {what}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             }
         );
+        if let Some(hint) = unmapped_hint(c, mode) {
+            let _ = writeln!(out, "{hint}");
+        }
+    }
+}
+
+/// Lines that say an import's follow-up work (DAT check, covers) had trouble.
+pub(crate) fn warning_lines(out: &mut String, warnings: &[String]) {
+    for w in warnings {
+        let _ = writeln!(out, "! {w}");
     }
 }
 
@@ -537,5 +574,83 @@ mod tests {
         m.insert("up to date", 2);
         m.insert("not in DAT", 1);
         assert_eq!(skipped_summary(&m), "; skipped: 1 not in DAT, 2 up to date");
+    }
+
+    #[test]
+    fn background_check_reads_as_one_short_line() {
+        use crate::ops::library::MetadataReport;
+        use pocketeer_core::library::{
+            covers::{FetchItem, FetchSummary},
+            identify,
+        };
+        let quiet = MetadataReport {
+            identify: Some(identify::Report {
+                unchanged: 8,
+                ..Default::default()
+            }),
+            covers: Some(FetchReport {
+                // Marked missing on an earlier run: not news.
+                summary: FetchSummary {
+                    not_found: 3,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            errors: vec![],
+        };
+        assert_eq!(
+            library::metadata_status(&quiet),
+            "✓ DATs and covers checked, nothing new\n"
+        );
+        let busy = MetadataReport {
+            identify: Some(identify::Report {
+                matched: 2,
+                errors: vec!["gba: offline".into()],
+                ..Default::default()
+            }),
+            covers: Some(FetchReport {
+                summary: FetchSummary {
+                    fetched: 1,
+                    ..Default::default()
+                },
+                items: vec![FetchItem {
+                    platform: "gb".into(),
+                    game: "x".into(),
+                    status: CoverStatus::None,
+                    message: None,
+                }],
+                ..Default::default()
+            }),
+            errors: vec![],
+        };
+        assert_eq!(
+            library::metadata_status(&busy),
+            "! DATs and covers checked: 2 ROM(s) identified, 1 cover(s) downloaded, 1 cover(s) not on libretro, gba: offline\n"
+        );
+    }
+
+    #[test]
+    fn identify_lists_only_what_happened() {
+        use pocketeer_core::library::identify;
+        let none = identify::Report::default();
+        assert_eq!(library::identify_text(&none), "No ROMs to check.\n");
+        let quiet = identify::Report {
+            unchanged: 8,
+            ..Default::default()
+        };
+        assert_eq!(
+            library::identify_text(&quiet),
+            "✓ checked 8 ROM(s): 8 unchanged\n"
+        );
+        let mixed = identify::Report {
+            matched: 2,
+            unchanged: 6,
+            errors: vec!["gba: offline".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            library::identify_text(&mixed),
+            "✗ gba: offline\n! checked 8 ROM(s): 2 identified, 6 unchanged, 1 error(s)\n"
+        );
     }
 }

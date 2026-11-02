@@ -324,22 +324,54 @@ impl Index {
         if cancelled() {
             return false;
         }
-        let identity = self.identity.check(pocket);
+        let rel = self.roms[i].rel_path.clone();
+        let result = self.read_identity(pocket, &rel, full, cancelled);
+        if cancelled() {
+            return false;
+        }
         let rom = &mut self.roms[i];
-        let path = pocket.root().join(&rom.rel_path);
-        let result = (|| -> Result<(Cached, Confidence)> {
-            identity?;
-            let before = Stamp::of(&path)?;
-            let mut file = File::open(&path).map_err(|e| Error::io(&path, e))?;
-            let sample =
-                sample(&mut file, before.size, cancelled).map_err(|e| Error::io(&path, e))?;
-            let cached = self
-                .entries
-                .get(&rom.rel_path)
-                .filter(|c| c.stamp == before && c.sample == sample);
-            let (sha1, confidence) = if let Some(cached) = cached.filter(|_| !full) {
-                (cached.sha1, Confidence::Sampled)
-            } else {
+        match result {
+            Ok((entry, confidence)) => {
+                rom.sha1 = Some(hash::hex(&entry.sha1));
+                rom.stamp = entry.stamp;
+                rom.size = entry.stamp.size;
+                rom.confidence = confidence;
+                rom.error = None;
+                self.dirty |= self.entries.get(&rel) != Some(&entry);
+                self.entries.insert(rel, entry);
+            }
+            Err(e) => {
+                self.dirty |= self.entries.remove(&rel).is_some();
+                rom.sha1 = None;
+                rom.confidence = Confidence::Error;
+                rom.error = Some(e.to_string());
+            }
+        }
+        true
+    }
+
+    /// Hashes one card file, or trusts the cache when its stamp and sample
+    /// still match (unless `full`). Fails if the card was swapped or the file
+    /// changed while it was read.
+    fn read_identity(
+        &self,
+        pocket: &Pocket,
+        rel: &Path,
+        full: bool,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(Cached, Confidence)> {
+        self.identity.check(pocket)?;
+        let path = pocket.root().join(rel);
+        let before = Stamp::of(&path)?;
+        let mut file = File::open(&path).map_err(|e| Error::io(&path, e))?;
+        let sample = sample(&mut file, before.size, cancelled).map_err(|e| Error::io(&path, e))?;
+        let cached = self
+            .entries
+            .get(rel)
+            .filter(|c| !full && c.stamp == before && c.sample == sample);
+        let (sha1, confidence) = match cached {
+            Some(cached) => (cached.sha1, Confidence::Sampled),
+            None => {
                 file.rewind().map_err(|e| Error::io(&path, e))?;
                 let mut digest = Sha1::new();
                 hash::for_each_chunk(&mut file, |chunk| {
@@ -349,41 +381,18 @@ impl Index {
                 })
                 .map_err(|e| Error::io(&path, e))?;
                 (digest.finalize().into(), Confidence::Full)
-            };
-            self.identity.check(pocket)?;
-            if before != Stamp::of(&path)? {
-                return Err(Error::Changed { path: path.clone() });
             }
-            Ok((
-                Cached {
-                    stamp: before,
-                    sha1,
-                    sample,
-                },
-                confidence,
-            ))
-        })();
-        if cancelled() {
-            return false;
+        };
+        self.identity.check(pocket)?;
+        if before != Stamp::of(&path)? {
+            return Err(Error::Changed { path });
         }
-        match result {
-            Ok((entry, confidence)) => {
-                rom.sha1 = Some(hash::hex(&entry.sha1));
-                rom.stamp = entry.stamp;
-                rom.size = entry.stamp.size;
-                rom.confidence = confidence;
-                rom.error = None;
-                self.dirty |= self.entries.get(&rom.rel_path) != Some(&entry);
-                self.entries.insert(rom.rel_path.clone(), entry);
-            }
-            Err(e) => {
-                self.dirty |= self.entries.remove(&rom.rel_path).is_some();
-                rom.sha1 = None;
-                rom.confidence = Confidence::Error;
-                rom.error = Some(e.to_string());
-            }
-        }
-        true
+        let entry = Cached {
+            stamp: before,
+            sha1,
+            sample,
+        };
+        Ok((entry, confidence))
     }
 
     pub fn relocate(&mut self, pocket: &Pocket, from: &Path, to: &Path) -> Result<()> {

@@ -38,10 +38,10 @@ impl Plan for ImportPlan {
     }
 }
 
-fn invalid(message: impl Into<String>) -> Error {
-    Error::Usage {
-        message: message.into(),
-        hint: Some("Choose a PNG, JPEG or WebP image (up to 32 MiB and 8192 × 8192 pixels)".into()),
+fn invalid(source: &Path, reason: impl Into<String>) -> Error {
+    Error::UnsupportedImage {
+        path: source.to_path_buf(),
+        reason: reason.into(),
     }
 }
 
@@ -55,15 +55,15 @@ pub fn plan(lib: &Library, game_id: i64, source: &Path) -> Result<ImportPlan> {
         .read_to_end(&mut bytes)
         .map_err(|e| Error::io(source, e))?;
     if bytes.len() as u64 > MAX_BYTES {
-        return Err(invalid("Cover image is too large"));
+        return Err(invalid(source, "Cover image is too large"));
     }
-    let format =
-        image::guess_format(&bytes).map_err(|e| invalid(format!("Cannot identify image: {e}")))?;
+    let format = image::guess_format(&bytes)
+        .map_err(|e| invalid(source, format!("Cannot identify image: {e}")))?;
     let extension = match format {
         ImageFormat::Png => "png",
         ImageFormat::Jpeg => "jpg",
         ImageFormat::WebP => "webp",
-        _ => return Err(invalid("Unsupported cover image format")),
+        _ => return Err(invalid(source, "Unsupported cover image format")),
     };
     let mut reader = ImageReader::with_format(Cursor::new(&bytes), format);
     let mut limits = Limits::default();
@@ -73,7 +73,7 @@ pub fn plan(lib: &Library, game_id: i64, source: &Path) -> Result<ImportPlan> {
     reader.limits(limits);
     let decoded = reader
         .decode()
-        .map_err(|e| invalid(format!("Cannot decode cover image: {e}")))?;
+        .map_err(|e| invalid(source, format!("Cannot decode cover image: {e}")))?;
     let digest = format!("{:x}", Sha1::digest(&bytes));
     Ok(ImportPlan {
         previous: db::cover_record(lib.conn(), game_id)?,

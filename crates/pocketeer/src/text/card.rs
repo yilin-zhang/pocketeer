@@ -9,7 +9,7 @@ use pocketeer_core::{
 
 use super::{
     actions, bytes, covers_summary, import_actions, skipped_summary, source, staged_footer,
-    suggestion_footer,
+    suggestion_footer, warning_lines,
 };
 use crate::ops::{
     Mode,
@@ -388,6 +388,7 @@ pub fn import_report(r: &CardImportReport) -> String {
                 }
             }
             covers_summary(out, r.covers.as_ref(), r.staged.mode);
+            warning_lines(out, &r.warnings);
         },
     );
     out

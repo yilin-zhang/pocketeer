@@ -27,7 +27,7 @@ use serde::Serialize;
 use super::{
     Mode, Staged, apply_actions,
     context::Context,
-    library::{covers_after_import, suggest_standard_names},
+    library::{metadata_after_import, suggest_standard_names},
     load_dat, stage, stage_if, verdict,
 };
 use crate::output::Outcome;
@@ -228,6 +228,9 @@ pub struct ImportReport {
     pub not_found: Vec<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub covers: Option<FetchReport>,
+    /// Problems identifying or fetching covers for the new games.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl ImportReport {
@@ -237,6 +240,7 @@ impl ImportReport {
             staged: Staged::preview(plan),
             not_found: Vec::new(),
             covers: None,
+            warnings: Vec::new(),
         }
     }
 }
@@ -325,10 +329,12 @@ pub fn import(
         .result
         .as_ref()
         .map_or(0, |r| r.iter().map(|p| p.result.added).sum());
-    let covers = covers_after_import(ctx, &ctx.library()?, None, (added, req.covers), progress);
+    let metadata =
+        metadata_after_import(ctx, None, (added, req.covers), progress).unwrap_or_default();
     Ok(ImportReport {
         staged,
         not_found,
-        covers,
+        warnings: metadata.problems().map(str::to_owned).collect(),
+        covers: metadata.covers,
     })
 }

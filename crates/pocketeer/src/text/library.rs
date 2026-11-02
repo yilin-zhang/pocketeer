@@ -12,20 +12,118 @@ use pocketeer_core::{
 };
 
 use super::{
-    bytes, covers_summary, import_actions, plan_lines, skipped_summary, staged_footer,
-    suggestion_footer, table,
+    bytes, cover_news, covers_summary, import_actions, plan_lines, skipped_summary, staged_footer,
+    suggestion_footer, table, unmapped_hint, warning_lines,
 };
-use crate::ops::library::{
-    CoverImportReport, CoversStatusReport, ImportReport, InitReport, ListReport, RemoveReport,
-    RenameReport, StandardizeReport,
+use crate::ops::{
+    Mode,
+    library::{
+        CoverImportReport, CoversStatusReport, ImportReport, InitReport, ListReport,
+        MetadataReport, RemoveReport, RenameReport, StandardizeReport,
+    },
 };
 
 pub fn identify_text(r: &identify::Report) -> String {
-    let mut text = r.summary();
+    let mut out = String::new();
     for error in &r.errors {
-        let _ = write!(text, "\n{error}");
+        let _ = writeln!(out, "✗ {error}");
     }
-    text + "\n"
+    let mut counts: Vec<String> = identify_news(r)
+        .into_iter()
+        .map(|(n, what)| format!("{n} {what}"))
+        .collect();
+    for (n, what) in [
+        (r.unsupported, "on a platform without a DAT"),
+        (r.unchanged, "unchanged"),
+    ] {
+        if n > 0 {
+            counts.push(format!("{n} {what}"));
+        }
+    }
+    let total = r.matched + r.no_match + r.ambiguous + r.unsupported + r.unchanged;
+    let _ = match (total, r.errors.len()) {
+        (0, 0) => writeln!(out, "No ROMs to check."),
+        (_, 0) => writeln!(out, "✓ checked {total} ROM(s): {}", counts.join(", ")),
+        // The errors above already say everything.
+        (0, _) => Ok(()),
+        (_, e) => writeln!(
+            out,
+            "! checked {total} ROM(s): {}, {e} error(s)",
+            counts.join(", ")
+        ),
+    };
+    out
+}
+
+/// What a DAT check found that is worth mentioning: new results only.
+fn identify_news(r: &identify::Report) -> Vec<(usize, &'static str)> {
+    [
+        (r.matched, "identified"),
+        (r.no_match, "not in any DAT"),
+        (r.ambiguous, "matching several DAT entries"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .collect()
+}
+
+/// The TUI's background check, for its log: one summary line, which is
+/// what the status bar ends up showing. It names the first problem; when
+/// there are more, all of them are listed above it.
+pub fn metadata_status(r: &MetadataReport) -> String {
+    let mut out = String::new();
+    if r.problems().nth(1).is_some() {
+        for problem in r.problems() {
+            let _ = writeln!(out, "! {problem}");
+        }
+    }
+    if let Some(hint) = r
+        .covers
+        .as_ref()
+        .and_then(|c| unmapped_hint(c, Mode::Interactive))
+    {
+        let _ = writeln!(out, "{hint}");
+    }
+    let mut news = Vec::new();
+    if let Some(id) = &r.identify {
+        news.extend(
+            identify_news(id)
+                .into_iter()
+                .map(|(n, what)| format!("{n} ROM(s) {what}")),
+        );
+    }
+    if let Some(c) = &r.covers {
+        news.extend(
+            cover_news(c)
+                .into_iter()
+                .map(|(n, what)| format!("{n} cover(s) {what}")),
+        );
+    }
+    let checked = if r.covers.is_some() {
+        "DATs and covers checked"
+    } else {
+        "DATs checked"
+    };
+    // The status bar shows only this line, so it names the first problem.
+    let mut problems = r.problems();
+    let mark = match problems.next() {
+        Some(first) => {
+            let more = problems.count();
+            news.push(if more > 0 {
+                format!("{first} (and {more} more problem(s))")
+            } else {
+                first.to_string()
+            });
+            "!"
+        }
+        None => "✓",
+    };
+    let _ = if news.is_empty() {
+        writeln!(out, "{mark} {checked}, nothing new")
+    } else {
+        writeln!(out, "{mark} {checked}: {}", news.join(", "))
+    };
+    out
 }
 
 pub fn library_init(r: &InitReport) -> String {
@@ -112,6 +210,7 @@ pub fn library_import(r: &ImportReport) -> String {
                 let _ = writeln!(out, "✗ {}: {}", f.source.display(), f.error.message);
             }
             covers_summary(out, r.covers.as_ref(), r.staged.mode);
+            warning_lines(out, &r.warnings);
         },
     );
     out
@@ -300,17 +399,28 @@ pub fn covers_fetch_text(r: &FetchReport) -> String {
         }),
     );
     let s = &r.summary;
-    let _ = writeln!(
-        out,
-        "{} fetched, {} already had covers, {} not on libretro, {} error(s)",
-        s.fetched, s.already, s.not_found, s.errors
-    );
-    if !r.unsupported_platforms.is_empty() {
-        let _ = writeln!(
+    let counts: Vec<String> = [
+        (s.fetched, "downloaded"),
+        (s.already, "already there"),
+        (s.not_found, "not on libretro"),
+        (s.errors, "failed"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, what)| format!("{n} {what}"))
+    .collect();
+    let _ = if counts.is_empty() {
+        writeln!(out, "No games to fetch covers for.")
+    } else {
+        writeln!(
             out,
-            "No libretro mapping for: {} (pass --libretro-system \"<libretro system name>\" with --platform)",
-            r.unsupported_platforms.join(", ")
-        );
+            "{} covers: {}",
+            if s.errors > 0 { "!" } else { "✓" },
+            counts.join(", ")
+        )
+    };
+    if let Some(hint) = unmapped_hint(r, Mode::Applied) {
+        let _ = writeln!(out, "{hint}");
     }
     out
 }

@@ -347,6 +347,7 @@ mod tests {
             library: Some(tmp.path().join("library")),
             config: Some(tmp.path().join("config")),
             github_token: None,
+            ..Default::default()
         };
         let mut app = App::new(global, Picker::halfblocks());
         app.snapshot = Some(Snapshot {

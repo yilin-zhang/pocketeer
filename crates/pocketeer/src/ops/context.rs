@@ -2,7 +2,10 @@
 //! library, config. Setting precedence: flag > environment > config file >
 //! built-in default (flags and env are merged by clap already).
 
-use std::{cell::OnceCell, path::PathBuf};
+use std::{
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
 
 use serde::Serialize;
 
@@ -19,15 +22,18 @@ use pocketeer_core::{
 use crate::cli::Global;
 use pocketeer_core::config::KEYS;
 
+/// Cheap to clone: clones share the loaded config and platform names, so
+/// the TUI can hand one to every job without re-reading the config file.
+#[derive(Clone)]
 pub struct Context {
-    global: Global,
+    global: Arc<Global>,
     /// The TUI tracks the card itself and sets it here (`Some(None)` = no
     /// card); the CLI leaves this `None` and detects on demand.
     pocket: Option<Option<Pocket>>,
-    config: OnceCell<Result<Config>>,
+    config: Arc<OnceLock<Result<Config>>>,
     /// Platform names from the cached inventory only (never worth a network
     /// round-trip on their own); `None` when there is no cache.
-    platforms_cached: OnceCell<Option<Platforms>>,
+    platforms_cached: Arc<OnceLock<Option<Platforms>>>,
 }
 
 /// What talks to the network: the HTTP client and the download cache, plus
@@ -52,10 +58,10 @@ impl Net {
 impl Context {
     pub fn new(global: Global) -> Self {
         Context {
-            global,
+            global: Arc::new(global),
             pocket: None,
-            config: OnceCell::new(),
-            platforms_cached: OnceCell::new(),
+            config: Arc::default(),
+            platforms_cached: Arc::default(),
         }
     }
 
@@ -195,6 +201,21 @@ impl Context {
     pub fn library(&self) -> Result<Library> {
         Library::open(&self.library_path()?)
     }
+
+    /// Where libretro DATs come from.
+    pub fn dat_base(&self) -> &str {
+        nonempty(&self.global.dat_base).unwrap_or(pocketeer_core::catalog::libretro::DAT_BASE)
+    }
+
+    /// Where libretro thumbnails come from.
+    pub fn thumbnails_base(&self) -> &str {
+        nonempty(&self.global.thumbnails_base)
+            .unwrap_or(pocketeer_core::catalog::libretro::THUMBNAILS_BASE)
+    }
+}
+
+fn nonempty(value: &Option<String>) -> Option<&str> {
+    value.as_deref().filter(|v| !v.is_empty())
 }
 
 /// The stored load error, given back with its own code: errors don't clone,

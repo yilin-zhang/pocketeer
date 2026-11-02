@@ -28,7 +28,7 @@ use pocketeer_core::{
     transfer::{self, LocalMatch, Presence},
 };
 
-use super::pending::{Pending, Request};
+use super::pending::{Pending, Request, text_lines};
 use crate::{
     ops::{Mode, context::Context, cores as cores_cmd, library as library_cmd},
     text,
@@ -119,19 +119,24 @@ pub enum Msg {
     Planned(Result<Pending>),
     Progress(Event),
     Prepared(Vec<(String, Result<Prepared>)>),
-    /// What applying did, as text, and how many items failed.
-    Applied {
-        lines: Vec<String>,
-        failed: usize,
-    },
+    /// A main-worker job finished.
+    Applied(Outcome),
     /// Progress of the side worker (covers); doesn't block anything.
     SideProgress(Event),
     Fingerprint(u64),
     LibraryRefreshed(Result<Box<LibraryView>>),
-    SideDone {
-        lines: Vec<String>,
-        failed: usize,
-    },
+    /// A side-worker job finished.
+    SideDone(Outcome),
+}
+
+/// What a finished job has to say.
+pub struct Outcome {
+    /// For the log; the last line is what the status bar shows.
+    pub lines: Vec<String>,
+    /// Items that failed; non-zero opens a dialog with `lines`.
+    pub failed: usize,
+    /// The card or library changed, so the screens need a reload.
+    pub changed: bool,
 }
 
 pub struct Worker {
@@ -164,7 +169,7 @@ impl Worker {
                     let _ = msg_tx.send(Msg::SideProgress(e));
                 };
                 let msg = match run(&ctx, job, &mut progress) {
-                    Msg::Applied { lines, failed } => Msg::SideDone { lines, failed },
+                    Msg::Applied(outcome) => Msg::SideDone(outcome),
                     other => other,
                 };
                 if msg_tx.send(msg).is_err() {
@@ -201,21 +206,13 @@ impl Worker {
 fn run(ctx: &Context, job: Job, progress: &mut dyn FnMut(Event)) -> Msg {
     match job {
         Job::Identify => {
-            let report = match library_cmd::identify(ctx, None, progress) {
-                Ok(report) => report,
-                Err(e) => return failed(e),
-            };
-            let mut text = report.summary();
-            for error in report.errors {
-                text.push_str(&format!("\n{error}"));
-            }
-            if !ctx.offline() {
-                match library_cmd::covers_fetch(ctx, None, false, None, progress) {
-                    Ok(r) => text::covers_summary(&mut text, Some(&r), Mode::Interactive),
-                    Err(e) => text.push_str(&format!("\nCovers: {e}")),
-                }
-            }
-            applied(text, 0)
+            let report = library_cmd::refresh_metadata(ctx, None, true, progress);
+            Msg::Applied(Outcome {
+                lines: text_lines(&text::library::metadata_status(&report)),
+                // Background work: problems go to the log, not a dialog.
+                failed: 0,
+                changed: report.changed(),
+            })
         }
         Job::Verify {
             mut index,
@@ -265,11 +262,14 @@ fn run(ctx: &Context, job: Job, progress: &mut dyn FnMut(Event)) -> Msg {
     }
 }
 
+/// A job that changed the card or the library (or tried to): its text,
+/// and how many items failed.
 pub(super) fn applied(text: String, failed: usize) -> Msg {
-    Msg::Applied {
-        lines: text.lines().map(str::to_owned).collect(),
+    Msg::Applied(Outcome {
+        lines: text_lines(&text),
         failed,
-    }
+        changed: true,
+    })
 }
 
 pub(super) fn failed(e: Error) -> Msg {
@@ -283,17 +283,26 @@ fn fetch_covers(
     quiet: bool,
     progress: &mut dyn FnMut(Event),
 ) -> Msg {
-    match library_cmd::covers_fetch(ctx, platform.as_deref(), false, system.as_deref(), progress) {
-        Ok(r) if quiet && r.summary.fetched == 0 && r.summary.errors == 0 => {
-            applied(String::new(), 0)
-        }
-        Ok(r) => {
-            let mut text = String::new();
-            text::covers_summary(&mut text, Some(&r), Mode::Interactive);
-            applied(text, 0)
-        }
-        Err(e) => applied(format!("✗ covers: {e}"), 1),
+    let report = match library_cmd::covers_fetch(
+        ctx,
+        platform.as_deref(),
+        false,
+        system.as_deref(),
+        progress,
+    ) {
+        Ok(r) => r,
+        Err(e) => return applied(format!("✗ covers: {e}"), 1),
+    };
+    let changed = report.summary.fetched > 0;
+    let mut text = String::new();
+    if !(quiet && !changed && report.summary.errors == 0) {
+        text::covers_summary(&mut text, Some(&report), Mode::Interactive);
     }
+    Msg::Applied(Outcome {
+        lines: text_lines(&text),
+        failed: 0,
+        changed,
+    })
 }
 
 /// Library metadata; card presence is joined separately by content hash.

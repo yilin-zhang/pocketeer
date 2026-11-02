@@ -345,8 +345,8 @@ impl App {
             Some(Modal::Confirm { pending, .. }) => {
                 if pending.is_import() {
                     // New games: show each as it lands, fetch covers after the reload.
-                    self.importing = true;
-                    self.auto_metadata_done = false;
+                    self.auto.importing = true;
+                    self.auto.metadata_done = false;
                 }
                 self.submit("Applying", Job::Apply(pending));
             }

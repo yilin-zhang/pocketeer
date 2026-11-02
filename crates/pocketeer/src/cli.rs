@@ -29,7 +29,7 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
-#[derive(Debug, Args, Clone)]
+#[derive(Debug, Args, Clone, Default)]
 pub struct Global {
     /// Print machine-readable JSON to stdout instead of human output.
     #[arg(long, global = true)]
@@ -68,6 +68,14 @@ pub struct Global {
         hide_env_values = true
     )]
     pub github_token: Option<String>,
+
+    /// Where libretro DATs are downloaded from (tests and mirrors).
+    #[arg(long, global = true, hide = true, env = "POCKETEER_DAT_BASE")]
+    pub dat_base: Option<String>,
+
+    /// Where libretro thumbnails are downloaded from (tests and mirrors).
+    #[arg(long, global = true, hide = true, env = "POCKETEER_THUMBNAILS_BASE")]
+    pub thumbnails_base: Option<String>,
 }
 
 /// Shared by every command that changes the card or the library.

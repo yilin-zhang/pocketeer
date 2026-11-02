@@ -150,18 +150,6 @@ pub enum Error {
     #[error("can't determine your home directory")]
     NoHomeDir,
 
-    #[error("no device matches {spec}")]
-    DeviceNotFound { spec: String },
-
-    #[error("this card isn't registered as a device")]
-    NoDevice,
-
-    #[error("device {name} already exists{}", if id.is_empty() { String::new() } else { format!(" (id {id})") })]
-    DeviceExists { name: String, id: String },
-
-    #[error("the mounted card is device {card}, not {requested}")]
-    DeviceMismatch { card: String, requested: String },
-
     #[error("no save version with id {id}")]
     SaveVersionNotFound { id: i64 },
 
@@ -196,6 +184,19 @@ pub enum Error {
     /// A file's contents are not what the records say they should be.
     #[error("{}: {what}", path.display())]
     Mismatch { path: PathBuf, what: String },
+
+    /// A card-relative path that isn't where this kind of file lives.
+    #[error("{}: {reason}", path.display())]
+    InvalidPath { path: PathBuf, reason: String },
+
+    /// Renaming this ROM would move saves that another ROM in the same
+    /// folder may own (their names differ only by extension or case).
+    #[error("another ROM next to {} shares its save file name; rename one of them by hand", path.display())]
+    SaveOwnerAmbiguous { path: PathBuf },
+
+    /// A cover image pocketeer won't import.
+    #[error("{}: {reason}", path.display())]
+    UnsupportedImage { path: PathBuf, reason: String },
 
     /// The command line could not be parsed (CLI-level; exit 2).
     #[error("{message}")]
@@ -289,16 +290,6 @@ pub const CODES: &[(&str, &str)] = &[
     ("CONFIG_PARSE_ERROR", "config.toml is malformed"),
     ("CONFIG_KEY", "unknown config key"),
     ("NO_HOME_DIR", "home directory unknown; pass explicit paths"),
-    ("DEVICE_NOT_FOUND", "no device with that id or name"),
-    (
-        "NO_DEVICE",
-        "legacy device registration missing (reserved code)",
-    ),
-    ("DEVICE_EXISTS", "card or name already registered"),
-    (
-        "DEVICE_MISMATCH",
-        "mounted card belongs to a different device",
-    ),
     (
         "SAVE_VERSION_NOT_FOUND",
         "no save version with that id (see saves versions)",
@@ -323,6 +314,18 @@ pub const CODES: &[(&str, &str)] = &[
     (
         "FILE_CHANGED",
         "a file changed while it was being read or copied; retry",
+    ),
+    (
+        "INVALID_PATH",
+        "a card-relative path is outside the folders that kind of file lives in (details.reason)",
+    ),
+    (
+        "SAVE_OWNER_AMBIGUOUS",
+        "another ROM in the folder shares the save file name; rename by hand",
+    ),
+    (
+        "UNSUPPORTED_IMAGE",
+        "a cover image isn't a PNG, JPEG or WebP within the size limits (details.reason)",
     ),
     (
         "CONTENT_MISMATCH",
@@ -447,15 +450,6 @@ impl Error {
                 ("CONFIG_KEY", Some(json!({ "key": key, "known": known })))
             }
             Error::NoHomeDir => ("NO_HOME_DIR", None),
-            Error::DeviceNotFound { spec } => ("DEVICE_NOT_FOUND", Some(json!({ "spec": spec }))),
-            Error::NoDevice => ("NO_DEVICE", None),
-            Error::DeviceExists { name, id } => {
-                ("DEVICE_EXISTS", Some(json!({ "name": name, "id": id })))
-            }
-            Error::DeviceMismatch { card, requested } => (
-                "DEVICE_MISMATCH",
-                Some(json!({ "card": card, "requested": requested })),
-            ),
             Error::SaveVersionNotFound { id } => {
                 ("SAVE_VERSION_NOT_FOUND", Some(json!({ "id": id })))
             }
@@ -476,6 +470,17 @@ impl Error {
             Error::InvalidName { name, reason } => (
                 "INVALID_NAME",
                 Some(json!({ "name": name, "reason": reason })),
+            ),
+            Error::InvalidPath { path, reason } => (
+                "INVALID_PATH",
+                Some(json!({ "path": path, "reason": reason })),
+            ),
+            Error::SaveOwnerAmbiguous { path } => {
+                ("SAVE_OWNER_AMBIGUOUS", Some(json!({ "path": path })))
+            }
+            Error::UnsupportedImage { path, reason } => (
+                "UNSUPPORTED_IMAGE",
+                Some(json!({ "path": path, "reason": reason })),
             ),
             Error::Stale { what } => ("STALE_PLAN", Some(json!({ "what": what }))),
             Error::Changed { path } => ("FILE_CHANGED", Some(json!({ "path": path }))),
@@ -533,6 +538,9 @@ impl Error {
             }
             Error::Stale { .. } => Some("Run the command again to plan from the current state".into()),
             Error::Changed { .. } => Some("Retry once nothing else is writing to it".into()),
+            Error::UnsupportedImage { .. } => Some(
+                "Choose a PNG, JPEG or WebP image (up to 32 MiB and 8192 × 8192 pixels)".into(),
+            ),
             _ => None,
         }
     }
@@ -674,16 +682,6 @@ mod tests {
                 known: vec![],
             },
             Error::NoHomeDir,
-            Error::DeviceNotFound { spec: s.clone() },
-            Error::NoDevice,
-            Error::DeviceExists {
-                name: s.clone(),
-                id: s.clone(),
-            },
-            Error::DeviceMismatch {
-                card: s.clone(),
-                requested: s.clone(),
-            },
             Error::SaveVersionNotFound { id: 1 },
             Error::RomNotFound { spec: s.clone() },
             Error::RomAmbiguous {
@@ -697,6 +695,15 @@ mod tests {
             },
             Error::InvalidName {
                 name: s.clone(),
+                reason: s.clone(),
+            },
+            Error::InvalidPath {
+                path: p.clone(),
+                reason: s.clone(),
+            },
+            Error::SaveOwnerAmbiguous { path: p.clone() },
+            Error::UnsupportedImage {
+                path: p.clone(),
                 reason: s.clone(),
             },
             Error::Stale { what: s.clone() },

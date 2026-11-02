@@ -3,7 +3,7 @@
 //! variant (how to preview and apply it). Adding an operation means adding
 //! a variant here and a key in `app/keys.rs`; nothing else.
 
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 use pocketeer_core::{
     Result,
@@ -12,12 +12,16 @@ use pocketeer_core::{
     card::install::{Action, Prepared, UninstallPlan},
     library::{
         covers,
-        import::{ImportAction, ImportOptions, ImportPlan},
+        import::{ImportAction, ImportOptions, ImportPlan, apply_suggestions},
         remove::RemovePlan as LibraryRemovePlan,
         rename::RenamePlan,
     },
     plan::{Event, Plan},
-    transfer::{from_card::CardImportPlan, saves::SavesPlan, to_card::CopyPlan},
+    transfer::{
+        from_card::CardImportPlan,
+        saves::{SaveAction, SavesPlan},
+        to_card::CopyPlan,
+    },
 };
 
 use super::worker::{Msg, applied, failed};
@@ -55,13 +59,23 @@ pub enum Request {
         new_name: String,
     },
     CardImport(CardImportRequest),
+    /// Rewrite an import plan with the standard names the user accepted,
+    /// as (platform, ROM name) pairs.
+    AcceptNames {
+        import: Box<Pending>,
+        accepted: HashSet<(String, String)>,
+    },
 }
 
 /// A plan: shown in a dialog, then applied once confirmed.
 pub enum Pending {
     ImportCover(pocketeer_core::library::covers::import::ImportPlan),
     CardRename(pocketeer_core::card::rename::CardRenamePlan),
-    Install(Vec<Prepared>),
+    /// Cores to install, plus the requested ones that couldn't be prepared.
+    Install {
+        preps: Vec<Prepared>,
+        errors: Vec<String>,
+    },
     Remove(Vec<UninstallPlan>),
     Place(PlacePlan),
     Clean(CleanPlan),
@@ -157,6 +171,31 @@ impl Pending {
                 let (plan, _not_found) = card_cmd::plan_import(ctx, &args, progress)?;
                 Pending::CardImport(Box::new(plan))
             }
+            Request::AcceptNames {
+                mut import,
+                accepted,
+            } => {
+                let lib = ctx.library()?;
+                let accept = |platform: &str, name: &str| {
+                    accepted.contains(&(platform.to_string(), name.to_string()))
+                };
+                match import.as_mut() {
+                    Pending::Import(b) => {
+                        let platform = b.0.platform.clone();
+                        apply_suggestions(&lib, &mut b.1, |name| accept(&platform, name))?;
+                    }
+                    Pending::CardImport(c) => {
+                        for part in &mut c.parts {
+                            let platform = part.platform.clone();
+                            apply_suggestions(&lib, &mut part.plan, |name| {
+                                accept(&platform, name)
+                            })?;
+                        }
+                    }
+                    _ => {}
+                }
+                *import
+            }
         })
     }
 
@@ -174,7 +213,7 @@ impl Pending {
                 let result = card_cmd::apply_rename(ctx, &plan);
                 shown(plan, result, |s| text::card::rename_report(&s))
             }
-            Pending::Install(preps) => {
+            Pending::Install { preps, .. } => {
                 let pocket = match ctx.pocket() {
                     Ok(p) => p,
                     Err(e) => return failed(e),
@@ -249,6 +288,7 @@ impl Pending {
                         staged,
                         not_found: Vec::new(),
                         covers: None,
+                        warnings: Vec::new(),
                     })
                 })
             }
@@ -259,44 +299,62 @@ impl Pending {
                     text::library::library_import(&library_cmd::ImportReport {
                         staged,
                         covers: None,
+                        warnings: Vec::new(),
                     })
                 })
             }
         }
     }
 
-    /// How this plan is shown before it is applied: the dialog title and
-    /// body, rendered with the same text the CLI prints.
-    pub fn preview(&self) -> Preview {
+    /// How this plan is shown before it is applied: the dialog to open,
+    /// with its text rendered the same way the CLI prints it. A plan that
+    /// needs a choice first (save conflicts, standard names) opens that
+    /// dialog and comes back here once it is made.
+    pub fn preview(self) -> Preview {
         use Preview::*;
+        let confirm = |title: String, lines: Vec<String>, pending: Pending| Confirm {
+            title,
+            lines,
+            pending,
+        };
+        let info = |title: &str, lines: Vec<String>| Info {
+            title: title.into(),
+            lines,
+        };
         match self {
-            Pending::ImportCover(plan) => Confirm {
-                title: if plan.previous.as_ref().is_some_and(|p| p.rel_path.is_some()) {
+            Pending::ImportCover(plan) => confirm(
+                if plan.previous.as_ref().is_some_and(|p| p.rel_path.is_some()) {
                     "Replace this game's cover?".into()
                 } else {
                     "Import this game's cover?".into()
                 },
-                lines: text_lines(&text::library::cover_import(&Staged::preview(plan.clone()))),
-            },
-            Pending::CardRename(plan) => Confirm {
-                title: "Rename this AP ROM and its saves?".into(),
-                lines: text_lines(&text::card::rename_report(&Staged::preview(plan.clone()))),
-            },
-            Pending::Install(preps) => Confirm {
-                title: format!(
-                    "Install {} core(s)?",
-                    preps.iter().filter(|p| p.plan.changed).count()
-                ),
-                lines: text_lines(
-                    &preps
+                text_lines(&text::library::cover_import(&Staged::preview(plan.clone()))),
+                Pending::ImportCover(plan),
+            ),
+            Pending::CardRename(plan) => confirm(
+                "Rename this AP ROM and its saves?".into(),
+                text_lines(&text::card::rename_report(&Staged::preview(plan.clone()))),
+                Pending::CardRename(plan),
+            ),
+            Pending::Install { preps, errors } => {
+                let mut text: Vec<String> = errors.clone();
+                text.extend(
+                    preps
                         .iter()
-                        .map(|p| text::cores::install_plan_text(&p.plan))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                ),
-            },
-            Pending::Remove(plans) => Confirm {
-                title: format!(
+                        .map(|p| text::cores::install_plan_text(&p.plan)),
+                );
+                let lines = text_lines(&text.join("\n"));
+                match preps.iter().filter(|p| p.plan.changed).count() {
+                    0 => info("Nothing to do", lines),
+                    n => confirm(
+                        format!("Install {n} core(s)?"),
+                        lines,
+                        Pending::Install { preps, errors },
+                    ),
+                }
+            }
+            Pending::Remove(plans) => confirm(
+                format!(
                     "Remove {}?",
                     plans
                         .iter()
@@ -304,126 +362,151 @@ impl Pending {
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
-                lines: text_lines(
+                text_lines(
                     &plans
                         .iter()
                         .map(text::cores::remove_plan_text)
                         .collect::<Vec<_>>()
                         .join("\n"),
                 ),
-            },
-            Pending::Place(plan) => Confirm {
-                title: format!("Move {} file(s) into place?", plan.actions.len()),
-                lines: text_lines(&text::card::place_report(&Staged::preview(plan.clone()))),
-            },
+                Pending::Remove(plans),
+            ),
+            Pending::Place(plan) => confirm(
+                format!("Move {} file(s) into place?", plan.actions.len()),
+                text_lines(&text::card::place_report(&Staged::preview(plan.clone()))),
+                Pending::Place(plan),
+            ),
             Pending::Clean(plan) if plan.entries.is_empty() => {
                 Notice("No macOS junk on the card.".into())
             }
-            Pending::Clean(plan) => Confirm {
-                title: format!(
+            Pending::Clean(plan) => confirm(
+                format!(
                     "Delete {} junk item(s), {}?",
                     plan.entries.len(),
                     text::bytes(plan.bytes)
                 ),
-                lines: text_lines(&text::card::clean_report(&Staged::preview(plan.clone()))),
-            },
-            Pending::Files { label, actions } => Confirm {
-                title: format!("{label}?"),
-                lines: actions
+                text_lines(&text::card::clean_report(&Staged::preview(plan.clone()))),
+                Pending::Clean(plan),
+            ),
+            Pending::Files { label, actions } => confirm(
+                format!("{label}?"),
+                actions
                     .iter()
                     .filter_map(|a| match a {
                         Action::Remove { path, .. } => Some(format!("  - {}", path.display())),
                         _ => None,
                     })
                     .collect(),
-            },
+                Pending::Files { label, actions },
+            ),
             Pending::Copy(plan) => {
                 let lines = text_lines(&text::card::copy_report(&Staged::preview(plan.clone())));
-                if plan.changes() == 0 {
-                    Info {
-                        title: "Already on this card".into(),
+                match plan.changes() {
+                    0 => info("Already on this card", lines),
+                    n => confirm(
+                        format!("Copy {n} ROM(s) to this card?"),
                         lines,
-                    }
-                } else {
-                    Confirm {
-                        title: format!("Copy {} ROM(s) to this card?", plan.changes()),
-                        lines,
-                    }
+                        Pending::Copy(plan),
+                    ),
                 }
             }
-            Pending::Saves(_) => Flow,
-            Pending::Rename(plan) => Confirm {
-                title: format!("Rename to {}?", plan.new_name),
-                lines: text_lines(&text::library::library_rename(&Staged::preview(
-                    (**plan).clone(),
+            Pending::Saves(plan) => {
+                if let Some(index) = plan
+                    .actions
+                    .iter()
+                    .position(|a| matches!(a, SaveAction::Conflict { .. }))
+                {
+                    return SaveConflict { plan, index };
+                }
+                let lines = text_lines(&text::saves::saves_sync(&Staged::preview((*plan).clone())));
+                if plan.changes() == 0 {
+                    info("Save backup review", lines)
+                } else {
+                    confirm(
+                        format!(
+                            "Back up {}, restore {} save(s)?",
+                            plan.summary.pull, plan.summary.push
+                        ),
+                        lines,
+                        Pending::Saves(plan),
+                    )
+                }
+            }
+            Pending::Rename(plan) => confirm(
+                format!("Rename to {}?", plan.new_name),
+                text_lines(&text::library::library_rename(&Staged::preview(
+                    (*plan).clone(),
                 ))),
-            },
-            Pending::Standardize(plans) if plans.is_empty() => Info {
-                title: "Standard names".into(),
-                lines: vec![
+                Pending::Rename(plan),
+            ),
+            Pending::Standardize(plans) if plans.is_empty() => info(
+                "Standard names",
+                vec![
                     "Every game either has a standard name already or matches none.".into(),
                     "(Games verified against a DAT are never renamed.)".into(),
                 ],
-            },
-            Pending::Standardize(_) => Flow,
-            Pending::LibraryRemove(plan) => Confirm {
-                title: format!("Remove {} ROM(s) from the library?", plan.changes()),
-                lines: text_lines(&text::library::library_remove(&Staged::preview(
-                    (**plan).clone(),
+            ),
+            Pending::Standardize(plans) => PickRenames(plans),
+            Pending::LibraryRemove(plan) => confirm(
+                format!("Remove {} ROM(s) from the library?", plan.changes()),
+                text_lines(&text::library::library_remove(&Staged::preview(
+                    (*plan).clone(),
                 ))),
-            },
-            Pending::Import(_) | Pending::CardImport(_)
-                if !self.import_suggestions().is_empty() =>
+                Pending::LibraryRemove(plan),
+            ),
+            import @ (Pending::Import(_) | Pending::CardImport(_))
+                if !import.import_suggestions().is_empty() =>
             {
-                Flow
+                PickImportNames(import)
             }
             Pending::Import(b) => {
                 let lines = text_lines(&text::library::library_import(
                     &library_cmd::ImportReport::preview(b.1.clone()),
                 ));
-                if b.1.changes() == 0 {
-                    Info {
-                        title: "Nothing to import".into(),
+                match b.1.changes() {
+                    0 => info("Nothing to import", lines),
+                    n => confirm(
+                        format!("Import {n} ROM(s) into the library?"),
                         lines,
-                    }
-                } else {
-                    Confirm {
-                        title: format!("Import {} ROM(s) into the library?", b.1.changes()),
-                        lines,
-                    }
+                        Pending::Import(b),
+                    ),
                 }
             }
             Pending::CardImport(plan) => {
                 let lines = text_lines(&text::card::import_report(
-                    &card_cmd::ImportReport::preview((**plan).clone()),
+                    &card_cmd::ImportReport::preview((*plan).clone()),
                 ));
-                if plan.changes() == 0 {
-                    Info {
-                        title: "Nothing to import".into(),
+                match plan.changes() {
+                    0 => info("Nothing to import", lines),
+                    n => confirm(
+                        format!("Copy {n} ROM(s) into the library?"),
                         lines,
-                    }
-                } else {
-                    Confirm {
-                        title: format!("Copy {} ROM(s) into the library?", plan.changes()),
-                        lines,
-                    }
+                        Pending::CardImport(plan),
+                    ),
                 }
             }
         }
     }
 }
 
-/// What the App shows for a plan before applying it.
+/// The dialog a plan opens before it is applied.
 pub enum Preview {
     /// Nothing to do: one line for the status bar.
     Notice(String),
     /// Nothing to do, but worth reading.
     Info { title: String, lines: Vec<String> },
     /// Apply / Cancel.
-    Confirm { title: String, lines: Vec<String> },
-    /// The App runs its own dialog first (save conflicts, a checklist of
-    /// names) and comes back to `preview` afterwards.
-    Flow,
+    Confirm {
+        title: String,
+        lines: Vec<String>,
+        pending: Pending,
+    },
+    /// A save changed on both sides: which copy wins (`index` into the plan).
+    SaveConflict { plan: Box<SavesPlan>, index: usize },
+    /// Standard-name renames to tick.
+    PickRenames(Vec<RenamePlan>),
+    /// An import whose files match standard names: which names to take.
+    PickImportNames(Pending),
 }
 
 pub(super) fn text_lines(text: &str) -> Vec<String> {

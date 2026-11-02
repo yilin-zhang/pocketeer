@@ -22,19 +22,6 @@ pub struct Report {
     pub unchanged: usize,
     pub errors: Vec<String>,
 }
-impl Report {
-    pub fn summary(&self) -> String {
-        format!(
-            "DAT: {} matched, {} no match, {} ambiguous, {} unsupported, {} unchanged, {} errors",
-            self.matched,
-            self.no_match,
-            self.ambiguous,
-            self.unsupported,
-            self.unchanged,
-            self.errors.len()
-        )
-    }
-}
 
 pub struct Options<'a> {
     pub policy: Policy,
@@ -42,6 +29,20 @@ pub struct Options<'a> {
     pub platform: Option<&'a str>,
 }
 
+impl Report {
+    fn count(&mut self, status: Status) {
+        match status {
+            Status::Matched => self.matched += 1,
+            Status::NoMatch => self.no_match += 1,
+            Status::Ambiguous => self.ambiguous += 1,
+            Status::Unsupported => self.unsupported += 1,
+            Status::Unchecked | Status::Error => {}
+        }
+    }
+}
+
+/// Identifies every ROM in the library (or on one platform) against its
+/// platform's libretro DAT. One platform failing doesn't stop the others.
 pub fn run(
     lib: &mut Library,
     http: &Http,
@@ -49,13 +50,8 @@ pub fn run(
     opts: Options<'_>,
     progress: Progress<'_>,
 ) -> Result<Report> {
-    let Options {
-        policy,
-        base,
-        platform,
-    } = opts;
     let mut platforms = BTreeMap::<String, Vec<db::Rom>>::new();
-    for game in lib.list_games(platform, None)? {
+    for game in lib.list_games(opts.platform, None)? {
         platforms
             .entry(game.platform)
             .or_default()
@@ -67,121 +63,165 @@ pub fn run(
             "Identifying {platform} ROMs against DAT"
         )));
         let Some(system) = crate::catalog::dat_system(&platform) else {
-            for rom in &roms {
-                if rom.dat.status == Status::Matched {
+            mark_unsupported(lib, &roms, &mut report)?;
+            continue;
+        };
+        let catalog = match Catalog::load(http, cache, opts.base, system, opts.policy) {
+            Ok(c) => c,
+            Err(e) => {
+                let error = e.to_string();
+                mark_failed(lib, &roms, &error)?;
+                report.errors.push(format!("{platform}: {error}"));
+                continue;
+            }
+        };
+        if let Some(error) = &catalog.fallback {
+            report
+                .errors
+                .push(format!("{platform}: using cached DAT: {error}"));
+        }
+        for rom in &roms {
+            let state = match catalog.identify(rom) {
+                Verdict::New(state) => {
+                    report.count(state.status);
+                    state
+                }
+                // Same verdict; only whether the DAT came from a stale cache may differ.
+                Verdict::Current => {
+                    report.unchanged += 1;
+                    Identification {
+                        error: catalog.fallback.clone(),
+                        ..rom.dat.clone()
+                    }
+                }
+                Verdict::KeepManual => {
                     report.unchanged += 1;
                     continue;
                 }
-                if rom.dat.status == Status::Unsupported {
-                    report.unsupported += 1;
-                    continue;
-                }
-                save(
-                    lib,
-                    rom,
-                    &Identification {
-                        status: Status::Unsupported,
-                        checked_at: Some(fsutil::now_secs()),
-                        ..Default::default()
-                    },
-                )?;
+            };
+            save(lib, rom, &state)?;
+        }
+    }
+    Ok(report)
+}
+
+/// A platform without an automatic DAT: every ROM not already matched
+/// (by a manual DAT, say) is marked unsupported.
+fn mark_unsupported(lib: &mut Library, roms: &[db::Rom], report: &mut Report) -> Result<()> {
+    for rom in roms {
+        match rom.dat.status {
+            Status::Matched => report.unchanged += 1,
+            Status::Unsupported => report.unsupported += 1,
+            _ => {
+                let state = Identification {
+                    status: Status::Unsupported,
+                    checked_at: Some(fsutil::now_secs()),
+                    ..Default::default()
+                };
+                save(lib, rom, &state)?;
                 report.unsupported += 1;
             }
-            continue;
-        };
-        let source = libretro::dat_url(base, system);
-        let (dat, revision, fetched_source) =
-            match libretro::load_dat(http, cache, base, system, policy) {
-                Ok(l) => (l.dat, l.revision, l.source),
-                Err(e) => {
-                    let error = e.to_string();
-                    for rom in &roms {
-                        let mut state = rom.dat.clone();
-                        // Never discard an established result because the server is down.
-                        if matches!(
-                            state.status,
-                            Status::Unchecked | Status::Error | Status::Unsupported
-                        ) {
-                            state.status = Status::Error;
-                        }
-                        state.error = Some(error.clone());
-                        save(lib, rom, &state)?;
-                    }
-                    report.errors.push(format!("{platform}: {error}"));
-                    continue;
-                }
-            };
-        let fallback = match fetched_source {
+        }
+    }
+    Ok(())
+}
+
+/// The DAT couldn't be had: record the error, but never discard an
+/// established result because the server is down.
+fn mark_failed(lib: &mut Library, roms: &[db::Rom], error: &str) -> Result<()> {
+    for rom in roms {
+        let mut state = rom.dat.clone();
+        if matches!(
+            state.status,
+            Status::Unchecked | Status::Error | Status::Unsupported
+        ) {
+            state.status = Status::Error;
+        }
+        state.error = Some(error.to_string());
+        save(lib, rom, &state)?;
+    }
+    Ok(())
+}
+
+/// What a catalog says about one ROM.
+enum Verdict {
+    /// A fresh identification to store.
+    New(Identification),
+    /// Already checked against this revision.
+    Current,
+    /// Matched by a manual DAT that this catalog can't confirm: left alone.
+    KeepManual,
+}
+
+/// One platform's DAT, indexed by (size, SHA-1).
+struct Catalog {
+    source: String,
+    revision: String,
+    /// Why the cached copy was used instead of a fresh one, if it was.
+    fallback: Option<String>,
+    /// Every distinct (game name, ROM name) with that content.
+    by_content: HashMap<(u64, String), Vec<(String, String)>>,
+}
+
+impl Catalog {
+    fn load(http: &Http, cache: &Cache, base: &str, system: &str, policy: Policy) -> Result<Self> {
+        let loaded = libretro::load_dat(http, cache, base, system, policy)?;
+        let fallback = match loaded.source {
             crate::net::Source::Cache {
                 fallback_reason, ..
             } => fallback_reason,
             _ => None,
         };
-        if let Some(error) = &fallback {
-            report
-                .errors
-                .push(format!("{platform}: using cached DAT: {error}"));
-        }
-        let mut index = HashMap::<(u64, String), Vec<(&str, &str)>>::new();
-        for game in &dat.games {
-            for rom in &game.roms {
-                if let (Some(size), Some(sha1)) = (rom.size, &rom.sha1) {
-                    let names = index.entry((size, sha1.clone())).or_default();
-                    let name = (game.name.as_str(), rom.name.as_str());
+        let mut by_content = HashMap::<_, Vec<(String, String)>>::new();
+        for game in loaded.dat.games {
+            for rom in game.roms {
+                if let (Some(size), Some(sha1)) = (rom.size, rom.sha1) {
+                    let names = by_content.entry((size, sha1)).or_default();
+                    let name = (game.name.clone(), rom.name);
                     if !names.contains(&name) {
                         names.push(name);
                     }
                 }
             }
         }
-        for rom in &roms {
-            if rom.dat.revision.as_deref() == Some(&revision)
-                && rom.dat.source.as_deref() == Some(&source)
-            {
-                let mut state = rom.dat.clone();
-                if state.error != fallback {
-                    state.error = fallback.clone();
-                    save(lib, rom, &state)?;
-                }
-                report.unchanged += 1;
-                continue;
-            }
-            let matches = index.get(&(rom.size, rom.sha1.to_ascii_lowercase()));
-            let mut state = Identification {
-                revision: Some(revision.clone()),
-                source: Some(source.clone()),
-                checked_at: Some(fsutil::now_secs()),
-                error: fallback.clone(),
-                ..Default::default()
-            };
-            match matches.map(Vec::as_slice).unwrap_or_default() {
-                [(game, name)] => {
-                    state.status = Status::Matched;
-                    state.game_name = Some((*game).into());
-                    state.rom_name = Some((*name).into());
-                }
-                [] => {
-                    state.status = Status::NoMatch;
-                }
-                _ => {
-                    state.status = Status::Ambiguous;
-                }
-            }
-            // A manually supplied DAT remains valid if the automatic catalog lacks it.
-            if rom.dat.source.as_deref() == Some("manual") && state.status != Status::Matched {
-                report.unchanged += 1;
-                continue;
-            }
-            match state.status {
-                Status::Matched => report.matched += 1,
-                Status::NoMatch => report.no_match += 1,
-                Status::Ambiguous => report.ambiguous += 1,
-                _ => unreachable!("lookup has exactly three outcomes"),
-            }
-            save(lib, rom, &state)?;
-        }
+        Ok(Catalog {
+            source: libretro::dat_url(base, system),
+            revision: loaded.revision,
+            fallback,
+            by_content,
+        })
     }
-    Ok(report)
+
+    fn identify(&self, rom: &db::Rom) -> Verdict {
+        if rom.dat.revision.as_deref() == Some(&self.revision)
+            && rom.dat.source.as_deref() == Some(&self.source)
+        {
+            return Verdict::Current;
+        }
+        let mut state = Identification {
+            revision: Some(self.revision.clone()),
+            source: Some(self.source.clone()),
+            checked_at: Some(fsutil::now_secs()),
+            error: self.fallback.clone(),
+            ..Default::default()
+        };
+        let names = self
+            .by_content
+            .get(&(rom.size, rom.sha1.to_ascii_lowercase()));
+        match names.map(Vec::as_slice).unwrap_or_default() {
+            [(game, name)] => {
+                state.status = Status::Matched;
+                state.game_name = Some(game.clone());
+                state.rom_name = Some(name.clone());
+            }
+            [] => state.status = Status::NoMatch,
+            _ => state.status = Status::Ambiguous,
+        }
+        if rom.dat.source.as_deref() == Some("manual") && state.status != Status::Matched {
+            return Verdict::KeepManual;
+        }
+        Verdict::New(state)
+    }
 }
 
 fn save(lib: &mut Library, rom: &db::Rom, state: &Identification) -> Result<()> {

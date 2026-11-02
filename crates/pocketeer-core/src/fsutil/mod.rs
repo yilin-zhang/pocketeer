@@ -274,15 +274,6 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     })
 }
 
-/// Copies `src` to `dest` atomically.
-pub fn copy_file(src: &Path, dest: &Path) -> Result<()> {
-    write_via_temp(dest, |out| {
-        let mut f = std::fs::File::open(src).map_err(|e| Error::io(src, e))?;
-        std::io::copy(&mut f, out).map_err(|e| Error::io(src, e))?;
-        Ok(())
-    })
-}
-
 /// Opens a zip file on disk for reading.
 pub fn open_zip(archive: &Path) -> Result<zip::ZipArchive<std::fs::File>> {
     let file = std::fs::File::open(archive).map_err(|e| Error::io(archive, e))?;
@@ -302,16 +293,6 @@ pub fn with_zip_entry<T>(
         .by_name(inner)
         .map_err(|e| Error::zip(e, format!("{inner} in {}", archive.display())))?;
     read(&mut entry)
-}
-
-/// Extracts one entry of a zip archive to `dest` atomically.
-pub fn extract_zip_entry(archive: &Path, inner: &str, dest: &Path) -> Result<()> {
-    write_via_temp(dest, |out| {
-        with_zip_entry(archive, inner, |entry| {
-            std::io::copy(entry, out).map_err(|e| Error::io(archive, e))?;
-            Ok(())
-        })
-    })
 }
 
 #[cfg(test)]
@@ -335,8 +316,7 @@ mod tests {
         write_atomic(&dest, b"hello").unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
         let copy = tmp.path().join("copy.bin");
-        copy_file(&dest, &copy).unwrap();
-        assert_eq!(std::fs::read(&copy).unwrap(), b"hello");
+        write_atomic(&copy, &std::fs::read(&dest).unwrap()).unwrap();
         assert_eq!(size_of(&copy), 5);
         set_mtime(&copy, 1_000_000).unwrap();
         assert_eq!(mtime_secs(&copy).unwrap(), 1_000_000);

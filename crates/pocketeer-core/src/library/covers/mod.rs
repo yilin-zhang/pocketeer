@@ -108,16 +108,6 @@ pub struct FetchOptions {
     pub system: Option<String>,
 }
 
-/// Downloads covers for library games that don't have one yet.
-pub fn fetch(
-    lib: &Library,
-    http: &Http,
-    opts: &FetchOptions,
-    progress: Progress<'_>,
-) -> Result<FetchReport> {
-    fetch_with_base(lib, http, opts, libretro::THUMBNAILS_BASE, progress)
-}
-
 /// Concurrent requests while fetching covers.
 const PARALLEL: usize = 6;
 
@@ -138,8 +128,9 @@ fn fetch_one(http: &Http, url: &str, full: &Path) -> (CoverStatus, Option<String
     }
 }
 
-/// Like [`fetch`] with a different host (tests, mirrors).
-pub fn fetch_with_base(
+/// Downloads covers for library games that don't have one yet, from
+/// `base` ([`libretro::THUMBNAILS_BASE`] or a mirror).
+pub fn fetch(
     lib: &Library,
     http: &Http,
     opts: &FetchOptions,
@@ -284,7 +275,7 @@ mod tests {
             .with_body(b"old art")
             .create();
         let mut changed = false;
-        fetch_with_base(&lib, &Http::new(None).unwrap(), &FetchOptions { system: Some("Sys".into()), ..Default::default() }, &server.url(), &mut |event| {
+        fetch(&lib, &Http::new(None).unwrap(), &FetchOptions { system: Some("Sys".into()), ..Default::default() }, &server.url(), &mut |event| {
             if !changed && matches!(event, Event::Status(_)) {
                 lib.conn().execute("UPDATE roms SET dat_status='matched',dat_game_name='Identified title' WHERE game_id=?1", [game.id]).unwrap();
                 changed = true;
@@ -296,7 +287,7 @@ mod tests {
             .mock("GET", "/Sys/master/Named_Boxarts/Identified%20title.png")
             .with_body(b"correct art")
             .create();
-        fetch_with_base(
+        fetch(
             &lib,
             &Http::new(None).unwrap(),
             &FetchOptions {
@@ -329,7 +320,7 @@ mod tests {
             .expect(1)
             .create();
         let mut imported = false;
-        let report = fetch_with_base(
+        let report = fetch(
             &lib,
             &Http::new(None).unwrap(),
             &FetchOptions {
@@ -387,7 +378,7 @@ mod tests {
             retry_missing: false,
             system: Some("Sys".into()),
         };
-        let report = fetch_with_base(&lib, &http, &opts, &base, &mut |_| {}).unwrap();
+        let report = fetch(&lib, &http, &opts, &base, &mut |_| {}).unwrap();
         ok.assert();
         nf.assert();
         assert_eq!(report.summary.fetched, 1);
@@ -400,14 +391,14 @@ mod tests {
         assert!(path_for(&lib, miss).unwrap().is_none());
 
         // Second run: nothing attempted (ok kept, none not retried).
-        let report = fetch_with_base(&lib, &http, &opts, &base, &mut |_| {}).unwrap();
+        let report = fetch(&lib, &http, &opts, &base, &mut |_| {}).unwrap();
         assert!(report.items.is_empty());
         assert_eq!(report.summary.already, 1);
         assert_eq!(report.summary.not_found, 1);
 
         // Unsupported platform without an override is reported, not fatal.
         let all = FetchOptions::default();
-        let report = fetch_with_base(&lib, &http, &all, &base, &mut |_| {}).unwrap();
+        let report = fetch(&lib, &http, &all, &base, &mut |_| {}).unwrap();
         assert_eq!(report.unsupported_platforms, ["weird"]);
         let st = stats(&lib).unwrap();
         assert_eq!(st[0].with_cover, 1);
