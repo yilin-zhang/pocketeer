@@ -1,0 +1,491 @@
+// The "does this folder look like a Pocket" rule is adapted from Pocket Sync
+// (src-tauri/src/checks.rs).
+// Copyright (c) Neil Morrison — https://github.com/neil-morrison44/pocket-sync
+// Licensed under AGPL-3.0. Modified for pocketeer, 2026.
+
+pub mod bios;
+pub mod clean;
+pub mod cores;
+pub mod formats;
+pub mod install;
+pub mod rename;
+pub mod roms;
+
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+
+use crate::{Error, ErrorInfo, Result};
+
+use formats::{AnaloguePocketJson, firmware_version_from_byte};
+
+// ---------------------------------------------------------------------------
+// Layout. Every path pocketeer reads or writes on a card is spelled out
+// here and nowhere else.
+
+pub const ASSETS_DIR: &str = "Assets";
+pub const CORES_DIR: &str = "Cores";
+pub const SAVES_DIR: &str = "Saves";
+pub const PLATFORMS_DIR: &str = "Platforms";
+pub const SETTINGS_DIR: &str = "Settings";
+pub const PRESETS_DIR: &str = "Presets";
+pub const MEMORIES_DIR: &str = "Memories";
+/// GB Studio games live at the root, not under `Assets/`.
+pub const GB_STUDIO_DIR: &str = "GB Studio";
+/// The platform id pocketeer gives GB Studio `.pocket` files.
+pub const GB_STUDIO_PLATFORM: &str = "gbstudio";
+pub const POCKET_JSON: &str = "Analogue_Pocket.json";
+
+/// Entries that must exist at the root of a Pocket SD card.
+pub const ROOT_MARKERS: [&str; 3] = [POCKET_JSON, ASSETS_DIR, CORES_DIR];
+
+/// pocketeer's folder for disposable ROM cache and install staging.
+pub const POCKETEER_DIR: &str = ".pocketeer";
+
+/// Where save files and save states live.
+pub const SAVE_ROOTS: [&str; 4] = [
+    SAVES_DIR,
+    "GB Studio/Saves",
+    "Memories/Save States",
+    "Memories/Beta",
+];
+
+/// Folders whose metadata changes when a ROM, core or save is added,
+/// removed or renamed.
+pub const WATCHED_DIRS: [&str; 6] = [
+    ASSETS_DIR,
+    CORES_DIR,
+    SAVES_DIR,
+    GB_STUDIO_DIR,
+    "Memories/Beta",
+    "Memories/Save States",
+];
+
+/// `Assets/<platform>/<owner>`, where `owner` is `common` or a core id.
+pub fn assets_rel(platform: &str, owner: &str) -> PathBuf {
+    PathBuf::from(ASSETS_DIR).join(platform).join(owner)
+}
+
+/// `Saves/<platform>/<owner>`.
+pub fn saves_rel(platform: &str, owner: &str) -> PathBuf {
+    PathBuf::from(SAVES_DIR).join(platform).join(owner)
+}
+
+/// `Cores/<id>`.
+pub fn core_rel(core_id: &str) -> PathBuf {
+    PathBuf::from(CORES_DIR).join(core_id)
+}
+
+/// `Settings/<id>`.
+pub fn settings_rel(core_id: &str) -> PathBuf {
+    PathBuf::from(SETTINGS_DIR).join(core_id)
+}
+
+/// The folders that are a core's own: `Cores/`, `Presets/` and `Settings/`.
+pub fn core_dirs(core_id: &str) -> [PathBuf; 3] {
+    [
+        core_rel(core_id),
+        PathBuf::from(PRESETS_DIR).join(core_id),
+        settings_rel(core_id),
+    ]
+}
+
+/// A core's per-platform data: its own `Assets/` and `Saves/` folders.
+pub fn core_platform_dirs(platform: &str, core_id: &str) -> [PathBuf; 2] {
+    [assets_rel(platform, core_id), saves_rel(platform, core_id)]
+}
+
+/// Where a ROM the user adds for `platform` goes: the shared `common`
+/// folder, or the root `GB Studio/` folder for GB Studio games.
+pub fn rom_dir(platform: &str) -> PathBuf {
+    if platform == GB_STUDIO_PLATFORM {
+        PathBuf::from(GB_STUDIO_DIR)
+    } else {
+        assets_rel(platform, "common")
+    }
+}
+
+/// The folder holding the ordinary saves of a ROM at `rom_rel`:
+/// `Assets/<p>/<owner>/…` → `Saves/<p>/<owner>/…`, `GB Studio/x` →
+/// `GB Studio/Saves`. `None` for a path that is not a ROM location.
+pub fn save_dir_for(rom_rel: &Path) -> Option<PathBuf> {
+    if let Ok(relative) = rom_rel.strip_prefix(ASSETS_DIR) {
+        Some(PathBuf::from(SAVES_DIR).join(relative.parent()?))
+    } else if rom_rel.parent() == Some(Path::new(GB_STUDIO_DIR)) {
+        Some(PathBuf::from(GB_STUDIO_DIR).join(SAVES_DIR))
+    } else {
+        None
+    }
+}
+
+/// Where removable volumes show up, per OS. Each entry is a folder whose
+/// direct children are mount points (`/Volumes/POCKET`, `/media/me/POCKET`).
+pub fn mount_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if cfg!(target_os = "macos") {
+        dirs.push(PathBuf::from("/Volumes"));
+    } else if cfg!(target_os = "linux") {
+        if let Some(home) = dirs::home_dir()
+            && let Some(user) = home.file_name()
+        {
+            dirs.push(PathBuf::from("/media").join(user));
+            dirs.push(PathBuf::from("/run/media").join(user));
+        }
+        dirs.push(PathBuf::from("/media"));
+        dirs.push(PathBuf::from("/mnt"));
+    }
+    dirs
+}
+
+/// Windows has no mount folder; every drive letter is a candidate root.
+fn drive_roots() -> Vec<PathBuf> {
+    if !cfg!(target_os = "windows") {
+        return Vec::new();
+    }
+    (b'A'..=b'Z')
+        .map(|c| PathBuf::from(format!("{}:\\", c as char)))
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+/// Returns the [`ROOT_MARKERS`] missing from `path`; empty means it looks like a Pocket.
+pub fn missing_markers(path: &Path) -> Vec<String> {
+    ROOT_MARKERS
+        .iter()
+        .filter(|marker| !path.join(marker).exists())
+        .map(|marker| marker.to_string())
+        .collect()
+}
+
+/// A validated Pocket SD card root.
+#[derive(Debug, Clone)]
+pub struct Pocket {
+    root: PathBuf,
+}
+
+impl Pocket {
+    /// Opens an explicit path, checking that it looks like a Pocket SD card.
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        let root = path.into();
+        if !root.exists() {
+            return Err(Error::RootNotFound { path: root });
+        }
+        let missing = missing_markers(&root);
+        if !missing.is_empty() {
+            return Err(Error::NotAPocket {
+                path: root,
+                missing,
+            });
+        }
+        Ok(Pocket { root })
+    }
+
+    /// Finds the single mounted Pocket SD card among the OS's mount points.
+    pub fn detect() -> Result<Self> {
+        let dirs = mount_dirs();
+        let mut candidates: Vec<PathBuf> = dirs
+            .iter()
+            .filter(|d| d.is_dir())
+            .flat_map(|d| children(d))
+            .chain(drive_roots())
+            .filter(|path| missing_markers(path).is_empty())
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+        pick(candidates, dirs)
+    }
+
+    /// Finds the single Pocket SD card among the direct children of `mount_dir`.
+    #[cfg(test)]
+    pub(crate) fn detect_in(mount_dir: &Path) -> Result<Self> {
+        if !mount_dir.is_dir() {
+            return Err(Error::NotADirectory {
+                path: mount_dir.to_path_buf(),
+            });
+        }
+        let mut candidates: Vec<PathBuf> = children(mount_dir)
+            .filter(|path| missing_markers(path).is_empty())
+            .collect();
+        candidates.sort();
+        pick(candidates, vec![mount_dir.to_path_buf()])
+    }
+
+    /// Uses `root` if given, otherwise auto-detects.
+    pub fn open_or_detect(root: Option<&Path>) -> Result<Self> {
+        match root {
+            Some(path) => Self::open(path),
+            None => Self::detect(),
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn cores_dir(&self) -> PathBuf {
+        self.root.join(CORES_DIR)
+    }
+
+    pub fn assets_dir(&self) -> PathBuf {
+        self.root.join(ASSETS_DIR)
+    }
+
+    /// Absolute [`assets_rel`].
+    pub fn assets_owner_dir(&self, platform: &str, owner: &str) -> PathBuf {
+        self.root.join(assets_rel(platform, owner))
+    }
+
+    /// [`POCKETEER_DIR`] on this card.
+    pub fn pocketeer_dir(&self) -> PathBuf {
+        self.root.join(POCKETEER_DIR)
+    }
+
+    pub fn analogue_pocket_json(&self) -> PathBuf {
+        self.root.join(POCKET_JSON)
+    }
+}
+
+/// Readable direct subdirectories; unreadable volumes are skipped rather than
+/// failing the whole search.
+fn children(dir: &Path) -> impl Iterator<Item = PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+}
+
+fn pick(mut candidates: Vec<PathBuf>, searched: Vec<PathBuf>) -> Result<Pocket> {
+    match candidates.len() {
+        0 => Err(Error::SdNotFound { searched }),
+        1 => Ok(Pocket {
+            root: candidates.remove(0),
+        }),
+        _ => Err(Error::MultipleSdCards { candidates }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Status: firmware, disk space, installed cores.
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Status {
+    pub root: PathBuf,
+    pub product: Option<String>,
+    pub firmware: Option<Firmware>,
+    pub disk: Option<DiskUsage>,
+    pub installed_cores: usize,
+    pub broken_cores: usize,
+    /// Non-fatal problems found while gathering the status.
+    pub warnings: Vec<ErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Firmware {
+    /// Decoded version, e.g. `"2.2"`.
+    pub version: Option<String>,
+    pub byte: Option<u32>,
+    pub name: Option<String>,
+    pub build_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct DiskUsage {
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+}
+
+/// Gathers the status. Only fails if `Cores/` itself can't be read; problems
+/// with `Analogue_Pocket.json` or disk stats become warnings.
+pub fn status(pocket: &Pocket) -> Result<Status> {
+    Ok(Status::read(pocket, &cores::list_installed(pocket)?))
+}
+
+impl Status {
+    /// Reads firmware and disk status, reusing the caller's installed-core scan.
+    pub fn read(pocket: &Pocket, list: &cores::CoreList) -> Self {
+        let mut warnings = Vec::new();
+
+        let pocket_json = match AnaloguePocketJson::read(&pocket.analogue_pocket_json()) {
+            Ok(json) => json,
+            Err(err) => {
+                warnings.push(err.to_info());
+                AnaloguePocketJson::default()
+            }
+        };
+        let firmware = pocket_json.runtime().map(|rt| Firmware {
+            version: rt.byte.map(firmware_version_from_byte),
+            byte: rt.byte,
+            name: rt.name.clone(),
+            build_date: rt.build_date.clone(),
+        });
+
+        let disk = match (
+            fs2::total_space(pocket.root()),
+            fs2::available_space(pocket.root()),
+        ) {
+            (Ok(total_bytes), Ok(available_bytes)) => Some(DiskUsage {
+                total_bytes,
+                available_bytes,
+            }),
+            (Err(e), _) | (_, Err(e)) => {
+                warnings.push(crate::Error::io(pocket.root(), e).to_info());
+                None
+            }
+        };
+
+        Status {
+            root: pocket.root().to_path_buf(),
+            product: pocket_json.product,
+            firmware,
+            disk,
+            installed_cores: list.cores.len(),
+            broken_cores: list.broken.len(),
+            warnings,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn make_pocket(dir: &Path) {
+        fs::create_dir_all(dir.join("Assets")).unwrap();
+        fs::create_dir_all(dir.join("Cores")).unwrap();
+        fs::write(dir.join("Analogue_Pocket.json"), "{}").unwrap();
+    }
+
+    #[test]
+    fn open_rejects_folder_missing_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("Cores")).unwrap();
+        let err = Pocket::open(tmp.path()).unwrap_err();
+        assert_eq!(err.code(), "NOT_A_POCKET");
+        match err {
+            Error::NotAPocket { missing, .. } => {
+                assert_eq!(missing, vec!["Analogue_Pocket.json", "Assets"])
+            }
+            other => panic!("unexpected error {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_reports_missing_path() {
+        let err = Pocket::open("/definitely/not/here").unwrap_err();
+        assert_eq!(err.code(), "ROOT_NOT_FOUND");
+    }
+
+    #[test]
+    fn detect_finds_single_pocket() {
+        let mounts = tempfile::tempdir().unwrap();
+        fs::create_dir(mounts.path().join("USB_STICK")).unwrap();
+        make_pocket(&mounts.path().join("POCKET"));
+        let pocket = Pocket::detect_in(mounts.path()).unwrap();
+        assert_eq!(pocket.root(), mounts.path().join("POCKET"));
+    }
+
+    #[test]
+    fn detect_reports_none() {
+        let mounts = tempfile::tempdir().unwrap();
+        fs::create_dir(mounts.path().join("USB_STICK")).unwrap();
+        assert_eq!(
+            Pocket::detect_in(mounts.path()).unwrap_err().code(),
+            "SD_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn detect_refuses_to_guess_between_two() {
+        let mounts = tempfile::tempdir().unwrap();
+        make_pocket(&mounts.path().join("A"));
+        make_pocket(&mounts.path().join("B"));
+        let err = Pocket::detect_in(mounts.path()).unwrap_err();
+        assert_eq!(err.code(), "MULTIPLE_SD_CARDS");
+    }
+
+    #[test]
+    fn mount_dirs_match_the_host_os() {
+        let dirs = mount_dirs();
+        if cfg!(target_os = "macos") {
+            assert_eq!(dirs, [PathBuf::from("/Volumes")]);
+        } else if cfg!(target_os = "linux") {
+            assert!(dirs.contains(&PathBuf::from("/mnt")));
+        } else {
+            assert!(dirs.is_empty());
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CardIdentity {
+    root: PathBuf,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume_serial: u32,
+}
+
+impl CardIdentity {
+    pub(crate) fn read(pocket: &Pocket) -> Result<Self> {
+        let root = Pocket::open(pocket.root())?.root().to_path_buf();
+        #[cfg(unix)]
+        let meta = std::fs::metadata(&root).map_err(|e| Error::io(&root, e))?;
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Ok(Self {
+            root,
+            #[cfg(unix)]
+            device: meta.dev(),
+            #[cfg(unix)]
+            inode: meta.ino(),
+            #[cfg(windows)]
+            volume_serial: volume_serial(pocket.root())?,
+        })
+    }
+
+    /// Fails with [`Error::Stale`] unless the mounted card is still the one
+    /// this identity was taken from (not unplugged, swapped or gone). Every
+    /// apply step that follows a plan made against a card starts with this.
+    pub(crate) fn check(&self, pocket: &Pocket) -> Result<()> {
+        if Self::read(pocket)? == *self {
+            Ok(())
+        } else {
+            Err(Error::Stale {
+                what: "the card".into(),
+            })
+        }
+    }
+}
+
+#[cfg(windows)]
+fn volume_serial(path: &Path) -> Result<u32> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut mount = vec![0u16; 32768];
+    let mut serial = 0;
+    // Both buffers are NUL-terminated and remain alive throughout these calls.
+    let success = unsafe {
+        GetVolumePathNameW(path_wide.as_ptr(), mount.as_mut_ptr(), mount.len() as u32) != 0
+            && GetVolumeInformationW(
+                mount.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                &mut serial,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            ) != 0
+    };
+    if !success {
+        return Err(Error::io(path, std::io::Error::last_os_error()));
+    }
+    Ok(serial)
+}

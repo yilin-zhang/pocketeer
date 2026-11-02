@@ -97,11 +97,11 @@ impl App {
         let mut rows = Vec::new();
         for (ci, core) in snap.bios.cores.iter().enumerate() {
             for (fi, f) in core.files.iter().enumerate() {
-                let present = matches!(f.status, required::FileStatus::Present);
+                let present = matches!(f.status, bios::FileStatus::Present);
                 if self.bios.filter == BiosFilter::Problems && present {
                     continue;
                 }
-                if pane::matches(q.as_deref(), &[&core.core_id, &f.path.to_string_lossy()]) {
+                if matches(q.as_deref(), &[&core.core_id, &f.path.to_string_lossy()]) {
                     rows.push((ci, fi));
                 }
             }
@@ -110,7 +110,7 @@ impl App {
     }
 
     /// The selected required file and the core that wants it.
-    pub fn selected_bios(&self) -> Option<(&required::CoreRequirements, &required::RequiredFile)> {
+    pub fn selected_bios(&self) -> Option<(&bios::CoreRequirements, &bios::RequiredFile)> {
         let (ci, fi) = *self.bios.selected()?;
         let core = self.card_view()?.bios.cores.get(ci)?;
         Some((core, core.files.get(fi)?))
@@ -124,7 +124,7 @@ impl App {
         let hit = |id: &str, platforms: &[String]| {
             let mut fields: Vec<&str> = vec![id];
             fields.extend(platforms.iter().map(String::as_str));
-            pane::matches(q.as_deref(), &fields)
+            matches(q.as_deref(), &fields)
         };
         let filter = self.cores.filter;
         let mut rows: Vec<CoreRow> = Vec::new();
@@ -205,10 +205,10 @@ impl App {
                     GameFilter::NotOnCard => g
                         .matches
                         .iter()
-                        .all(|m| m.presence == pocketeer_core::library::matching::Presence::Local),
+                        .all(|m| m.presence == pocketeer_core::transfer::Presence::Local),
                     GameFilter::CardOnly => false,
                 };
-                if keep && pane::matches(q.as_deref(), &[&g.game.name, &g.game.platform]) {
+                if keep && matches(q.as_deref(), &[&g.game.name, &g.game.platform]) {
                     rows.push((
                         g.game.platform.to_lowercase(),
                         g.game.name.to_lowercase(),
@@ -222,15 +222,14 @@ impl App {
         {
             for (i, o) in card.card_roms.iter().enumerate() {
                 let presence = card.card_presence[i];
-                if presence == pocketeer_core::library::matching::Presence::Both {
+                if presence == pocketeer_core::transfer::Presence::Both {
                     continue;
                 }
-                if f == GameFilter::CardOnly
-                    && presence != pocketeer_core::library::matching::Presence::Card
+                if f == GameFilter::CardOnly && presence != pocketeer_core::transfer::Presence::Card
                 {
                     continue;
                 }
-                if pane::matches(q.as_deref(), &[&o.name, &o.platform]) {
+                if matches(q.as_deref(), &[&o.name, &o.platform]) {
                     rows.push((
                         o.platform.to_lowercase(),
                         o.name.to_lowercase(),
@@ -270,7 +269,7 @@ impl App {
     }
 
     /// Required-file problems for one core, from the last snapshot.
-    pub fn bios_for(&self, core_id: &str) -> Vec<&required::RequiredFile> {
+    pub fn bios_for(&self, core_id: &str) -> Vec<&bios::RequiredFile> {
         self.card_view()
             .map(|s| {
                 s.bios
@@ -278,7 +277,7 @@ impl App {
                     .iter()
                     .filter(|c| c.core_id == core_id)
                     .flat_map(|c| c.files.iter())
-                    .filter(|f| !matches!(f.status, required::FileStatus::Present))
+                    .filter(|f| !matches!(f.status, bios::FileStatus::Present))
                     .collect()
             })
             .unwrap_or_default()
@@ -318,11 +317,9 @@ impl App {
 mod tests {
     use super::*;
     use pocketeer_core::{
-        library::{
-            db::Game,
-            matching::{CardMatch, LocalMatch, Presence},
-        },
-        roms::index::Confidence,
+        card::roms::Confidence,
+        library::db::Game,
+        transfer::{CardMatch, LocalMatch, Presence},
     };
 
     fn game(id: i64, name: &str) -> GameRow {

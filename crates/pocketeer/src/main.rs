@@ -1,17 +1,23 @@
+//! Entry point: parse the command line, run the matching `ops` function,
+//! print its report through `text` (or as JSON). No subcommand opens the TUI.
+
 mod cli;
-mod commands;
-mod context;
-mod human;
+mod ops;
 mod output;
+mod text;
 mod tui;
 
 use std::{io::IsTerminal, process::ExitCode};
 
 use clap::{CommandFactory, Parser};
+use pocketeer_core::plan::Event;
 
 use crate::{
-    cli::{Cli, Command, ConfigCommand, InventoryCommand},
-    context::Context,
+    cli::{
+        BiosCommand, CardCommand, Cli, Command, ConfigCommand, CoresCommand, CoversCommand,
+        InventoryCommand, LibraryCommand, SavesCommand,
+    },
+    ops::{card, context::Context, cores, library, saves},
     output::Output,
 };
 
@@ -49,23 +55,259 @@ fn main() -> ExitCode {
         return out.emit::<()>(Err(e), |_| String::new());
     }
 
-    use commands::{card, cores, library, meta, saves};
     match command {
-        Command::Status => out.emit(card::status(&ctx), card::status_text),
+        Command::Status => out.emit(card::status(&ctx), text::card::status_text),
         Command::Inventory(InventoryCommand::Refresh) => {
-            out.emit(card::inventory_refresh(&ctx), card::refresh_text)
+            out.emit(card::inventory_refresh(&ctx), text::card::refresh_text)
         }
-        Command::Bios(cmd) => card::bios(&ctx, &out, cmd, &mut progress),
-        Command::Clean { system, apply } => {
-            out.emit_outcome(card::clean(&ctx, system, apply), card::clean_report)
+        Command::Bios(cmd) => run_bios(&ctx, &out, cmd, &mut progress),
+        Command::Clean { system, apply } => out.emit_outcome(
+            card::clean(&ctx, system, apply.into()),
+            text::card::clean_report,
+        ),
+        Command::Cores(cmd) => run_cores(&ctx, &out, cmd, &mut progress),
+        Command::Library(cmd) => run_library(&ctx, &out, cmd, &mut progress),
+        Command::Covers(cmd) => run_covers(&ctx, &out, cmd, &mut progress),
+        Command::Card(cmd) => run_card(&ctx, &out, cmd, &mut progress),
+        Command::Saves(cmd) => run_saves(&ctx, &out, cmd, &mut progress),
+        Command::Config(cmd) => run_config(&ctx, &out, cmd),
+        Command::Docs { path } => out.emit(cli::docs(&path), text::docs_text),
+    }
+}
+
+fn run_bios(
+    ctx: &Context,
+    out: &Output,
+    cmd: BiosCommand,
+    progress: &mut dyn FnMut(Event),
+) -> ExitCode {
+    match cmd {
+        BiosCommand::Check { ids, present } => out.emit(
+            card::bios_check(ctx, &ids, present),
+            text::card::bios_report,
+        ),
+        BiosCommand::Place { apply } => out.emit_outcome(
+            card::bios_place(ctx, apply.into(), progress),
+            text::card::place_report,
+        ),
+    }
+}
+
+fn run_cores(
+    ctx: &Context,
+    out: &Output,
+    cmd: CoresCommand,
+    progress: &mut dyn FnMut(Event),
+) -> ExitCode {
+    match cmd {
+        CoresCommand::List { outdated } => {
+            out.emit(cores::list(ctx, outdated), text::cores::core_list)
         }
-        Command::Cores(cmd) => cores::run(&ctx, &out, cmd, &mut progress),
-        Command::Library(cmd) => library::run(&ctx, &out, cmd, &mut progress),
-        Command::Covers(cmd) => library::covers(&ctx, &out, cmd, &mut progress),
-        Command::Card(cmd) => card::roms(&ctx, &out, cmd, &mut progress),
-        Command::Saves(cmd) => saves::run(&ctx, &out, cmd, &mut progress),
-        Command::Config(cmd) => meta::config(&ctx, &out, cmd),
-        Command::Docs { path } => out.emit(meta::docs(&path), meta::docs_text),
+        CoresCommand::Search {
+            query,
+            platform,
+            installed,
+        } => out.emit(
+            cores::search(ctx, query.as_deref(), platform.as_deref(), installed),
+            text::cores::search_text,
+        ),
+        CoresCommand::Info { id } => out.emit(cores::info(ctx, &id), text::cores::core_info),
+        CoresCommand::Install(args) => {
+            let mode = args.apply.into();
+            out.emit_outcome(
+                cores::install(ctx, &args.into(), mode, progress),
+                text::cores::install_report,
+            )
+        }
+        CoresCommand::Update {
+            ids,
+            all,
+            keep_platforms,
+            apply,
+        } => out.emit_outcome(
+            cores::update(ctx, &ids, all, keep_platforms, apply.into(), progress),
+            text::cores::install_report,
+        ),
+        CoresCommand::Remove { ids, purge, apply } => out.emit_outcome(
+            cores::remove(ctx, &ids, purge, apply.into(), progress),
+            text::cores::remove_report,
+        ),
+    }
+}
+
+fn run_library(
+    ctx: &Context,
+    out: &Output,
+    cmd: LibraryCommand,
+    progress: &mut dyn FnMut(Event),
+) -> ExitCode {
+    match cmd {
+        LibraryCommand::Identify { platform } => out.emit_outcome(
+            library::identify(ctx, platform.as_deref(), progress),
+            text::library::identify_text,
+        ),
+        LibraryCommand::Init => out.emit(library::init(ctx), text::library::library_init),
+        LibraryCommand::Status => out.emit(library::status(ctx), text::library::library_status),
+        LibraryCommand::Import(args) => {
+            let mode = args.apply.into();
+            out.emit_outcome(
+                library::import(ctx, &args.into(), mode, progress),
+                text::library::library_import,
+            )
+        }
+        LibraryCommand::List { platform, query } => out.emit(
+            library::list(ctx, platform.as_deref(), query.as_deref()),
+            text::library::library_list,
+        ),
+        LibraryCommand::Rename {
+            rom,
+            new_name,
+            platform,
+            apply,
+        } => out.emit_outcome(
+            library::rename(ctx, platform.as_deref(), &rom, &new_name, apply.into()),
+            text::library::library_rename,
+        ),
+        LibraryCommand::Remove {
+            roms,
+            platform,
+            apply,
+        } => out.emit_outcome(
+            library::remove(ctx, platform.as_deref(), &roms, apply.into()),
+            text::library::library_remove,
+        ),
+        LibraryCommand::Standardize { platform, apply } => out.emit_outcome(
+            library::standardize(ctx, platform.as_deref(), apply.into()),
+            text::library::library_standardize,
+        ),
+    }
+}
+
+fn run_covers(
+    ctx: &Context,
+    out: &Output,
+    cmd: CoversCommand,
+    progress: &mut dyn FnMut(Event),
+) -> ExitCode {
+    match cmd {
+        CoversCommand::Import {
+            rom,
+            image,
+            platform,
+            apply,
+        } => out.emit_outcome(
+            library::import_cover(ctx, platform.as_deref(), &rom, &image, apply.into()),
+            text::library::cover_import,
+        ),
+        CoversCommand::Fetch {
+            platform,
+            retry,
+            libretro_system,
+        } => out.emit(
+            library::covers_fetch(
+                ctx,
+                platform.as_deref(),
+                retry,
+                libretro_system.as_deref(),
+                progress,
+            ),
+            text::library::covers_fetch_text,
+        ),
+        CoversCommand::Status => out.emit(
+            library::covers_status(ctx),
+            text::library::covers_status_text,
+        ),
+    }
+}
+
+fn run_card(
+    ctx: &Context,
+    out: &Output,
+    cmd: CardCommand,
+    progress: &mut dyn FnMut(Event),
+) -> ExitCode {
+    match cmd {
+        CardCommand::Rename {
+            path,
+            new_name,
+            apply,
+        } => {
+            let result = card::plan_rename(ctx, &path, &new_name)
+                .and_then(|plan| ops::stage(apply.into(), plan, |p| card::apply_rename(ctx, p)));
+            out.emit_outcome(result, text::card::rename_report)
+        }
+        CardCommand::Copy {
+            roms,
+            platform,
+            apply,
+        } => {
+            let result =
+                card::plan_copy(ctx, platform.as_deref(), &roms, progress).and_then(|plan| {
+                    ops::stage(apply.into(), plan, |p| card::apply_copy(ctx, p, progress))
+                });
+            out.emit_outcome(result, text::card::copy_report)
+        }
+        CardCommand::Import(args) => {
+            let mode = args.apply.into();
+            out.emit_outcome(
+                card::import(ctx, &args.into(), mode, progress),
+                text::card::import_report,
+            )
+        }
+        CardCommand::List => {
+            out.emit_outcome(card::roms(ctx, None, progress), text::card::roms_text)
+        }
+        CardCommand::Check { full } => {
+            out.emit_outcome(card::roms(ctx, Some(full), progress), text::card::roms_text)
+        }
+    }
+}
+
+fn run_saves(
+    ctx: &Context,
+    out: &Output,
+    cmd: SavesCommand,
+    progress: &mut dyn FnMut(Event),
+) -> ExitCode {
+    match cmd {
+        SavesCommand::Backup {
+            no_states,
+            conflicts,
+            apply,
+        } => out.emit_outcome(
+            saves::backup(
+                ctx,
+                !no_states,
+                conflicts.map(Into::into),
+                apply.into(),
+                progress,
+            ),
+            text::saves::saves_sync,
+        ),
+        SavesCommand::Restore {
+            path,
+            version,
+            apply,
+        } => out.emit_outcome(
+            saves::restore(ctx, &path, version, apply.into(), progress),
+            text::saves::saves_sync,
+        ),
+        SavesCommand::List => out.emit(saves::list(ctx), text::saves::saves_list),
+        SavesCommand::Versions { path } => {
+            out.emit(saves::versions(ctx, &path), text::saves::saves_versions)
+        }
+    }
+}
+
+fn run_config(ctx: &Context, out: &Output, cmd: ConfigCommand) -> ExitCode {
+    use ops::context::{config_get, config_path, config_set};
+    match cmd {
+        ConfigCommand::Path => out.emit(config_path(ctx), text::config_path_text),
+        ConfigCommand::Get { key } => out.emit(config_get(ctx, key.as_deref()), text::config_show),
+        ConfigCommand::Set { key, value } => {
+            out.emit(config_set(ctx, &key, Some(&value)), text::config_show)
+        }
+        ConfigCommand::Unset { key } => out.emit(config_set(ctx, &key, None), text::config_show),
     }
 }
 

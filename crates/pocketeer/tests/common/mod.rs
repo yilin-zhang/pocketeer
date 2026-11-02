@@ -12,7 +12,7 @@ use std::{
 };
 
 use pocketeer_core::{
-    inventory::{CORES_URL, PLATFORMS_URL},
+    catalog::inventory::{CORES_URL, PLATFORMS_URL},
     net::Cache,
 };
 use serde_json::Value;

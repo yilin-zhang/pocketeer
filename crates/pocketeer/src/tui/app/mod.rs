@@ -1,12 +1,12 @@
 //! TUI state and key handling. Rendering is in `ui.rs`; the actions behind
-//! the keys are in `actions.rs` / `library.rs` / `dialogs.rs`; the per-tab
-//! table state is `pane.rs`.
+//! the keys are in `actions.rs` / `dialogs.rs`; the data types (tabs,
+//! filters, the per-tab table, dialogs) are `model.rs`.
 //!
 //! Four tabs, Calibre-style: one list per kind of thing (cores, required
 //! files, games) with a text filter and a "what to show" filter, rather than
 //! one tab per source. Row lists are computed once per change
 //! (`rebuild_rows`), not per frame. Everything that touches the card or the
-//! network runs on the worker threads in `jobs.rs`; the app only submits
+//! network runs on the worker threads in `worker.rs`; the app only submits
 //! jobs and reacts to their messages.
 
 use std::{
@@ -18,11 +18,11 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use pocketeer_core::{
     Error, ErrorInfo, Pocket,
-    cores::{self, CoreList, SearchFilter},
+    card::bios,
+    card::cores::{self, CoreList, SearchFilter},
+    card::roms::CardRom,
     library::rename::RenamePlan,
-    progress::Event,
-    required,
-    roms::index::CardRom,
+    plan::{Event, Plan},
 };
 use ratatui::layout::Rect;
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
@@ -30,34 +30,29 @@ use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 mod actions;
 mod dialogs;
 mod keys;
-mod library;
 mod model;
-mod pane;
-mod path_worker;
+mod path_input;
+pub use path_input::Suggestion;
 mod rows;
 
 pub use keys::SUGGESTIONS_SHOWN;
 pub use model::*;
-pub use pane::{Cycle, Pane, PaneOps};
 
-use super::jobs::{
-    CardSnapshot, GameRow, Job, LibraryView, Msg, Pending, Request, Snapshot, Worker,
+use super::{
+    pending::{Pending, Preview, Request, text_lines},
+    worker::{CardSnapshot, GameRow, Job, LibraryView, Msg, Snapshot, Worker},
 };
 use crate::{
     cli::Global,
-    commands::{
-        Staged, card as card_cmd, card_import as card_import_cmd,
-        card_import::ImportReport as CardImportReport, library as library_cmd,
-        library::ImportReport as LibraryImportReport, library::StandardizePlan, saves as saves_cmd,
-    },
-    context::Context,
-    human,
+    ops::context::Context,
+    ops::{Staged, library::StandardizePlan},
+    text,
 };
 
 pub struct App {
     global: Global,
     worker: Worker,
-    path_worker: path_worker::PathWorker,
+    path_input: path_input::PathLookup,
     pub pocket: Option<Pocket>,
     pub pocket_error: Option<ErrorInfo>,
     pub snapshot: Option<Snapshot>,
@@ -70,14 +65,7 @@ pub struct App {
     covers: HashMap<PathBuf, StatefulProtocol>,
     library_path: Option<PathBuf>,
     pub modal: Option<Modal>,
-    /// Current background status line, if a card-touching job is running.
-    /// Keys that change things are ignored while it is set.
-    pub busy: Option<String>,
-    pub download_pct: Option<u64>,
-    /// Status of the side worker (cover fetching); never blocks keys.
-    pub side_status: Option<String>,
-    /// Progress of the current main-worker job, when it reports steps.
-    pub busy_step: Option<(usize, usize)>,
+    pub busy: Busy,
     pub hit: HitAreas,
     /// Pane divider positions; dragged with the mouse.
     pub splits: Splits,
@@ -93,10 +81,32 @@ pub struct App {
     /// tab after each step (at most one refresh in flight).
     importing: bool,
     refresh_pending: bool,
-    verification_next: usize,
-    verification_inflight: bool,
-    snapshot_epoch: u64,
-    pub rom_status: Option<String>,
+    verify: Verification,
+}
+
+/// What the status line shows while workers run.
+#[derive(Default)]
+pub struct Busy {
+    /// The main worker's job, if one is running. Keys that change things
+    /// are ignored while it is set.
+    pub main: Option<String>,
+    /// Progress of that job, when it reports steps.
+    pub step: Option<(usize, usize)>,
+    pub download_pct: Option<u64>,
+    /// The side worker (covers, DAT checks); never blocks keys.
+    pub side: Option<String>,
+    /// Background ROM verification ("ROM check 3/12").
+    pub roms: Option<String>,
+}
+
+/// Where the one-file-at-a-time ROM verification is.
+#[derive(Default)]
+struct Verification {
+    next: usize,
+    inflight: bool,
+    /// Worker epoch of the snapshot being verified; results from an older
+    /// one are dropped.
+    epoch: u64,
 }
 
 impl App {
@@ -115,7 +125,7 @@ impl App {
         };
         App {
             worker: Worker::spawn(),
-            path_worker: path_worker::PathWorker::spawn(),
+            path_input: path_input::PathLookup::spawn(),
             pocket,
             pocket_error,
             snapshot: None,
@@ -127,10 +137,7 @@ impl App {
             covers: HashMap::new(),
             library_path,
             modal: None,
-            busy: None,
-            download_pct: None,
-            side_status: None,
-            busy_step: None,
+            busy: Busy::default(),
             hit: HitAreas::default(),
             splits: Splits::default(),
             dragging: None,
@@ -140,10 +147,7 @@ impl App {
             fingerprint_pending: false,
             importing: false,
             refresh_pending: false,
-            verification_next: 0,
-            verification_inflight: false,
-            snapshot_epoch: 0,
-            rom_status: None,
+            verify: Verification::default(),
             global,
         }
     }
@@ -178,9 +182,9 @@ impl App {
     pub(super) fn submit(&mut self, status: &str, job: Job) {
         let epoch = self.worker.epoch.fetch_add(1, Ordering::Relaxed) + 1;
         if matches!(job, Job::Load | Job::Apply(_)) {
-            self.snapshot_epoch = epoch;
+            self.verify.epoch = epoch;
         }
-        self.busy = Some(status.to_string());
+        self.busy.main = Some(status.to_string());
         self.worker.submit(self.ctx(), job);
     }
 
@@ -207,7 +211,7 @@ impl App {
     /// Handles everything the workers sent since last time.
     pub fn pump(&mut self) {
         let mut complete_input = false;
-        if let Some(result) = self.path_worker.latest()
+        if let Some(result) = self.path_input.latest()
             && let Some(Modal::Input {
                 value,
                 kind,
@@ -236,8 +240,8 @@ impl App {
                     next,
                     epoch,
                 } => {
-                    self.verification_inflight = false;
-                    if epoch >= self.snapshot_epoch {
+                    self.verify.inflight = false;
+                    if epoch >= self.verify.epoch {
                         match result {
                             Ok(mut index) => {
                                 if let Some(warning) = index.warning.take() {
@@ -251,7 +255,7 @@ impl App {
                                     snap.verification = Some(index);
                                     snap.rematch();
                                 }
-                                self.verification_next = next;
+                                self.verify.next = next;
                                 self.rebuild_rows_preserving(selected);
                             }
                             Err(e) => self.log(format!("ROM verification stopped: {e}")),
@@ -259,21 +263,21 @@ impl App {
                     }
                 }
                 Msg::Progress(Event::Status(s)) => {
-                    self.busy = Some(s);
-                    self.download_pct = None;
-                    self.busy_step = None;
+                    self.busy.main = Some(s);
+                    self.busy.download_pct = None;
+                    self.busy.step = None;
                 }
                 Msg::Progress(Event::Download {
                     received, total, ..
                 }) => {
-                    self.download_pct = total.filter(|t| *t > 0).map(|t| received * 100 / t);
-                    self.busy = Some(match self.download_pct {
+                    self.busy.download_pct = total.filter(|t| *t > 0).map(|t| received * 100 / t);
+                    self.busy.main = Some(match self.busy.download_pct {
                         Some(p) => format!("Downloading {p}%"),
                         None => format!("Downloading {} KiB", received / 1024),
                     });
                 }
                 Msg::Progress(Event::Step { done, total }) => {
-                    self.busy_step = Some((done, total));
+                    self.busy.step = Some((done, total));
                     if self.importing && !self.refresh_pending {
                         self.refresh_pending = true;
                         self.submit_side(Job::RefreshLibrary);
@@ -299,7 +303,7 @@ impl App {
                             }
                             let selected = self.game_selection();
                             self.snapshot = Some(*snap);
-                            self.verification_next = 0;
+                            self.verify.next = 0;
                             self.covers.clear();
                             self.rebuild_rows_preserving(selected);
                             self.auto_identify();
@@ -322,18 +326,18 @@ impl App {
                     self.fingerprint_pending = false;
                     let changed = self.snapshot.as_ref().is_some_and(|s| s.fingerprint != fp);
                     // Don't pull the rug from under a dialog or a running job.
-                    if changed && self.busy.is_none() && self.modal.is_none() {
+                    if changed && self.busy.main.is_none() && self.modal.is_none() {
                         self.notice("↻ card or library changed outside pocketeer; reloaded");
                         self.reload();
                     }
                 }
-                Msg::SideProgress(Event::Status(s)) => self.side_status = Some(s),
+                Msg::SideProgress(Event::Status(s)) => self.busy.side = Some(s),
                 Msg::SideProgress(Event::Step { done, total }) => {
-                    self.side_status = Some(format!("covers {done}/{total}"))
+                    self.busy.side = Some(format!("covers {done}/{total}"))
                 }
                 Msg::SideProgress(_) => {}
                 Msg::SideDone { lines, failed } => {
-                    self.side_status = None;
+                    self.busy.side = None;
                     let fetched_any = !lines.is_empty();
                     for line in &lines {
                         self.log(line.clone());
@@ -342,7 +346,7 @@ impl App {
                         self.info("Background library task failed", lines);
                     }
                     // New files on disk: refresh the Games tab when nothing else is running.
-                    if fetched_any && self.busy.is_none() && self.modal.is_none() {
+                    if fetched_any && self.busy.main.is_none() && self.modal.is_none() {
                         self.reload();
                     }
                 }
@@ -363,116 +367,45 @@ impl App {
     }
 
     fn schedule_verification(&mut self) {
-        if self.busy.is_some() || self.modal.is_some() || self.verification_inflight {
+        if self.busy.main.is_some() || self.modal.is_some() || self.verify.inflight {
             return;
         }
         let Some(index) = self.snapshot.as_mut().and_then(|s| s.verification.take()) else {
             return;
         };
-        if self.verification_next >= index.roms.len() {
-            self.rom_status = None;
+        if self.verify.next >= index.roms.len() {
+            self.busy.roms = None;
             return;
         }
-        self.rom_status = Some(format!(
+        self.busy.roms = Some(format!(
             "ROM check {}/{}",
-            self.verification_next + 1,
+            self.verify.next + 1,
             index.roms.len()
         ));
-        self.verification_inflight = true;
+        self.verify.inflight = true;
         self.worker.submit(
             self.ctx(),
             Job::Verify {
                 index,
-                cursor: self.verification_next,
+                cursor: self.verify.next,
                 epoch: self.worker.epoch.load(Ordering::Relaxed),
                 token: self.worker.epoch.clone(),
             },
         );
     }
 
-    /// A plan came back: show it, or say there is nothing to do.
+    /// A plan came back: show it, say there is nothing to do, or start the
+    /// dialog flow it needs first.
     fn planned(&mut self, pending: Pending) {
-        match pending {
-            Pending::ImportCover(plan) => {
-                let replacing = plan.previous.as_ref().is_some_and(|p| p.rel_path.is_some());
-                let title = if replacing {
-                    "Replace this game's cover?"
-                } else {
-                    "Import this game's cover?"
-                };
-                let lines = text_lines(&library_cmd::cover_import(&Staged::preview(plan.clone())));
-                self.confirm(title, lines, Pending::ImportCover(plan));
-            }
-            Pending::CardRename(plan) => {
-                let lines = text_lines(&card_cmd::rename_report(&Staged::preview(plan.clone())));
-                self.confirm(
-                    "Rename this AP ROM and its saves?",
-                    lines,
-                    Pending::CardRename(plan),
-                );
-            }
-            Pending::Clean(plan) => {
-                if plan.entries.is_empty() {
-                    self.notice("No macOS junk on the card.");
-                } else {
-                    let title = format!(
-                        "Delete {} junk item(s), {}?",
-                        plan.entries.len(),
-                        human::bytes(plan.bytes)
-                    );
-                    let lines = text_lines(&card_cmd::clean_report(&Staged::preview(plan.clone())));
-                    self.confirm(title, lines, Pending::Clean(plan));
-                }
-            }
-            Pending::Copy(plan) => {
-                let lines = text_lines(&card_cmd::copy_report(&Staged::preview(plan.clone())));
-                if plan.changes() == 0 {
-                    self.info("Already on this card", lines);
-                } else {
-                    self.confirm(
-                        format!("Copy {} ROM(s) to this card?", plan.changes()),
-                        lines,
-                        Pending::Copy(plan),
-                    );
-                }
-            }
-            Pending::Saves(plan) => self.review_saves(plan),
-            Pending::Rename(plan) => {
-                let lines = text_lines(&library_cmd::library_rename(&Staged::preview(
-                    (*plan).clone(),
-                )));
-                self.confirm(
-                    format!("Rename to {}?", plan.new_name),
-                    lines,
-                    Pending::Rename(plan),
-                );
-            }
-            Pending::Standardize(plans) if plans.is_empty() => self.info(
-                "Standard names",
-                vec![
-                    "Every game either has a standard name already or matches none.".into(),
-                    "(Games verified against a DAT are never renamed.)".into(),
-                ],
-            ),
-            Pending::Standardize(plans) => {
-                let items = plans
-                    .iter()
-                    .map(|p| {
-                        (
-                            format!("[{}] {}  →  {}", p.platform, p.old_name, p.new_name),
-                            true,
-                        )
-                    })
-                    .collect();
-                self.modal = Some(Modal::Toggle {
-                    title: "Rename to standard names?".into(),
-                    items,
-                    cursor: 0,
-                    kind: ToggleKind::Standardize { plans },
-                });
-            }
-            import @ (Pending::Import(_) | Pending::CardImport(_)) => self.offer_import(import),
-            _ => unreachable!("not a planned operation"),
+        match pending.preview() {
+            Preview::Notice(line) => self.notice(line),
+            Preview::Info { title, lines } => self.info(&title, lines),
+            Preview::Confirm { title, lines } => self.confirm(title, lines, pending),
+            Preview::Flow => match pending {
+                Pending::Saves(plan) => self.review_saves(plan),
+                Pending::Standardize(plans) => self.offer_standardize(plans),
+                import => self.offer_import(import),
+            },
         }
     }
 
@@ -480,7 +413,7 @@ impl App {
     /// plugged in or pulled, and ask the side worker whether anything on the
     /// card or in the library changed.
     pub fn tick(&mut self) {
-        if self.busy.is_some() {
+        if self.busy.main.is_some() {
             return;
         }
         match &self.pocket {
@@ -518,9 +451,9 @@ impl App {
     }
 
     fn clear_busy(&mut self) {
-        self.busy = None;
-        self.busy_step = None;
-        self.download_pct = None;
+        self.busy.main = None;
+        self.busy.step = None;
+        self.busy.download_pct = None;
     }
 
     // -----------------------------------------------------------------------
@@ -595,14 +528,10 @@ impl App {
         ));
     }
 
-    /// A planned import: first the standard-name question (if any file has a
-    /// suggestion), then the confirm dialog.
+    /// A planned import whose files have standard-name suggestions: ask
+    /// which to take, then come back to [`App::planned`].
     pub(super) fn offer_import(&mut self, import: Pending) {
         let suggestions = import.import_suggestions();
-        if suggestions.is_empty() {
-            self.confirm_import(import);
-            return;
-        }
         let items = suggestions
             .iter()
             .map(|(_, old, new)| (format!("{old}  →  {new}"), true))
@@ -622,30 +551,23 @@ impl App {
         });
     }
 
-    pub(super) fn confirm_import(&mut self, import: Pending) {
-        let (changes, title, lines) = match &import {
-            Pending::Import(b) => (
-                b.1.changes(),
-                format!("Import {} ROM(s) into the library?", b.1.changes()),
-                text_lines(&library_cmd::library_import(&LibraryImportReport::preview(
-                    b.1.clone(),
-                ))),
-            ),
-            Pending::CardImport(plan) => (
-                plan.changes(),
-                format!("Copy {} ROM(s) into the library?", plan.changes()),
-                text_lines(&card_import_cmd::report(&CardImportReport::preview(
-                    (**plan).clone(),
-                ))),
-            ),
-            _ => unreachable!("not an import"),
-        };
-        let pending = import;
-        if changes == 0 {
-            self.info("Nothing to import", lines);
-        } else {
-            self.confirm(title, lines, pending);
-        }
+    /// Standard-name renames found for existing games: a checklist.
+    pub(super) fn offer_standardize(&mut self, plans: Vec<RenamePlan>) {
+        let items = plans
+            .iter()
+            .map(|p| {
+                (
+                    format!("[{}] {}  →  {}", p.platform, p.old_name, p.new_name),
+                    true,
+                )
+            })
+            .collect();
+        self.modal = Some(Modal::Toggle {
+            title: "Rename to standard names?".into(),
+            items,
+            cursor: 0,
+            kind: ToggleKind::Standardize { plans },
+        });
     }
 
     pub(super) fn log(&mut self, line: String) {
@@ -658,8 +580,4 @@ impl App {
     pub fn last_log(&self) -> Option<&str> {
         self.log.back().map(String::as_str)
     }
-}
-
-pub(super) fn text_lines(text: &str) -> Vec<String> {
-    text.lines().map(str::to_owned).collect()
 }

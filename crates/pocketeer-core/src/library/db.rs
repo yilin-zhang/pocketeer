@@ -1,14 +1,15 @@
 //! Schema and queries. Plain SQL, no ORM; each schema change is a numbered
 //! migration applied in order.
 
-use std::path::PathBuf;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use crate::{Error, Result, fsutil};
-
-use super::import::ImportMode;
 
 const MIGRATIONS: &[&str] = &[
     // v1
@@ -51,9 +52,9 @@ const MIGRATIONS: &[&str] = &[
     // v2
     MIGRATION_DEVICES,
     // v3
-    super::saves::MIGRATION_SAVES,
+    MIGRATION_SAVES,
     // v4
-    super::covers::MIGRATION_COVERS,
+    MIGRATION_COVERS,
     // v5
     MIGRATION_RENAMES,
     // v6
@@ -155,7 +156,7 @@ pub struct Rom {
     pub crc32: String,
     pub sha1: String,
     pub verified: bool,
-    pub dat: super::identify::Identification,
+    pub dat: Identification,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rel_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -231,8 +232,8 @@ fn rom_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Rom> {
         crc32: r.get("crc32")?,
         sha1: r.get("sha1")?,
         verified: r.get("verified")?,
-        dat: super::identify::Identification {
-            status: super::identify::Status::parse(&r.get::<_, String>("dat_status")?)?,
+        dat: Identification {
+            status: Status::parse(&r.get::<_, String>("dat_status")?)?,
             game_name: r.get("dat_game_name")?,
             rom_name: r.get("dat_rom_name")?,
             revision: r.get("dat_revision")?,
@@ -480,6 +481,35 @@ pub fn platform_stats(conn: &Connection) -> Result<Vec<PlatformStats>> {
 }
 
 // Historical schema definitions remain frozen for existing databases.
+const MIGRATION_SAVES: &str = "
+    CREATE TABLE saves (
+        rel_path   TEXT PRIMARY KEY,
+        size       INTEGER NOT NULL,
+        sha1       TEXT NOT NULL,
+        mtime      INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        device_id  TEXT
+    );
+    CREATE TABLE save_versions (
+        id          INTEGER PRIMARY KEY,
+        rel_path    TEXT NOT NULL,
+        size        INTEGER NOT NULL,
+        sha1        TEXT NOT NULL,
+        mtime       INTEGER NOT NULL,
+        stored_path TEXT NOT NULL,
+        created_at  INTEGER NOT NULL
+    );
+    CREATE INDEX save_versions_rel ON save_versions(rel_path);
+";
+const MIGRATION_COVERS: &str = "
+    CREATE TABLE covers (
+        game_id    INTEGER PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,
+        rel_path   TEXT,
+        status     TEXT NOT NULL CHECK (status IN ('ok', 'none', 'error')),
+        fetched_at INTEGER NOT NULL
+    );
+";
+
 const MIGRATION_DEVICES: &str = "
     CREATE TABLE devices (
         id        TEXT PRIMARY KEY,
@@ -508,6 +538,339 @@ const MIGRATION_RENAMES: &str = "
     );
     CREATE INDEX renames_platform ON renames(platform, id);
 ";
+
+// ---------------------------------------------------------------------------
+// Import mode
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportMode {
+    /// Copy the file into `roms/<platform>/`.
+    Copy,
+    /// Index the file where it is; nothing is copied.
+    Reference,
+    /// Hard-link into the library (falls back to copy across volumes).
+    Link,
+}
+
+impl ImportMode {
+    /// The string stored in the `roms.mode` column (same as the serde form).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ImportMode::Copy => "copy",
+            ImportMode::Reference => "reference",
+            ImportMode::Link => "link",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ImportMode> {
+        match s {
+            "copy" => Some(ImportMode::Copy),
+            "reference" => Some(ImportMode::Reference),
+            "link" => Some(ImportMode::Link),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Identification (DAT results per ROM)
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Status {
+    #[default]
+    Unchecked,
+    Matched,
+    NoMatch,
+    Error,
+    Unsupported,
+    Ambiguous,
+}
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unchecked => "unchecked",
+            Self::Matched => "matched",
+            Self::NoMatch => "no_match",
+            Self::Error => "error",
+            Self::Unsupported => "unsupported",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unchecked => "not checked",
+            Self::Matched => "matched",
+            Self::NoMatch => "no match in DAT",
+            Self::Error => "failed; will retry",
+            Self::Unsupported => "no automatic DAT source",
+            Self::Ambiguous => "multiple DAT matches",
+        }
+    }
+    pub(crate) fn parse(value: &str) -> rusqlite::Result<Self> {
+        match value {
+            "unchecked" => Ok(Self::Unchecked),
+            "matched" => Ok(Self::Matched),
+            "no_match" => Ok(Self::NoMatch),
+            "error" => Ok(Self::Error),
+            "unsupported" => Ok(Self::Unsupported),
+            "ambiguous" => Ok(Self::Ambiguous),
+            _ => Err(rusqlite::Error::InvalidQuery),
+        }
+    }
+}
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Identification {
+    pub status: Status,
+    pub game_name: Option<String>,
+    pub rom_name: Option<String>,
+    pub revision: Option<String>,
+    pub source: Option<String>,
+    pub checked_at: Option<i64>,
+    pub error: Option<String>,
+}
+
+/// Writes a DAT result for `rom`, provided the row still holds the bytes
+/// it was computed for. `true` when a row was updated.
+pub fn save_identification(conn: &Connection, rom: &Rom, state: &Identification) -> Result<bool> {
+    let changed = conn.execute("UPDATE roms SET dat_status=?2,dat_game_name=?3,dat_rom_name=?4,dat_revision=?5,dat_source=?6,dat_checked_at=?7,dat_error=?8,verified=?9 WHERE id=?1 AND sha1=?10 AND size=?11",
+        params![rom.id,state.status.as_str(),state.game_name,state.rom_name,state.revision,state.source,state.checked_at,state.error,state.status == Status::Matched,rom.sha1,rom.size as i64])
+        .map_err(|e| Error::db(e, "save DAT result"))?;
+    Ok(changed > 0)
+}
+
+// ---------------------------------------------------------------------------
+// Covers
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverStatus {
+    /// Downloaded and on disk.
+    Ok,
+    /// libretro has no cover for this name (404); not retried unless asked.
+    None,
+    /// Network or disk error; retried next time.
+    Error,
+}
+
+impl CoverStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            CoverStatus::Ok => "ok",
+            CoverStatus::None => "none",
+            CoverStatus::Error => "error",
+        }
+    }
+    fn parse(s: &str) -> CoverStatus {
+        match s {
+            "ok" => CoverStatus::Ok,
+            "none" => CoverStatus::None,
+            _ => CoverStatus::Error,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CoverRecord {
+    pub game_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rel_path: Option<PathBuf>,
+    pub status: CoverStatus,
+    pub fetched_at: i64,
+    pub imported: bool,
+}
+
+pub fn cover_record(conn: &Connection, game_id: i64) -> Result<Option<CoverRecord>> {
+    conn.query_row(
+        "SELECT game_id, rel_path, status, fetched_at, imported FROM covers WHERE game_id = ?1",
+        params![game_id],
+        |r| {
+            Ok(CoverRecord {
+                game_id: r.get(0)?,
+                rel_path: r.get::<_, Option<String>>(1)?.map(PathBuf::from),
+                status: CoverStatus::parse(&r.get::<_, String>(2)?),
+                fetched_at: r.get(3)?,
+                imported: r.get(4)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| Error::db(e, "cover record"))
+}
+
+/// Forgets a `none`/`error` record so the next fetch tries again (after a
+/// game was renamed, say). A fetched cover is kept.
+pub fn reset_unfound_cover(conn: &Connection, game_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM covers WHERE game_id = ?1 AND status != 'ok'",
+        params![game_id],
+    )
+    .map_err(|e| Error::db(e, "reset cover"))?;
+    Ok(())
+}
+
+/// Records an automatic fetch; a cover the user imported is never
+/// overwritten. `true` when the row changed.
+pub fn upsert_cover(
+    conn: &Connection,
+    game_id: i64,
+    rel: Option<&Path>,
+    status: CoverStatus,
+) -> Result<bool> {
+    let changed = conn
+        .execute(
+            "INSERT INTO covers (game_id, rel_path, status, fetched_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(game_id) DO UPDATE SET rel_path = excluded.rel_path,
+            status = excluded.status, fetched_at = excluded.fetched_at
+         WHERE covers.imported = 0",
+            params![
+                game_id,
+                rel.map(|p| p.to_string_lossy().into_owned()),
+                status.as_str(),
+                fsutil::now_secs()
+            ],
+        )
+        .map_err(|e| Error::db(e, "upsert cover"))?;
+    Ok(changed > 0)
+}
+
+/// Records a cover the user supplied; automatic fetches leave it alone.
+pub fn set_imported_cover(conn: &Connection, game_id: i64, rel: &Path) -> Result<()> {
+    conn.execute(
+        "INSERT INTO covers (game_id,rel_path,status,fetched_at,imported) VALUES (?1,?2,'ok',?3,1)
+            ON CONFLICT(game_id) DO UPDATE SET rel_path=excluded.rel_path,status='ok',fetched_at=excluded.fetched_at,imported=1",
+        params![game_id, rel.to_string_lossy(), fsutil::now_secs()],
+    )
+    .map_err(|e| Error::db(e, "record imported cover"))?;
+    Ok(())
+}
+
+/// Drops an automatically fetched cover (the title it was fetched for is gone).
+pub fn delete_catalog_cover(conn: &Connection, game_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM covers WHERE game_id=?1 AND imported=0",
+        params![game_id],
+    )
+    .map_err(|e| Error::db(e, "invalidate previous catalog cover"))?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct CoverStats {
+    pub platform: String,
+    pub games: usize,
+    pub with_cover: usize,
+    pub not_found: usize,
+    pub supported: bool,
+}
+
+pub fn cover_stats(conn: &Connection) -> Result<Vec<CoverStats>> {
+    query_rows(
+        conn,
+        "SELECT g.platform,
+                COUNT(*),
+                SUM(CASE WHEN c.status = 'ok' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN c.status = 'none' THEN 1 ELSE 0 END)
+         FROM games g LEFT JOIN covers c ON c.game_id = g.id
+         GROUP BY g.platform ORDER BY g.platform",
+        [],
+        "cover stats",
+        |r| {
+            let platform: String = r.get(0)?;
+            Ok(CoverStats {
+                supported: crate::catalog::thumbnail_system(&platform).is_some(),
+                platform,
+                games: get_usize(r, 1)?,
+                with_cover: get_usize(r, 2)?,
+                not_found: get_usize(r, 3)?,
+            })
+        },
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Save history
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SaveVersion {
+    pub id: i64,
+    pub rel_path: PathBuf,
+    pub size: u64,
+    pub sha1: String,
+    pub mtime: i64,
+    pub stored_path: PathBuf,
+    pub created_at: i64,
+}
+
+pub fn save_versions(conn: &Connection, rel: &Path) -> Result<Vec<SaveVersion>> {
+    query_rows(
+        conn,
+        "SELECT id, rel_path, size, sha1, mtime, stored_path, created_at
+         FROM save_versions WHERE rel_path = ?1 ORDER BY created_at DESC, id DESC",
+        params![rel.to_string_lossy()],
+        "list versions",
+        version_from_row,
+    )
+}
+
+fn version_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SaveVersion> {
+    Ok(SaveVersion {
+        id: r.get(0)?,
+        rel_path: PathBuf::from(r.get::<_, String>(1)?),
+        size: get_u64(r, 2)?,
+        sha1: r.get(3)?,
+        mtime: r.get(4)?,
+        stored_path: PathBuf::from(r.get::<_, String>(5)?),
+        created_at: r.get(6)?,
+    })
+}
+
+pub fn save_version(conn: &Connection, version_id: i64) -> Result<Option<SaveVersion>> {
+    conn.query_row(
+            "SELECT id, rel_path, size, sha1, mtime, stored_path, created_at FROM save_versions WHERE id = ?1",
+            params![version_id],
+            version_from_row,
+        )
+        .optional()
+        .map_err(|e| Error::db(e, "get version"))
+}
+
+pub fn insert_save_version(
+    conn: &Connection,
+    rel: &Path,
+    size: u64,
+    sha1: &str,
+    mtime: i64,
+    stored: &Path,
+) -> Result<()> {
+    conn.execute("INSERT INTO save_versions (rel_path,size,sha1,mtime,stored_path,created_at) VALUES (?1,?2,?3,?4,?5,?6)",params![rel.to_string_lossy(),size as i64,sha1,mtime,stored.to_string_lossy(),fsutil::now_secs()]).map_err(|e| Error::db(e,"record save history"))?;
+    Ok(())
+}
+
+/// How many archived versions each save path has.
+pub fn save_version_counts(conn: &Connection) -> Result<BTreeMap<String, usize>> {
+    Ok(query_rows(
+        conn,
+        "SELECT rel_path,COUNT(*) FROM save_versions GROUP BY rel_path",
+        [],
+        "count save history",
+        |r| Ok((r.get(0)?, get_usize(r, 1)?)),
+    )?
+    .into_iter()
+    .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Renames
+
+/// The current file name of a ROM row.
+pub fn rom_name(conn: &Connection, rom_id: i64) -> Result<String> {
+    conn.query_row("SELECT name FROM roms WHERE id = ?1", [rom_id], |r| {
+        r.get(0)
+    })
+    .map_err(|e| Error::db(e, "rom name"))
+}
 
 #[cfg(test)]
 mod tests {

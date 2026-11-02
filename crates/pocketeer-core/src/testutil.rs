@@ -4,11 +4,12 @@ use std::{io::Write as _, path::Path};
 
 use crate::{
     Pocket,
+    catalog::Dat,
+    fsutil::hash::HashCache,
     library::{
         Library,
         import::{self, ImportOptions},
     },
-    roms::{Dat, HashCache},
 };
 
 /// A minimal but complete `core.json` (spiritualized.GBA 1.3.0).

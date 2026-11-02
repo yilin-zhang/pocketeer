@@ -183,6 +183,20 @@ pub enum Error {
 
     #[error("invalid file name {name:?}: {reason}")]
     InvalidName { name: String, reason: String },
+
+    /// Something a plan was made from (the card, a file, a library row)
+    /// changed between planning and applying.
+    #[error("{what} changed since the plan was made")]
+    Stale { what: String },
+
+    /// A file changed while pocketeer was reading or copying it.
+    #[error("{} changed while it was being read", path.display())]
+    Changed { path: PathBuf },
+
+    /// A file's contents are not what the records say they should be.
+    #[error("{}: {what}", path.display())]
+    Mismatch { path: PathBuf, what: String },
+
     /// The command line could not be parsed (CLI-level; exit 2).
     #[error("{message}")]
     Usage {
@@ -301,6 +315,18 @@ pub const CODES: &[(&str, &str)] = &[
     (
         "INVALID_NAME",
         "the new name can't be a file name on the card",
+    ),
+    (
+        "STALE_PLAN",
+        "the card, library or file changed between the plan and the apply; plan again",
+    ),
+    (
+        "FILE_CHANGED",
+        "a file changed while it was being read or copied; retry",
+    ),
+    (
+        "CONTENT_MISMATCH",
+        "a file's contents don't match what the library recorded (details.what)",
     ),
 ];
 
@@ -451,6 +477,12 @@ impl Error {
                 "INVALID_NAME",
                 Some(json!({ "name": name, "reason": reason })),
             ),
+            Error::Stale { what } => ("STALE_PLAN", Some(json!({ "what": what }))),
+            Error::Changed { path } => ("FILE_CHANGED", Some(json!({ "path": path }))),
+            Error::Mismatch { path, what } => (
+                "CONTENT_MISMATCH",
+                Some(json!({ "path": path, "what": what })),
+            ),
         }
     }
 
@@ -499,6 +531,8 @@ impl Error {
             Error::RomAmbiguous { .. } => {
                 Some("Pass the ROM id (from `pocketeer library list --json`) or --platform".into())
             }
+            Error::Stale { .. } => Some("Run the command again to plan from the current state".into()),
+            Error::Changed { .. } => Some("Retry once nothing else is writing to it".into()),
             _ => None,
         }
     }
@@ -664,6 +698,12 @@ mod tests {
             Error::InvalidName {
                 name: s.clone(),
                 reason: s.clone(),
+            },
+            Error::Stale { what: s.clone() },
+            Error::Changed { path: p.clone() },
+            Error::Mismatch {
+                path: p.clone(),
+                what: s.clone(),
             },
             Error::Usage {
                 message: s.clone(),

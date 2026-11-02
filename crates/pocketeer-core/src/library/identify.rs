@@ -1,98 +1,17 @@
 //! Content identification against cached libretro DATs. A negative result is
 //! valid only for that catalog revision; transport/parse failures stay retryable.
-use super::{Library, covers, db};
+use super::{Library, db};
+
+pub use super::db::{Identification, Status};
 use crate::{
-    Error, Result, fsutil,
+    Error, Result,
+    catalog::libretro,
+    fsutil,
     net::{Cache, Http, Policy},
-    progress::{Event, Progress},
-    roms::Dat,
+    plan::{Event, Progress},
 };
-use rusqlite::params;
 use serde::Serialize;
-use sha1::{Digest, Sha1};
-use std::{
-    collections::{BTreeMap, HashMap},
-    path::Path,
-    time::Duration,
-};
-
-pub const BASE: &str =
-    "https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/no-intro";
-pub const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Status {
-    #[default]
-    Unchecked,
-    Matched,
-    NoMatch,
-    Error,
-    Unsupported,
-    Ambiguous,
-}
-impl Status {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Unchecked => "unchecked",
-            Self::Matched => "matched",
-            Self::NoMatch => "no_match",
-            Self::Error => "error",
-            Self::Unsupported => "unsupported",
-            Self::Ambiguous => "ambiguous",
-        }
-    }
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Unchecked => "not checked",
-            Self::Matched => "matched",
-            Self::NoMatch => "no match in DAT",
-            Self::Error => "failed; will retry",
-            Self::Unsupported => "no automatic DAT source",
-            Self::Ambiguous => "multiple DAT matches",
-        }
-    }
-    pub(crate) fn parse(value: &str) -> rusqlite::Result<Self> {
-        match value {
-            "unchecked" => Ok(Self::Unchecked),
-            "matched" => Ok(Self::Matched),
-            "no_match" => Ok(Self::NoMatch),
-            "error" => Ok(Self::Error),
-            "unsupported" => Ok(Self::Unsupported),
-            "ambiguous" => Ok(Self::Ambiguous),
-            _ => Err(rusqlite::Error::InvalidQuery),
-        }
-    }
-}
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-pub struct Identification {
-    pub status: Status,
-    pub game_name: Option<String>,
-    pub rom_name: Option<String>,
-    pub revision: Option<String>,
-    pub source: Option<String>,
-    pub checked_at: Option<i64>,
-    pub error: Option<String>,
-}
-
-/// Only mapped cartridge systems with an upstream No-Intro DAT. Other
-/// platforms are explicitly unsupported, not negative ROM matches.
-pub fn system_for(platform: &str) -> Option<&'static str> {
-    match platform.to_ascii_lowercase().as_str() {
-        "pcecd" | "psx" | "ng" | "gamate" | "gameandwatch" => None,
-        _ => covers::system_for(platform),
-    }
-}
-pub fn url(base: &str, system: &str) -> String {
-    format!(
-        "{}/{}.dat",
-        base.trim_end_matches('/'),
-        system.replace(' ', "%20")
-    )
-}
-pub fn cache_key(system: &str) -> String {
-    format!("dat-{:x}.dat", Sha1::digest(system.as_bytes()))
-}
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Default, Serialize)]
 pub struct Report {
@@ -147,7 +66,7 @@ pub fn run(
         progress(Event::Status(format!(
             "Identifying {platform} ROMs against DAT"
         )));
-        let Some(system) = system_for(&platform) else {
+        let Some(system) = crate::catalog::dat_system(&platform) else {
             for rom in &roms {
                 if rom.dat.status == Status::Matched {
                     report.unchanged += 1;
@@ -170,45 +89,28 @@ pub fn run(
             }
             continue;
         };
-        let source = url(base, system);
-        let loaded = cache
-            .fetch(http, &cache_key(system), &source, "ROM DAT", policy)
-            .and_then(|f| {
-                let dat = Dat::parse(&f.bytes, Path::new(&source))?;
-                // A parsed metadata-only/empty file is not evidence of no match.
-                if !dat
-                    .games
-                    .iter()
-                    .flat_map(|g| &g.roms)
-                    .any(|r| r.size.is_some() && r.sha1.is_some())
-                {
-                    return Err(Error::DatParse {
-                        path: source.clone().into(),
-                        message: "DAT has no size + SHA-1 entries".into(),
-                    });
-                }
-                Ok((dat, format!("{:x}", Sha1::digest(&f.bytes)), f.source))
-            });
-        let (dat, revision, fetched_source) = match loaded {
-            Ok(data) => data,
-            Err(e) => {
-                let error = e.to_string();
-                for rom in &roms {
-                    let mut state = rom.dat.clone();
-                    // Never discard an established result because the server is down.
-                    if matches!(
-                        state.status,
-                        Status::Unchecked | Status::Error | Status::Unsupported
-                    ) {
-                        state.status = Status::Error;
+        let source = libretro::dat_url(base, system);
+        let (dat, revision, fetched_source) =
+            match libretro::load_dat(http, cache, base, system, policy) {
+                Ok(l) => (l.dat, l.revision, l.source),
+                Err(e) => {
+                    let error = e.to_string();
+                    for rom in &roms {
+                        let mut state = rom.dat.clone();
+                        // Never discard an established result because the server is down.
+                        if matches!(
+                            state.status,
+                            Status::Unchecked | Status::Error | Status::Unsupported
+                        ) {
+                            state.status = Status::Error;
+                        }
+                        state.error = Some(error.clone());
+                        save(lib, rom, &state)?;
                     }
-                    state.error = Some(error.clone());
-                    save(lib, rom, &state)?;
+                    report.errors.push(format!("{platform}: {error}"));
+                    continue;
                 }
-                report.errors.push(format!("{platform}: {error}"));
-                continue;
-            }
-        };
+            };
         let fallback = match fetched_source {
             crate::net::Source::Cache {
                 fallback_reason, ..
@@ -290,39 +192,17 @@ fn save(lib: &mut Library, rom: &db::Rom, state: &Identification) -> Result<()> 
         .conn_mut()
         .transaction()
         .map_err(|e| Error::db(e, "begin DAT result"))?;
-    let changed = tx.execute("UPDATE roms SET dat_status=?2,dat_game_name=?3,dat_rom_name=?4,dat_revision=?5,dat_source=?6,dat_checked_at=?7,dat_error=?8,verified=?9 WHERE id=?1 AND sha1=?10 AND size=?11",
-        params![rom.id,state.status.as_str(),state.game_name,state.rom_name,state.revision,state.source,state.checked_at,state.error,state.status == Status::Matched,rom.sha1,rom.size as i64])
-        .map_err(|e| Error::db(e, "save DAT result"))?;
-    if changed > 0 && rom.dat.game_name != state.game_name {
-        tx.execute(
-            "DELETE FROM covers WHERE game_id=?1 AND imported=0",
-            params![rom.game_id],
-        )
-        .map_err(|e| Error::db(e, "invalidate previous catalog cover"))?;
+    let changed = db::save_identification(&tx, rom, state)?;
+    if changed && rom.dat.game_name != state.game_name {
+        db::delete_catalog_cover(&tx, rom.game_id)?;
     }
     tx.commit().map_err(|e| Error::db(e, "commit DAT result"))
-}
-
-/// Use a catalog title only when every ROM in this game agrees. Local file
-/// and game titles remain user-controlled and are never renamed here.
-pub fn cover_name(game: &db::Game) -> &str {
-    let Some(first) = game.roms.first().and_then(|r| r.dat.game_name.as_deref()) else {
-        return &game.name;
-    };
-    if game
-        .roms
-        .iter()
-        .all(|r| r.dat.status == Status::Matched && r.dat.game_name.as_deref() == Some(first))
-    {
-        first
-    } else {
-        &game.name
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::library::covers;
     const XML: &[u8] = include_bytes!("../../../../tests/fixtures/roms/test.dat");
 
     fn setup() -> (tempfile::TempDir, Library, Cache) {
@@ -338,9 +218,14 @@ mod tests {
         (tmp, lib, cache)
     }
     fn store(cache: &Cache, bytes: &[u8]) {
-        let system = system_for("gba").unwrap();
+        let system = crate::catalog::dat_system("gba").unwrap();
         cache
-            .store(&cache_key(system), &url(BASE, system), bytes, None)
+            .store(
+                &libretro::dat_cache_key(system),
+                &libretro::dat_url(libretro::DAT_BASE, system),
+                bytes,
+                None,
+            )
             .unwrap();
     }
     fn offline(lib: &mut Library, cache: &Cache) -> Report {
@@ -350,7 +235,7 @@ mod tests {
             cache,
             Options {
                 policy: Policy::Offline,
-                base: BASE,
+                base: libretro::DAT_BASE,
                 platform: None,
             },
             &mut |_| {},
@@ -384,7 +269,7 @@ mod tests {
             rom(&lib, "my title.gba").dat.game_name.as_deref(),
             Some("Corrected Name (USA)")
         );
-        let plans = super::super::names::standardize_plan(&lib, None, |_| {
+        let plans = super::super::rename::standardize_plan(&lib, None, |_| {
             panic!("must not guess names after DAT lookup")
         })
         .unwrap();
@@ -495,16 +380,16 @@ mod tests {
         lib.conn().execute("INSERT INTO covers (game_id,rel_path,status,fetched_at) VALUES (?1,'covers/old.png','ok',0)", [id]).unwrap();
         store(&cache, XML);
         offline(&mut lib, &cache);
-        assert!(covers::record(lib.conn(), id).unwrap().is_none());
+        assert!(db::cover_record(lib.conn(), id).unwrap().is_none());
         let game = db::get_game(lib.conn(), id).unwrap().unwrap();
-        assert_eq!(cover_name(&game), "Hello World (USA)");
+        assert_eq!(covers::cover_name(&game), "Hello World (USA)");
         let source = tmp.path().join("cover.png");
         image::RgbImage::from_pixel(2, 2, image::Rgb([1, 2, 3]))
             .save(&source)
             .unwrap();
         let plan = covers::import::plan(&lib, id, &source).unwrap();
         covers::import::apply(&mut lib, &plan).unwrap();
-        let before = covers::record(lib.conn(), id).unwrap();
+        let before = db::cover_record(lib.conn(), id).unwrap();
         store(
             &cache,
             String::from_utf8(XML.to_vec())
@@ -513,6 +398,6 @@ mod tests {
                 .as_bytes(),
         );
         offline(&mut lib, &cache);
-        assert_eq!(covers::record(lib.conn(), id).unwrap(), before);
+        assert_eq!(db::cover_record(lib.conn(), id).unwrap(), before);
     }
 }

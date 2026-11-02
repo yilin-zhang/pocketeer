@@ -13,13 +13,14 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::{
-    Error, ErrorInfo, Result, fsutil,
-    progress::{Event, Progress},
-    roms::{
-        dat::Dat,
+    Error, ErrorInfo, Result,
+    catalog::Dat,
+    fsutil,
+    fsutil::{
         hash::{HashCache, Hashes, copy_and_hash},
-        verify::{Candidate, hash_candidate, match_key, scan_source},
+        scan::{Candidate, hash_candidate, scan_source},
     },
+    plan::{Applied, Event, Plan, Progress},
 };
 
 use super::{
@@ -27,36 +28,7 @@ use super::{
     db::{self, NewRom},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ImportMode {
-    /// Copy the file into `roms/<platform>/`.
-    Copy,
-    /// Index the file where it is; nothing is copied.
-    Reference,
-    /// Hard-link into the library (falls back to copy across volumes).
-    Link,
-}
-
-impl ImportMode {
-    /// The string stored in the `roms.mode` column (same as the serde form).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ImportMode::Copy => "copy",
-            ImportMode::Reference => "reference",
-            ImportMode::Link => "link",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<ImportMode> {
-        match s {
-            "copy" => Some(ImportMode::Copy),
-            "reference" => Some(ImportMode::Reference),
-            "link" => Some(ImportMode::Link),
-            _ => None,
-        }
-    }
-}
+pub use super::db::ImportMode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportOptions {
@@ -136,15 +108,15 @@ pub struct ImportPlan {
     pub summary: ImportSummary,
 }
 
-impl ImportPlan {
-    pub fn changes(&self) -> usize {
+impl Plan for ImportPlan {
+    fn changes(&self) -> usize {
         self.summary.add
     }
 }
 
 /// Game name for a file the DAT doesn't know: the file stem.
 pub fn fallback_game_name(rom_name: &str) -> String {
-    crate::roms::rename::stem(rom_name).to_string()
+    crate::fsutil::names::stem(rom_name).to_string()
 }
 
 /// Plans importing every ROM-ish file under `dir` (recursively, zips included).
@@ -213,7 +185,7 @@ pub fn plan_import_candidates(
 
         // Name it: DAT first, file name otherwise.
         let dat_hit = match (dat, &hashes) {
-            (Some(d), Some(h)) => match_key(d, h).map(|k| d.get(k)),
+            (Some(d), Some(h)) => d.find(h).map(|k| d.get(k)),
             _ => None,
         };
         let (game, rom, verified) = match dat_hit {
@@ -280,7 +252,7 @@ pub fn plan_import_candidates(
 }
 
 /// Fills `suggested` on every unverified add whose name matches a standard
-/// name in `standard` (see [`super::names::suggest`]). Returns how many.
+/// name in `standard` (see [`crate::catalog::libretro::suggest`]). Returns how many.
 pub fn suggest_names(plan: &mut ImportPlan, standard: &[String]) -> usize {
     let mut n = 0;
     for a in &mut plan.actions {
@@ -290,9 +262,9 @@ pub fn suggest_names(plan: &mut ImportPlan, standard: &[String]) -> usize {
             suggested,
             ..
         } = a
-            && let Some(s) = super::names::suggest(rom, standard)
+            && let Some(s) = crate::catalog::libretro::suggest(rom, standard)
         {
-            *suggested = Some(format!("{s}{}", crate::roms::rename::extension(rom)));
+            *suggested = Some(format!("{s}{}", crate::fsutil::names::extension(rom)));
             n += 1;
         }
     }
@@ -358,6 +330,12 @@ pub struct ImportResult {
     pub failed: Vec<ImportFailure>,
     #[serde(skip)]
     pub(crate) verified_sources: Vec<VerifiedSource>,
+}
+
+impl Applied for ImportResult {
+    fn failed(&self) -> usize {
+        self.failed.len()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -428,10 +406,9 @@ pub fn apply_import(
                 .as_ref()
                 .is_some_and(|expected| *expected != hashes.sha1)
             {
-                return Err(Error::io(
-                    source,
-                    std::io::Error::other("source changed since import preview"),
-                ));
+                return Err(Error::Stale {
+                    what: source.display().to_string(),
+                });
             }
             verified_sha1 = Some(hashes.sha1.clone());
             let tx = lib

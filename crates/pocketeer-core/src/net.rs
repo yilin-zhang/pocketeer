@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Error, Result,
     fsutil::write_atomic,
-    progress::{Event, Progress},
+    plan::{Event, Progress},
 };
 
 const USER_AGENT: &str = concat!("pocketeer/", env!("CARGO_PKG_VERSION"));

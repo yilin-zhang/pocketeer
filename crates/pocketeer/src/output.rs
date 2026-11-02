@@ -8,7 +8,7 @@ use std::{
     process::ExitCode,
 };
 
-use pocketeer_core::{Error, ErrorInfo, progress::Event};
+use pocketeer_core::{Error, ErrorInfo, plan::Event};
 use serde::Serialize;
 
 /// Bump when a released JSON shape changes incompatibly.

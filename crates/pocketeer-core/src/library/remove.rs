@@ -6,7 +6,11 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::{Error, Result, fsutil::timestamp};
+use crate::{
+    Error, Result,
+    fsutil::timestamp,
+    plan::{Applied, Plan},
+};
 
 use super::{Library, db};
 
@@ -35,8 +39,8 @@ pub struct RemovePlan {
     pub trash: PathBuf,
 }
 
-impl RemovePlan {
-    pub fn changes(&self) -> usize {
+impl Plan for RemovePlan {
+    fn changes(&self) -> usize {
         self.items.len()
     }
 }
@@ -79,6 +83,12 @@ pub struct RemoveResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trash: Option<PathBuf>,
     pub failed: Vec<RemoveFailure>,
+}
+
+impl Applied for RemoveResult {
+    fn failed(&self) -> usize {
+        self.failed.len()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::tui::app::GameRef;
-use pocketeer_core::{library::matching::Presence, roms::index::Confidence};
+use pocketeer_core::{card::roms::Confidence, transfer::Presence};
 
 pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.snapshot.is_none() {
@@ -72,7 +72,7 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
                     where_,
                     dat,
                     Cell::from(if g.cover.is_some() { "▣" } else { "" }).style(Style::new().dim()),
-                    Cell::from(human::bytes(size)).style(Style::new().dim()),
+                    Cell::from(text::bytes(size)).style(Style::new().dim()),
                 ])
             } else if let Some(o) = app.card_rom(*r) {
                 let indexed = match r {
@@ -86,12 +86,12 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
                 };
                 game_row(vec![
                     Cell::from(o.platform.clone()).style(Style::new().dim()),
-                    Cell::from(pocketeer_core::roms::rename::stem(&o.name).to_string())
+                    Cell::from(pocketeer_core::fsutil::names::stem(&o.name).to_string())
                         .style(Style::new().fg(WARN)),
                     Cell::from(where_).style(Style::new().fg(color)),
                     Cell::from(""),
                     Cell::from(""),
-                    Cell::from(human::bytes(o.size)).style(Style::new().dim()),
+                    Cell::from(text::bytes(o.size)).style(Style::new().dim()),
                 ])
             } else {
                 game_row(vec![Cell::from("?")])
@@ -242,7 +242,7 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
         lines.push(kv_text("File", o.name.clone()));
         lines.push(kv_text("Platform", o.platform.clone()));
         lines.push(kv_text("Card path", o.rel_path.display().to_string()));
-        lines.push(kv_text("Size", human::bytes(o.size)));
+        lines.push(kv_text("Size", text::bytes(o.size)));
         if let Some(rom) = &indexed {
             lines.push(kv_text("Identity", format!("{:?}", rom.confidence)));
             if let Some(sha1) = &rom.sha1 {
@@ -274,7 +274,7 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
                 )));
             }
             lines.push(kv_text("File", rom.name.clone()));
-            lines.push(kv_text("Size", human::bytes(rom.size)));
+            lines.push(kv_text("Size", text::bytes(rom.size)));
             lines.push(kv_text("DAT", rom.dat.status.label().to_string()));
             if let Some(name) = &rom.dat.game_name {
                 lines.push(kv_text("Standard", name.clone()));

@@ -1,6 +1,6 @@
 mod common;
 use common::Harness;
-use pocketeer_core::{library::identify, net::Cache};
+use pocketeer_core::{catalog::libretro, net::Cache};
 
 #[test]
 fn identify_existing_library_uses_cached_dat_and_preserves_files() {
@@ -15,11 +15,11 @@ fn identify_existing_library_uses_cached_dat_and_preserves_files() {
         "gba",
     ]);
     assert_eq!(code, 0, "{v}");
-    let system = identify::system_for("gba").unwrap();
+    let system = pocketeer_core::catalog::dat_system("gba").unwrap();
     Cache::new(&env.cache)
         .store(
-            &identify::cache_key(system),
-            &identify::url(identify::BASE, system),
+            &libretro::dat_cache_key(system),
+            &libretro::dat_url(libretro::DAT_BASE, system),
             include_bytes!("../../../tests/fixtures/roms/test.dat"),
             None,
         )

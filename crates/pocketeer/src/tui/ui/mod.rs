@@ -1,7 +1,7 @@
 //! Drawing. A pure function of `App`, except that it records where things
 //! were drawn (`App::hit`) so clicks can be mapped back.
 
-use pocketeer_core::required::FileStatus;
+use pocketeer_core::card::bios::FileStatus;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -15,17 +15,13 @@ use ratatui::{
 use ratatui_image::{StatefulImage, protocol::StatefulProtocol};
 
 use super::app::{App, BiosFilter, Cycle, Modal, Splitter, Tab};
-use crate::human;
+use crate::text;
 
-mod bios;
-mod cores;
-mod device;
+mod card_tabs;
 mod games;
 mod modal;
 
-use bios::draw_bios;
-use cores::draw_cores;
-use device::draw_device;
+use card_tabs::{draw_bios, draw_cores, draw_device};
 use games::draw_games;
 use modal::draw_modal;
 
@@ -275,7 +271,7 @@ fn draw_header(frame: &mut Frame, app: &mut App, area: Rect) {
                 if let Some(d) = c.status.disk {
                     chip(
                         &mut chips,
-                        dim(format!("{} free", human::bytes(d.available_bytes))),
+                        dim(format!("{} free", text::bytes(d.available_bytes))),
                     );
                 }
             }
@@ -379,7 +375,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let [status_row, keys_row] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
 
-    match (&app.busy, app.download_pct) {
+    match (&app.busy.main, app.busy.download_pct) {
         (Some(b), Some(pct)) => {
             let [label, bar] =
                 Layout::horizontal([Constraint::Length(28), Constraint::Min(10)]).areas(status_row);
@@ -396,9 +392,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             );
         }
         _ => {
-            let mut status = match (&app.busy, app.last_log()) {
+            let mut status = match (&app.busy.main, app.last_log()) {
                 (Some(b), _) => Line::from(fg(
-                    match app.busy_step {
+                    match app.busy.step {
                         Some((done, total)) => format!(" {} {b}  {done}/{total}", spinner()),
                         None => format!(" {} {b}", spinner()),
                     },
@@ -407,10 +403,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 (None, Some(l)) => Line::from(vec![faint(" › "), dim(l.to_string())]),
                 (None, None) => Line::from(""),
             };
-            if let Some(roms) = &app.rom_status {
+            if let Some(roms) = &app.busy.roms {
                 status.push_span(dim(format!("   {} {roms}", spinner())));
             }
-            if let Some(side) = &app.side_status {
+            if let Some(side) = &app.busy.side {
                 status.push_span(dim(format!("   {} {side}", spinner())));
             }
             frame.render_widget(Paragraph::new(status), status_row);
@@ -480,7 +476,7 @@ fn card_tab(frame: &mut Frame, app: &App, area: Rect) -> bool {
 
 /// The body before the first load has landed.
 fn loading(app: &App) -> Paragraph<'static> {
-    let text = match &app.busy {
+    let text = match &app.busy.main {
         Some(b) => format!("{} {b}…", spinner()),
         None => format!("{} Loading…", spinner()),
     };

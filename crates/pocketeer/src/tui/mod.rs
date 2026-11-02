@@ -1,9 +1,11 @@
 //! Terminal UI. One worker thread runs core operations; the UI thread draws
-//! and handles keys. They talk over channels (`jobs.rs`).
+//! and handles keys. They talk over channels (`worker.rs`); what the worker
+//! plans and applies on request is `pending.rs`.
 
 mod app;
-mod jobs;
+mod pending;
 mod ui;
+mod worker;
 
 use std::{
     process::ExitCode,

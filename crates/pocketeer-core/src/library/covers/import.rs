@@ -1,10 +1,10 @@
 //! Validated local cover copies, independent of ROM names and source paths.
 
-use super::{CoverRecord, record};
+use super::CoverRecord;
 use crate::library::{Library, db};
+use crate::plan::{Applied, Plan};
 use crate::{Error, Result, fsutil};
 use image::{ImageFormat, ImageReader, Limits};
-use rusqlite::params;
 use serde::Serialize;
 use sha1::{Digest, Sha1};
 use std::{
@@ -30,6 +30,12 @@ pub struct ImportPlan {
     // The confirmation applies these exact validated bytes, even if the source moves.
     #[serde(skip)]
     image: Arc<[u8]>,
+}
+
+impl Plan for ImportPlan {
+    fn changes(&self) -> usize {
+        1
+    }
 }
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -70,7 +76,7 @@ pub fn plan(lib: &Library, game_id: i64, source: &Path) -> Result<ImportPlan> {
         .map_err(|e| invalid(format!("Cannot decode cover image: {e}")))?;
     let digest = format!("{:x}", Sha1::digest(&bytes));
     Ok(ImportPlan {
-        previous: record(lib.conn(), game_id)?,
+        previous: db::cover_record(lib.conn(), game_id)?,
         game,
         source: source.to_path_buf(),
         destination: PathBuf::from("covers/imported")
@@ -91,11 +97,16 @@ pub struct ImportResult {
     pub warnings: Vec<String>,
 }
 
+impl Applied for ImportResult {
+    fn failed(&self) -> usize {
+        0
+    }
+}
+
 pub fn apply(lib: &mut Library, plan: &ImportPlan) -> Result<ImportResult> {
     if lib.root() != plan.library_root {
-        return Err(Error::Usage {
-            message: "Library changed since preview; review again".into(),
-            hint: None,
+        return Err(Error::Stale {
+            what: "the library".into(),
         });
     }
     let root = lib.root().to_path_buf();
@@ -105,11 +116,10 @@ pub fn apply(lib: &mut Library, plan: &ImportPlan) -> Result<ImportResult> {
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| Error::db(e, "begin cover import"))?;
     if db::get_game(&tx, plan.game.id)?.as_ref() != Some(&plan.game)
-        || record(&tx, plan.game.id)? != plan.previous
+        || db::cover_record(&tx, plan.game.id)? != plan.previous
     {
-        return Err(Error::Usage {
-            message: "Game or cover changed since preview; review again".into(),
-            hint: None,
+        return Err(Error::Stale {
+            what: format!("{} or its cover", plan.game.name),
         });
     }
     let created = match fs::read(&destination) {
@@ -126,10 +136,7 @@ pub fn apply(lib: &mut Library, plan: &ImportPlan) -> Result<ImportResult> {
         Err(e) => return Err(Error::io(&destination, e)),
     };
     let saved = (|| -> Result<()> {
-        tx.execute("INSERT INTO covers (game_id,rel_path,status,fetched_at,imported) VALUES (?1,?2,'ok',?3,1)
-            ON CONFLICT(game_id) DO UPDATE SET rel_path=excluded.rel_path,status='ok',fetched_at=excluded.fetched_at,imported=1",
-            params![plan.game.id, plan.destination.to_string_lossy(), fsutil::now_secs()])
-            .map_err(|e| Error::db(e, "record imported cover"))?;
+        db::set_imported_cover(&tx, plan.game.id, &plan.destination)?;
         tx.commit().map_err(|e| Error::db(e, "commit cover import"))
     })();
     if let Err(e) = saved {
@@ -202,7 +209,12 @@ mod tests {
             fs::read(lib.root().join(result.path)).unwrap(),
             fs::read(&source).unwrap()
         );
-        assert!(record(lib.conn(), game.id).unwrap().unwrap().imported);
+        assert!(
+            db::cover_record(lib.conn(), game.id)
+                .unwrap()
+                .unwrap()
+                .imported
+        );
         assert!(apply(&mut lib, &preview).is_err());
     }
 
@@ -214,12 +226,12 @@ mod tests {
         image(&source, 10);
         let first = plan(&lib, game.id, &source).unwrap();
         apply(&mut lib, &first).unwrap();
-        let before = record(lib.conn(), game.id).unwrap();
+        let before = db::cover_record(lib.conn(), game.id).unwrap();
         image(&source, 90);
         let next = plan(&lib, game.id, &source).unwrap();
         lib.conn().execute_batch("CREATE TRIGGER reject_cover BEFORE UPDATE ON covers BEGIN SELECT RAISE(FAIL, 'test failure'); END;").unwrap();
         assert!(apply(&mut lib, &next).is_err());
-        assert_eq!(record(lib.conn(), game.id).unwrap(), before);
+        assert_eq!(db::cover_record(lib.conn(), game.id).unwrap(), before);
         assert_eq!(
             fs::read(lib.root().join(&first.destination)).unwrap(),
             first.image.as_ref()

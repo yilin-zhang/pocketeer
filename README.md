@@ -53,6 +53,32 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
+### Code organization
+
+`pocketeer-core` owns behavior; `pocketeer` is the CLI and the TUI on top of it.
+Core is four layers, and a lower layer never imports a higher one:
+
+```text
+fsutil/  net.rs  config.rs  error.rs  plan.rs   files, HTTP, settings, errors, the plan/apply contract
+catalog/                                        external knowledge: core inventory, DAT files, libretro sources
+card/     library/                              the SD card; the local library (neither imports the other)
+transfer/                                       card ⇄ library: matching, copies both ways, saves, change detection
+```
+
+Inside each layer one file is one concept: `card/mod.rs` has the card layout and
+detection, `card/roms.rs` the ROM scan and identity cache, `card/install/` the
+core installer, `library/db.rs` every SQL statement, `library/import.rs` the
+importer, and so on. Each write operation is a `plan_*` function returning plain
+data and an `apply_*` function taking it; `plan.rs` holds the two traits the
+front ends need from them.
+
+The binary is `ops/` (the use cases, shared by CLI and TUI, taking plain request
+structs), `text/` (human-readable renderings, one file per `ops` module),
+`cli.rs` (clap definitions and their conversion into requests), `main.rs`
+(dispatch) and `tui/` (`worker.rs` runs ops on background threads, `pending.rs`
+is one operation = one variant with its plan, preview and apply, `app/` is the
+state and keys, `ui/` draws).
+
 ## License
 
 AGPL-3.0-or-later. Parts are adapted from

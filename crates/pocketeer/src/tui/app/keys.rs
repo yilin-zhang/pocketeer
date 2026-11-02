@@ -18,7 +18,7 @@ impl App {
         if self.modal.is_some() {
             self.modal_key(key);
             if self.modal.is_none() {
-                self.path_worker.cancel();
+                self.path_input.cancel();
             }
             return;
         }
@@ -39,7 +39,7 @@ impl App {
             KeyCode::Char('2') => self.tab = Tab::Bios,
             KeyCode::Char('3') => self.tab = Tab::Games,
             KeyCode::Char('4') => self.tab = Tab::Device,
-            KeyCode::Char('r') if self.busy.is_none() => self.reload(),
+            KeyCode::Char('r') if self.busy.main.is_none() => self.reload(),
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
             KeyCode::PageDown => self.move_sel(10),
@@ -60,8 +60,8 @@ impl App {
                     self.rebuild_rows();
                 }
             }
-            _ if self.busy.is_some() => {
-                let busy = self.busy.clone().unwrap_or_default();
+            _ if self.busy.main.is_some() => {
+                let busy = self.busy.main.clone().unwrap_or_default();
                 self.notice(format!("⟳ {busy} — wait for it to finish."));
             }
             // Cores
@@ -335,7 +335,7 @@ impl App {
     /// applies / submits, the other closes the dialog.
     pub fn modal_activate(&mut self, primary: bool) {
         if matches!(&self.modal, Some(Modal::Input { kind, .. }) if kind.completes_paths()) {
-            self.path_worker.cancel();
+            self.path_input.cancel();
         }
         if !primary {
             self.modal = None;

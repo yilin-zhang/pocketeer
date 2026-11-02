@@ -4,10 +4,11 @@ use serde::Serialize;
 
 use crate::{
     Error, Result,
-    roms::rename::{FileRename, RenameKind, apply_renames, complete_name, stem, validate_name},
+    fsutil::names::{FileRename, RenameKind, apply_renames, complete_name, stem, validate_name},
+    plan::{Applied, Plan},
 };
 
-use super::{Library, covers, db, resolve_rom};
+use super::{Library, db, resolve_rom};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RenamePlan {
@@ -24,9 +25,9 @@ pub struct RenamePlan {
     pub library_file: Option<FileRename>,
 }
 
-impl RenamePlan {
+impl Plan for RenamePlan {
     /// File moves plus the index update.
-    pub fn changes(&self) -> usize {
+    fn changes(&self) -> usize {
         1 + self.library_file.is_some() as usize
     }
 }
@@ -102,21 +103,22 @@ pub struct RenameResult {
     pub library_renamed: usize,
 }
 
+impl Applied for RenameResult {
+    fn failed(&self) -> usize {
+        0
+    }
+}
+
 pub fn apply(lib: &mut Library, plan: &RenamePlan) -> Result<RenameResult> {
     let root = lib.root().to_path_buf();
     let tx = lib
         .conn_mut()
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| Error::db(e, "begin rename"))?;
-    let current: String = tx
-        .query_row("SELECT name FROM roms WHERE id = ?1", [plan.rom_id], |r| {
-            r.get(0)
-        })
-        .map_err(|e| Error::db(e, "validate rename preview"))?;
+    let current = db::rom_name(&tx, plan.rom_id)?;
     if current != plan.old_name {
-        return Err(Error::Usage {
-            message: "ROM changed since rename preview; preview again".into(),
-            hint: None,
+        return Err(Error::Stale {
+            what: format!("ROM {}", plan.old_name),
         });
     }
     let moves: Vec<_> = plan.library_file.iter().cloned().collect();
@@ -130,7 +132,7 @@ pub fn apply(lib: &mut Library, plan: &RenamePlan) -> Result<RenameResult> {
         )?;
         if plan.new_game_name != plan.old_game_name {
             db::rename_game(&tx, plan.game_id, &plan.new_game_name)?;
-            covers::reset_unfound(&tx, plan.game_id)?;
+            db::reset_unfound_cover(&tx, plan.game_id)?;
         }
         tx.commit().map_err(|e| Error::db(e, "commit rename"))
     })();
@@ -153,6 +155,51 @@ pub fn apply(lib: &mut Library, plan: &RenamePlan) -> Result<RenameResult> {
     Ok(RenameResult {
         library_renamed: renamed,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Batch: every game that matches a standard name.
+
+/// Library games whose file names aren't standard but match one: the rename
+/// each would get. `standard` is looked up per platform via `names`.
+pub fn standardize_plan(
+    lib: &Library,
+    platform: Option<&str>,
+    mut names: impl FnMut(&str) -> Option<Vec<String>>,
+) -> Result<Vec<RenamePlan>> {
+    let games = db::list_games(lib.conn(), platform, None)?;
+    let mut lists: std::collections::HashMap<String, Option<Vec<String>>> = Default::default();
+    let mut out = Vec::new();
+    for g in &games {
+        for rom in &g.roms {
+            let new_name = if let Some(name) = &rom.dat.rom_name {
+                name.clone()
+            } else {
+                // Once a DAT has been consulted, do not guess a different
+                // version from a similar filename.
+                if rom.dat.status != super::identify::Status::Unchecked || rom.verified {
+                    continue;
+                }
+                let list = lists
+                    .entry(g.platform.clone())
+                    .or_insert_with(|| names(&g.platform));
+                let Some(list) = list else {
+                    continue;
+                };
+                let Some(s) = crate::catalog::libretro::suggest(&rom.name, list) else {
+                    continue;
+                };
+                format!("{s}{}", crate::fsutil::names::extension(&rom.name))
+            };
+            if new_name == rom.name {
+                continue;
+            }
+            if let Ok(plan) = plan(lib, Some(&g.platform), &rom.id.to_string(), &new_name) {
+                out.push(plan);
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

@@ -3,23 +3,18 @@
 //! ```text
 //! ~/Pocketeer Library/
 //! ├── library.sqlite      index (games, roms, platforms, …)
-//! └── roms/<platform>/    managed ROM files, named as the DAT names them
+//! └── roms/<platform>/    managed ROM files, with user-controlled filenames
 //! ```
 //!
 //! Card presence is discovered from files and joined by content hash; no
 //! device registration or desired card contents are stored.
 
-pub mod card_import;
 pub mod covers;
 pub mod db;
 pub mod identify;
 pub mod import;
-pub mod matching;
-pub mod names;
 pub mod remove;
 pub mod rename;
-pub mod saves;
-pub mod transfer;
 
 use std::path::{Path, PathBuf};
 
