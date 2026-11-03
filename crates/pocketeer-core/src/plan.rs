@@ -1,13 +1,5 @@
-//! The shape every write operation in this crate shares.
-//!
-//! An operation is a `plan` function that returns a [`Plan`] (data,
-//! serialisable, nothing done yet) and [`apply`], the one way to carry a plan
-//! out. A plan remembers which card and library it was made against
-//! ([`Pinned`]); `apply` checks they are still the ones mounted before the
-//! plan touches anything. What a plan needs while it runs comes from
-//! [`Resources`]. The CLI prints the plan, applies it unless `--dry-run`, then
-//! prints the result; the TUI shows the plan in a dialog and applies it on
-//! confirmation.
+//! Shared progress, target identity checks and failure reports.
+//! Each business plan exposes its own apply method with explicit resources.
 
 use std::path::{Path, PathBuf};
 
@@ -17,7 +9,6 @@ use crate::{
     Error, ErrorInfo, Pocket, Result,
     fsutil::FileId,
     library::{DB_FILE, Library},
-    net::Net,
 };
 
 /// Progress events for long operations.
@@ -40,53 +31,11 @@ pub enum Event {
 
 pub type Progress<'a> = &'a mut dyn FnMut(Event);
 
-/// Something that can be previewed and then applied with [`apply`].
-pub trait Plan: Serialize {
-    type Output: Applied;
-
-    /// How many things applying this plan would change. Zero means there is
-    /// nothing to do and the plan is not applied.
-    fn changes(&self) -> usize;
-
-    /// Problems found while planning that count as failures even though
-    /// nothing ran (an unresolved save conflict, say). Default none.
-    fn errors(&self) -> usize {
-        0
-    }
-
-    /// The card and library this plan was made against.
-    fn pinned(&self) -> &Pinned;
-
-    /// Carries the plan out. Only [`apply`] can call it: it is the one that
-    /// can make a [`Checked`].
-    fn execute(
-        &mut self,
-        res: &mut Resources,
-        progress: Progress<'_>,
-        checked: Checked,
-    ) -> Result<Self::Output>;
-}
-
-/// Proof that a plan's [`Pinned`] card and library are the ones in
-/// `Resources`. Its field is private, so only [`apply`] makes one.
-pub struct Checked(());
-
-/// Applies `plan`: first makes sure the card and library it was made against
-/// are still the ones mounted (else [`Error::Stale`]), then carries it out.
-pub fn apply<P: Plan>(
-    res: &mut Resources,
-    plan: &mut P,
-    progress: Progress<'_>,
-) -> Result<P::Output> {
-    plan.pinned().check(res)?;
-    plan.execute(res, progress, Checked(()))
-}
-
 /// Which card and library a plan was made against: their folders and what
 /// they were on disk then. A card swapped at the same mount point, or a
 /// library replaced at the same path, reads differently.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Pinned {
+pub(crate) struct Pinned {
     card: Option<Pin>,
     library: Option<Pin>,
 }
@@ -160,74 +109,6 @@ impl Pinned {
             }),
             _ => Ok(()),
         }
-    }
-
-    fn check(&self, res: &mut Resources) -> Result<()> {
-        if self.card.is_some() {
-            self.check_card(res.pocket()?)?;
-        }
-        if self.library.is_some() {
-            self.check_library(res.library()?)?;
-        }
-        Ok(())
-    }
-}
-
-/// What plans need while they run: the card, the library and the network,
-/// each opened the first time a plan asks for it, so work that needs only one
-/// of them never fails over the others. The front end says how to open each.
-pub struct Resources {
-    pocket: Lazy<Pocket>,
-    library: Lazy<Library>,
-    net: Lazy<Net>,
-}
-
-type Opener<T> = Box<dyn FnMut() -> Result<T> + Send>;
-
-struct Lazy<T> {
-    value: Option<T>,
-    open: Opener<T>,
-}
-
-impl<T> Lazy<T> {
-    fn new(open: impl FnMut() -> Result<T> + Send + 'static) -> Self {
-        Lazy {
-            value: None,
-            open: Box::new(open),
-        }
-    }
-
-    fn get(&mut self) -> Result<&mut T> {
-        if self.value.is_none() {
-            self.value = Some((self.open)()?);
-        }
-        Ok(self.value.as_mut().expect("opened above"))
-    }
-}
-
-impl Resources {
-    pub fn new(
-        pocket: impl FnMut() -> Result<Pocket> + Send + 'static,
-        library: impl FnMut() -> Result<Library> + Send + 'static,
-        net: impl FnMut() -> Result<Net> + Send + 'static,
-    ) -> Self {
-        Resources {
-            pocket: Lazy::new(pocket),
-            library: Lazy::new(library),
-            net: Lazy::new(net),
-        }
-    }
-
-    pub fn pocket(&mut self) -> Result<&Pocket> {
-        self.pocket.get().map(|p| &*p)
-    }
-
-    pub fn library(&mut self) -> Result<&mut Library> {
-        self.library.get()
-    }
-
-    pub fn net(&mut self) -> Result<&Net> {
-        self.net.get().map(|n| &*n)
     }
 }
 

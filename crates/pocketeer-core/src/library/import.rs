@@ -24,7 +24,7 @@ use crate::{
         hash::{HashCache, Hashes, copy_and_hash},
         scan::{Candidate, hash_candidate},
     },
-    plan::{Applied, Checked, Event, Failure, Pinned, Plan, Progress, Resources},
+    plan::{Applied, Event, Failure, Pinned, Progress},
 };
 
 use super::{
@@ -123,24 +123,14 @@ pub struct ImportPlan {
     pinned: Pinned,
 }
 
-impl Plan for ImportPlan {
-    type Output = ImportResult;
-
-    fn changes(&self) -> usize {
+impl ImportPlan {
+    pub fn changes(&self) -> usize {
         self.summary.add
     }
 
-    fn pinned(&self) -> &Pinned {
-        &self.pinned
-    }
-
-    fn execute(
-        &mut self,
-        res: &mut Resources,
-        progress: Progress<'_>,
-        _: Checked,
-    ) -> Result<ImportResult> {
-        copy_in(res.library()?, self, progress)
+    pub fn apply(&mut self, lib: &mut Library, progress: Progress<'_>) -> Result<ImportResult> {
+        self.pinned.check_library(lib)?;
+        copy_in(lib, self, progress)
     }
 }
 
@@ -463,13 +453,8 @@ enum Indexed {
     Duplicate(String),
 }
 
-/// Copies the planned files in. The caller has checked the plan's pins; a
-/// card import runs this too, for the files it takes off the card.
-pub(crate) fn copy_in(
-    lib: &mut Library,
-    plan: &ImportPlan,
-    progress: Progress<'_>,
-) -> Result<ImportResult> {
+/// Copies files after apply has checked the library identity.
+fn copy_in(lib: &mut Library, plan: &ImportPlan, progress: Progress<'_>) -> Result<ImportResult> {
     let root = lib.root().to_path_buf();
     let total = plan.changes();
     progress(Event::Status(format!("Importing {total} file(s)")));
@@ -686,7 +671,9 @@ mod tests {
         assert_eq!(plan.summary.verified, 3);
         assert_eq!(plan.summary.unverified, 1);
 
-        let r = crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
+        let r = plan
+            .apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+            .unwrap();
         assert_eq!(r.added, 4);
         assert!(r.failed.is_empty());
         assert_eq!(
@@ -770,7 +757,9 @@ mod tests {
             "{k:?}"
         );
 
-        let r = crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
+        let r = plan
+            .apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+            .unwrap();
         assert_eq!(r.added, 3);
         assert!(
             lib.root().join("roms/fkh/Hello World (USA).fkh").exists(),
@@ -813,7 +802,9 @@ mod tests {
                 ..
             }
         )));
-        let r = crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
+        let r = plan
+            .apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+            .unwrap();
         assert_eq!(r.added, 1);
         assert_eq!(r.duplicates.len(), 1);
         assert_eq!(r.duplicates[0].existing, "a.fkh");
@@ -840,7 +831,8 @@ mod tests {
             &mut |_| {},
         )
         .unwrap();
-        crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
+        plan.apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+            .unwrap();
         let managed = lib.root().join("roms/fkh/random.fkh");
         fs::write(src.path().join("random.fkh"), "changed source").unwrap();
         assert_eq!(fs::read_to_string(&managed).unwrap(), "not in dat");
@@ -898,7 +890,9 @@ mod tests {
         )
         .unwrap();
         write(lib.root(), "roms/fkh/a.fkh", "existing bytes");
-        let result = crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
+        let result = plan
+            .apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+            .unwrap();
         assert_eq!(result.failed.len(), 1);
         assert_eq!(
             fs::read(lib.root().join("roms/fkh/a.fkh")).unwrap(),
@@ -907,7 +901,9 @@ mod tests {
         assert!(lib.list_games(None, None).unwrap().is_empty());
         fs::remove_file(lib.root().join("roms/fkh/a.fkh")).unwrap();
         lib.conn().execute_batch("CREATE TRIGGER reject_import BEFORE INSERT ON roms BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
-        let result = crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
+        let result = plan
+            .apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+            .unwrap();
         assert_eq!(result.failed.len(), 1);
         assert!(!lib.root().join("roms/fkh/a.fkh").exists());
         assert!(lib.list_games(None, None).unwrap().is_empty());
@@ -934,10 +930,42 @@ mod tests {
         .unwrap();
         assert_eq!(plan.changes(), 1);
         write(&source, "Hello World (USA).fkh", "changed ROM");
-        let result = crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
+        let result = plan
+            .apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+            .unwrap();
         assert_eq!(result.failed.len(), 1);
         assert_eq!(result.added, 0);
         assert!(lib.list_games(None, None).unwrap().is_empty());
         assert!(!lib.root().join("roms/fkh/Hello World (USA).fkh").exists());
+    }
+    #[test]
+    fn import_refuses_a_library_replaced_at_the_same_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        let lib = Library::init(&root).unwrap();
+        let source = tmp.path().join("game.gba");
+        fs::write(&source, "ROM").unwrap();
+        let mut plan = plan_folder(
+            &lib,
+            &source,
+            Some("gba"),
+            &[],
+            &ImportOptions::default(),
+            None,
+            &mut HashCache::in_memory(),
+            &mut |_| {},
+        )
+        .unwrap();
+        drop(lib);
+        fs::rename(&root, tmp.path().join("previous-library")).unwrap();
+        let mut replacement = Library::init(&root).unwrap();
+        assert_eq!(
+            plan.apply(&mut replacement, &mut |_| {})
+                .unwrap_err()
+                .code(),
+            "STALE_PLAN"
+        );
+        assert!(replacement.list_games(None, None).unwrap().is_empty());
+        assert!(!root.join("roms/gba/game.gba").exists());
     }
 }

@@ -14,7 +14,7 @@ use super::{SaveInfo, current, inspect, validate_path, versions, versions_by_id}
 use crate::{
     Error, Pocket, Result,
     library::{Library, db},
-    plan::{Applied, Checked, Failure, Pinned, Plan, Progress, Resources},
+    plan::{Applied, Failure, Pinned, Progress},
 };
 
 /// Which copies of a save to throw away.
@@ -55,25 +55,24 @@ pub struct TrashPlan {
     pinned: Pinned,
 }
 
-impl Plan for TrashPlan {
-    type Output = TrashResult;
-
-    fn changes(&self) -> usize {
+impl TrashPlan {
+    pub fn changes(&self) -> usize {
         self.files.len()
     }
 
-    fn pinned(&self) -> &Pinned {
-        &self.pinned
-    }
-
-    fn execute(&mut self, res: &mut Resources, _: Progress<'_>, _: Checked) -> Result<TrashResult> {
-        // Only throwing away the card copy needs the card.
-        let pocket = match self.target {
-            TrashTarget::Card => Some(res.pocket()?.clone()),
-            _ => None,
-        };
-        let pocket = pocket.as_ref();
-        let lib = res.library()?;
+    pub fn apply(
+        &mut self,
+        lib: &mut Library,
+        pocket: Option<&Pocket>,
+        _: Progress<'_>,
+    ) -> Result<TrashResult> {
+        if self.target == TrashTarget::Card {
+            let pocket = pocket.ok_or(Error::SdNotFound {
+                searched: Vec::new(),
+            })?;
+            self.pinned.check_card(pocket)?;
+        }
+        self.pinned.check_library(lib)?;
         let mut result = TrashResult::default();
         if let Some(observed) = &self.card {
             let pocket = pocket.ok_or(Error::SdNotFound {
@@ -266,7 +265,8 @@ mod tests {
 
     fn back_up(lib: &mut Library, pocket: &Pocket) {
         let mut p = plan(lib, pocket, SavesOptions::default(), &mut |_| {}).unwrap();
-        crate::testutil::apply(&mut p, Some(pocket), Some(lib)).unwrap();
+        p.apply(&mut crate::testutil::reopen(lib), pocket, &mut |_| {})
+            .unwrap();
     }
 
     #[test]
@@ -289,7 +289,13 @@ mod tests {
         )
         .unwrap();
         assert!(p.files[0].archive_first);
-        let r = crate::testutil::apply(&mut p, Some(&pocket), Some(&lib)).unwrap();
+        let r = p
+            .apply(
+                &mut crate::testutil::reopen(&lib),
+                Some(&pocket),
+                &mut |_| {},
+            )
+            .unwrap();
         assert_eq!((r.trashed, r.archived), (1, 1));
         assert!(!pocket.root().join(REL).exists());
         assert_eq!(versions(&lib, &rel).unwrap().len(), 2);
@@ -303,7 +309,9 @@ mod tests {
             TrashTarget::Version(oldest.id),
         )
         .unwrap();
-        let r = crate::testutil::apply(&mut p, None, Some(&lib)).unwrap();
+        let r = p
+            .apply(&mut crate::testutil::reopen(&lib), None, &mut |_| {})
+            .unwrap();
         let trash = lib.root().join(r.trash.unwrap());
         assert_eq!(
             std::fs::read(trash.join(&oldest.stored_path)).unwrap(),
@@ -315,7 +323,8 @@ mod tests {
         let mut p =
             plan_trash(&lib, None, std::slice::from_ref(&rel), TrashTarget::Library).unwrap();
         assert_eq!(p.files.len(), 2);
-        crate::testutil::apply(&mut p, None, Some(&lib)).unwrap();
+        p.apply(&mut crate::testutil::reopen(&lib), None, &mut |_| {})
+            .unwrap();
         assert!(versions(&lib, &rel).unwrap().is_empty());
         assert!(!current(&lib, &rel).exists());
     }
@@ -337,8 +346,46 @@ mod tests {
         assert!(!p.files[0].archive_first);
         // Changed after the plan: refused.
         write(pocket.root(), REL, "changed", 500);
-        let r = crate::testutil::apply(&mut p, Some(&pocket), Some(&lib)).unwrap();
+        let r = p
+            .apply(
+                &mut crate::testutil::reopen(&lib),
+                Some(&pocket),
+                &mut |_| {},
+            )
+            .unwrap();
         assert_eq!(r.failed.len(), 1);
+        assert!(pocket.root().join(REL).exists());
+    }
+    #[test]
+    fn trash_checks_card_and_library_before_removing_a_save() {
+        let (_tmp, pocket) = sd();
+        let (_lib_dir, mut lib) = crate::testutil::library_with(&[]);
+        write(pocket.root(), REL, "save", 100);
+        let mut preview = plan_trash(
+            &lib,
+            Some(&pocket),
+            &[PathBuf::from(REL)],
+            TrashTarget::Card,
+        )
+        .unwrap();
+        let (_other_dir, mut other) = crate::testutil::library_with(&[]);
+        assert_eq!(
+            preview
+                .apply(&mut other, Some(&pocket), &mut |_| {})
+                .unwrap_err()
+                .code(),
+            "STALE_PLAN"
+        );
+        assert!(pocket.root().join(REL).exists());
+        let aside = tempfile::tempdir().unwrap();
+        crate::testutil::swap_card(&pocket, aside.path());
+        assert_eq!(
+            preview
+                .apply(&mut lib, Some(&pocket), &mut |_| {})
+                .unwrap_err()
+                .code(),
+            "STALE_PLAN"
+        );
         assert!(pocket.root().join(REL).exists());
     }
 }

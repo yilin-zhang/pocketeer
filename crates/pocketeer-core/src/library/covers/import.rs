@@ -2,7 +2,7 @@
 
 use super::Cover;
 use crate::library::{Library, db};
-use crate::plan::{Applied, Checked, Pinned, Plan, Progress, Resources};
+use crate::plan::{Applied, Pinned, Progress};
 use crate::{Error, ErrorInfo, Result, fsutil};
 use image::{ImageFormat, ImageReader, Limits};
 use serde::Serialize;
@@ -40,24 +40,13 @@ impl CoverImportPlan {
     }
 }
 
-impl Plan for CoverImportPlan {
-    type Output = CoverImportResult;
-
-    fn changes(&self) -> usize {
+impl CoverImportPlan {
+    pub fn changes(&self) -> usize {
         1
     }
 
-    fn pinned(&self) -> &Pinned {
-        &self.pinned
-    }
-
-    fn execute(
-        &mut self,
-        res: &mut Resources,
-        _: Progress<'_>,
-        _: Checked,
-    ) -> Result<CoverImportResult> {
-        let lib = res.library()?;
+    pub fn apply(&mut self, lib: &mut Library, _: Progress<'_>) -> Result<CoverImportResult> {
+        self.pinned.check_library(lib)?;
         let root = lib.root().to_path_buf();
         let destination = root.join(&self.destination);
         let tx = lib
@@ -201,12 +190,16 @@ mod tests {
         let mut preview = plan(&lib, game.id, &source).unwrap();
         assert_eq!((preview.width, preview.height), (3, 2));
         assert!(covers::path_for(&lib, game.id).unwrap().is_none());
-        let result = crate::testutil::apply(&mut preview, None, Some(&lib)).unwrap();
+        let result = preview
+            .apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+            .unwrap();
         let old = lib.root().join(&result.path);
         assert_eq!(fs::read(&old).unwrap(), original);
         fs::remove_file(&source).unwrap();
         let mut rename = rename::plan(&lib, None, "game.gba", "renamed").unwrap();
-        crate::testutil::apply(&mut rename, None, Some(&lib)).unwrap();
+        rename
+            .apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+            .unwrap();
         assert_eq!(covers::path_for(&lib, game.id).unwrap(), Some(old.clone()));
 
         fs::write(&source, b"invalid image").unwrap();
@@ -217,7 +210,9 @@ mod tests {
         assert_eq!(fs::read(&old).unwrap(), original);
         image(&source, 90);
         let mut replacement = plan(&lib, game.id, &source).unwrap();
-        let result = crate::testutil::apply(&mut replacement, None, Some(&lib)).unwrap();
+        let result = replacement
+            .apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+            .unwrap();
         assert!(result.replaced);
         assert!(!old.exists());
         assert_eq!(
@@ -230,7 +225,8 @@ mod tests {
         ));
         // The first preview is out of date now.
         assert_eq!(
-            crate::testutil::apply(&mut preview, None, Some(&lib))
+            preview
+                .apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
                 .unwrap_err()
                 .code(),
             "STALE_PLAN"
@@ -246,7 +242,9 @@ mod tests {
             .save_with_format(&source, image::ImageFormat::WebP)
             .unwrap();
         let mut preview = plan(&lib, game.id, &source).unwrap();
-        let result = crate::testutil::apply(&mut preview, None, Some(&lib)).unwrap();
+        let result = preview
+            .apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+            .unwrap();
         assert_eq!(result.path.extension().unwrap(), "webp");
         // Copied as is: the transparency survives.
         assert_eq!(
@@ -262,12 +260,17 @@ mod tests {
         let source = tmp.path().join("art.jpg");
         image(&source, 10);
         let mut first = plan(&lib, game.id, &source).unwrap();
-        crate::testutil::apply(&mut first, None, Some(&lib)).unwrap();
+        first
+            .apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+            .unwrap();
         let before = db::cover(lib.conn(), game.id).unwrap();
         image(&source, 90);
         let mut next = plan(&lib, game.id, &source).unwrap();
         lib.conn().execute_batch("CREATE TRIGGER reject_cover BEFORE UPDATE ON covers BEGIN SELECT RAISE(FAIL, 'test failure'); END;").unwrap();
-        assert!(crate::testutil::apply(&mut next, None, Some(&lib)).is_err());
+        assert!(
+            next.apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+                .is_err()
+        );
         assert_eq!(db::cover(lib.conn(), game.id).unwrap(), before);
         assert_eq!(
             fs::read(lib.root().join(&first.destination)).unwrap(),
@@ -275,5 +278,19 @@ mod tests {
         );
         assert!(!lib.root().join(next.destination).exists());
         assert!(source.exists());
+    }
+    #[test]
+    fn cover_import_refuses_another_library_before_writing() {
+        let (tmp, lib) = crate::testutil::library_on("gba", &[("game.gba", "ROM")]);
+        let source = tmp.path().join("cover.png");
+        image(&source, 90);
+        let game = lib.list_games(None, None).unwrap().remove(0);
+        let mut preview = plan(&lib, game.id, &source).unwrap();
+        let (_other_dir, mut other) = crate::testutil::library_on("gba", &[("game.gba", "ROM")]);
+        assert_eq!(
+            preview.apply(&mut other, &mut |_| {}).unwrap_err().code(),
+            "STALE_PLAN"
+        );
+        assert!(!other.root().join(&preview.destination).exists());
     }
 }

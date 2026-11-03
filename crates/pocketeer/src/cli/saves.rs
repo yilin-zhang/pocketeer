@@ -128,7 +128,12 @@ pub fn run(ctx: &Context, cmd: SavesCommand, progress: Progress<'_>) -> Result<O
             let scope = if no_states { Scope::Saves } else { Scope::All };
             let plan =
                 saves::plan_backup(ctx, scope, conflicts.map(SaveConflictArg::choice), progress)?;
-            Ok(stage(ctx, apply.into(), plan, progress)?.outcome())
+            let errors = plan.errors();
+            Ok(stage(apply.into(), plan.changes(), plan, |p| {
+                p.apply(&mut ctx.library()?, &ctx.pocket()?, progress)
+            })?
+            .planning_errors(errors)
+            .outcome())
         }
         SavesCommand::List => {
             let report = saves::list(ctx)?;
@@ -149,8 +154,18 @@ pub fn run(ctx: &Context, cmd: SavesCommand, progress: Progress<'_>) -> Result<O
             version,
             apply,
         } => {
-            let plan = saves::plan_restore(ctx, &path, version)?;
-            Ok(stage(ctx, apply.into(), plan, progress)?.outcome())
+            let plan = pocketeer_core::transfer::saves::plan_restore(
+                &ctx.library()?,
+                &ctx.pocket()?,
+                &path,
+                version,
+            )?;
+            let errors = plan.errors();
+            Ok(stage(apply.into(), plan.changes(), plan, |p| {
+                p.apply(&mut ctx.library()?, &ctx.pocket()?, progress)
+            })?
+            .planning_errors(errors)
+            .outcome())
         }
         SavesCommand::Trash {
             path,
@@ -166,7 +181,15 @@ pub fn run(ctx: &Context, cmd: SavesCommand, progress: Progress<'_>) -> Result<O
                 _ => TrashTarget::Library,
             };
             let plan = saves::plan_trash(ctx, &[path], target)?;
-            Ok(stage(ctx, apply.into(), plan, progress)?.outcome())
+            Ok(stage(apply.into(), plan.changes(), plan, |p| {
+                let card = if p.target == TrashTarget::Card {
+                    Some(ctx.pocket()?)
+                } else {
+                    None
+                };
+                p.apply(&mut ctx.library()?, card.as_ref(), progress)
+            })?
+            .outcome())
         }
     }
 }
@@ -177,11 +200,25 @@ pub fn memories(ctx: &Context, cmd: MemoriesCommand, progress: Progress<'_>) -> 
         MemoriesCommand::Backup { conflicts, apply } => {
             let choice = conflicts.map(SaveConflictArg::choice);
             let plan = saves::plan_backup(ctx, Scope::Memories, choice, progress)?;
-            Ok(stage(ctx, apply.into(), plan, progress)?.outcome())
+            let errors = plan.errors();
+            Ok(stage(apply.into(), plan.changes(), plan, |p| {
+                p.apply(&mut ctx.library()?, &ctx.pocket()?, progress)
+            })?
+            .planning_errors(errors)
+            .outcome())
         }
         MemoriesCommand::Restore { path, apply } => {
-            let plan = memories::plan_restore(ctx, &path)?;
-            Ok(stage(ctx, apply.into(), plan, progress)?.outcome())
+            let plan = pocketeer_core::transfer::memories::plan_restore(
+                &ctx.library()?,
+                &ctx.pocket()?,
+                &path,
+            )?;
+            let errors = plan.errors();
+            Ok(stage(apply.into(), plan.changes(), plan, |p| {
+                p.apply(&mut ctx.library()?, &ctx.pocket()?, progress)
+            })?
+            .planning_errors(errors)
+            .outcome())
         }
         MemoriesCommand::Trash { path, card, apply } => {
             let target = if card {
@@ -190,7 +227,15 @@ pub fn memories(ctx: &Context, cmd: MemoriesCommand, progress: Progress<'_>) -> 
                 TrashTarget::Library
             };
             let plan = memories::plan_trash(ctx, &path, target)?;
-            Ok(stage(ctx, apply.into(), plan, progress)?.outcome())
+            Ok(stage(apply.into(), plan.changes(), plan, |p| {
+                let card = if p.target == TrashTarget::Card {
+                    Some(ctx.pocket()?)
+                } else {
+                    None
+                };
+                p.apply(&mut ctx.library()?, card.as_ref(), progress)
+            })?
+            .outcome())
         }
     }
 }

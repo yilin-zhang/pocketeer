@@ -16,7 +16,7 @@ use crate::{
         hash::HashCache,
         scan::{Candidate, FileRef},
     },
-    plan::{Checked, Pinned, Plan, Progress, Resources},
+    plan::{Pinned, Progress},
 };
 
 use crate::library::{
@@ -63,41 +63,36 @@ pub struct CardImportPlan {
     pub not_found: Vec<PathBuf>,
 }
 
-impl Plan for CardImportPlan {
-    type Output = ImportResult;
-
-    fn changes(&self) -> usize {
+impl CardImportPlan {
+    pub fn changes(&self) -> usize {
         self.plan.changes()
     }
 
-    fn errors(&self) -> usize {
+    pub fn errors(&self) -> usize {
         self.not_found.len()
-    }
-
-    fn pinned(&self) -> &Pinned {
-        &self.pinned
     }
 
     /// Copies the planned files into the library, then records their hashes
     /// in the card's ROM cache so it needn't read them again.
-    fn execute(
+    pub fn apply(
         &mut self,
-        res: &mut Resources,
+        lib: &mut Library,
+        pocket: &Pocket,
         progress: Progress<'_>,
-        _: Checked,
     ) -> Result<ImportResult> {
-        let pocket = res.pocket()?.clone();
-        let mut result = import::copy_in(res.library()?, &self.plan, progress)?;
-        let mut index = crate::card::roms::Index::scan(&pocket)?;
+        self.pinned.check_card(pocket)?;
+        self.pinned.check_library(lib)?;
+        let mut result = self.plan.apply(lib, progress)?;
+        let mut index = crate::card::roms::Index::scan(pocket)?;
         for verified in &result.verified_sources {
             let Ok(relative) = verified.path.strip_prefix(pocket.root()) else {
                 continue;
             };
             if Stamp::of(&verified.path).ok() == Some(verified.stamp) {
-                index.record_copy(&pocket, relative, &verified.sha1);
+                index.record_copy(pocket, relative, &verified.sha1);
             }
         }
-        index.save(&pocket);
+        index.save(pocket);
         result.warnings.extend(index.take_warnings());
         Ok(result)
     }
@@ -129,7 +124,7 @@ pub fn plan_import(
     }
     let plan = import::plan_import(lib, pocket.root(), &groups, opts, dat, cache, progress)?;
     Ok(CardImportPlan {
-        pinned: plan.pinned().clone().and_card(pocket)?,
+        pinned: Pinned::library(lib)?.and_card(pocket)?,
         plan,
         not_found,
     })
@@ -206,7 +201,9 @@ mod tests {
         .unwrap();
         assert_eq!(plan.plan.platforms().len(), 2);
         assert_eq!(plan.changes(), 4);
-        let result = crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
+        let result = plan
+            .apply(&mut crate::testutil::reopen(&lib), &pocket, &mut |_| {})
+            .unwrap();
         assert_eq!(result.added, 4);
         assert!(lib.root().join("roms/fkh/Only Here.fkh").is_file());
         assert!(lib.root().join("roms/gb/Other.gb").is_file());
@@ -217,5 +214,40 @@ mod tests {
 
         let after = list(&lib, &pocket, None).unwrap();
         assert!(after.is_empty(), "{after:?}");
+    }
+    #[test]
+    fn card_import_checks_both_targets_before_copying() {
+        let (_tmp, mut lib) = crate::testutil::library_with(&[]);
+        let (_card, pocket) = crate::testutil::sd();
+        crate::testutil::write(pocket.root(), "Assets/gba/common/game.gba", "ROM");
+        let roms = list(&lib, &pocket, None).unwrap();
+        let mut plan = plan_import(
+            &lib,
+            &pocket,
+            &roms,
+            Vec::new(),
+            None,
+            &ImportOptions::default(),
+            &mut HashCache::in_memory(),
+            &mut |_| {},
+        )
+        .unwrap();
+        let (_other, mut other) = crate::testutil::library_with(&[]);
+        assert_eq!(
+            plan.apply(&mut other, &pocket, &mut |_| {})
+                .unwrap_err()
+                .code(),
+            "STALE_PLAN"
+        );
+        assert!(other.list_games(None, None).unwrap().is_empty());
+        let aside = tempfile::tempdir().unwrap();
+        crate::testutil::swap_card(&pocket, aside.path());
+        assert_eq!(
+            plan.apply(&mut lib, &pocket, &mut |_| {})
+                .unwrap_err()
+                .code(),
+            "STALE_PLAN"
+        );
+        assert!(lib.list_games(None, None).unwrap().is_empty());
     }
 }

@@ -92,7 +92,7 @@ pub fn plan_install(
     ctx: &Context,
     req: &InstallRequest,
     progress: &mut dyn FnMut(Event),
-) -> Result<Batch<Prepared>> {
+) -> Result<Batch<Prepared, install::Changes>> {
     let pocket = ctx.pocket()?;
     let opts = PlanOptions {
         force: req.force,
@@ -119,7 +119,7 @@ pub fn plan_update(
     targets: &Targets,
     keep_platforms: bool,
     progress: &mut dyn FnMut(Event),
-) -> Result<Batch<Prepared>> {
+) -> Result<Batch<Prepared, install::Changes>> {
     let pocket = ctx.pocket()?;
     let net = ctx.net()?;
     let installed = cores::list_installed(&pocket)?;
@@ -137,7 +137,11 @@ pub fn plan_update(
 }
 
 /// Plans removing each of `ids`; `purge` takes its assets and saves too.
-pub fn plan_remove(ctx: &Context, ids: &[String], purge: bool) -> Result<Batch<UninstallPlan>> {
+pub fn plan_remove(
+    ctx: &Context,
+    ids: &[String],
+    purge: bool,
+) -> Result<Batch<UninstallPlan, install::Changes>> {
     let pocket = ctx.pocket()?;
     let installed = cores::list_installed(&pocket)?;
     Ok(Batch::plan(ids.iter().map(|id| {

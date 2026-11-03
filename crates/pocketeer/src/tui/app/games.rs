@@ -5,7 +5,13 @@
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent};
-use pocketeer_core::{card::roms::CardRom, catalog, names, transfer::Presence};
+use pocketeer_core::{
+    card::roms::{self, CardRom},
+    catalog,
+    library::{covers::import as cover_import, remove},
+    names,
+    transfer::{Presence, to_card},
+};
 use ratatui::layout::Size;
 use ratatui_image::picker::Picker;
 
@@ -25,10 +31,7 @@ use crate::{
         card::{self as card_cmd, ImportRequest},
         library as library_ops,
     },
-    tui::{
-        pending::{self, Import},
-        worker::GameRow,
-    },
+    tui::{app::Import, pending, worker::GameRow},
 };
 
 /// Where a game has to be to show up.
@@ -374,8 +377,14 @@ impl Games {
         let platform = Some(game.game.platform.clone());
         let roms: Vec<String> = game.game.roms.iter().map(|r| r.id.to_string()).collect();
         cx.session.plan("Planning copy", move |ctx, progress| {
-            let plan = card_cmd::plan_copy(ctx, platform.as_deref(), &roms, progress)?;
-            Ok(pending::preview(plan))
+            let plan = to_card::plan(
+                &ctx.library()?,
+                &ctx.pocket()?,
+                platform.as_deref(),
+                &roms,
+                progress,
+            )?;
+            Ok(pending::copy(plan))
         });
     }
 
@@ -408,7 +417,7 @@ impl Games {
         };
         cx.session.plan("Planning import", move |ctx, progress| {
             let plan = card_cmd::plan_import(ctx, &request, progress)?;
-            Ok(pending::preview(Import::Card(plan)))
+            Ok((Import::Card(plan)).preview())
         });
     }
 
@@ -417,7 +426,10 @@ impl Games {
     fn remove(&self, cx: &mut Cx) {
         if let Some(o) = self.selected_card_rom(cx.session).cloned() {
             cx.session.plan("Planning", move |ctx, _| {
-                Ok(pending::preview(card_cmd::plan_delete(ctx, &o.rel_path)?))
+                Ok(pending::delete(roms::plan_delete(
+                    &ctx.pocket()?,
+                    &o.rel_path,
+                )?))
             });
             return;
         }
@@ -427,8 +439,8 @@ impl Games {
         let platform = game.game.platform.clone();
         let specs: Vec<String> = game.game.roms.iter().map(|r| r.id.to_string()).collect();
         cx.session.plan("Planning", move |ctx, _| {
-            let plan = library_ops::plan_remove(ctx, Some(&platform), &specs)?;
-            Ok(pending::preview(plan))
+            let plan = remove::plan(&ctx.library()?, Some(&platform), &specs)?;
+            Ok(pending::remove(plan))
         });
     }
 
@@ -525,8 +537,10 @@ pub fn answer(cx: &mut Cx, step: CoverStep, answer: Answer) {
         CoverStep::Image { game_id } => {
             let source = PathBuf::from(expand_home(value));
             cx.session.plan("Checking cover image", move |ctx, _| {
-                Ok(pending::preview(library_ops::plan_cover(
-                    ctx, game_id, &source,
+                Ok(pending::cover(cover_import::plan(
+                    &ctx.library()?,
+                    game_id,
+                    &source,
                 )?))
             })
         }

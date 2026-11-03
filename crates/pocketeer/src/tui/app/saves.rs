@@ -9,11 +9,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use pocketeer_core::names;
 use pocketeer_core::transfer::{
     Presence,
     saves::{
-        self, ConflictChoice, PullReason, SaveAction, SaveSkip, SavesOptions, Scope, TrashTarget,
-        expected_saves,
+        self, ConflictChoice, PullReason, SaveAction, SaveSkip, SavesOptions, SavesPlan, Scope,
+        TrashTarget, expected_saves,
     },
 };
 
@@ -25,9 +26,9 @@ use super::{
 };
 use crate::{
     ops::saves as saves_cmd,
-    text,
+    text::{self, Label},
     tui::{
-        pending::{self, SaveGames, SaveSync},
+        pending::{self, Preview, confirm},
         worker::SavesView,
     },
 };
@@ -209,8 +210,8 @@ pub fn back_up(cx: &mut Cx, only: Option<Vec<PathBuf>>, games: SaveGames) {
         only,
     };
     cx.session.plan("Comparing saves", move |ctx, progress| {
-        let plan = saves_cmd::plan_sync(ctx, opts, progress)?;
-        Ok(pending::preview(SaveSync { plan, games }))
+        let plan = saves::plan(&ctx.library()?, &ctx.pocket()?, opts, progress)?;
+        Ok((SaveSync { plan, games }).preview())
     });
 }
 
@@ -244,8 +245,8 @@ pub fn restore(cx: &mut Cx, line: &SaveLine, games: SaveGames) {
     }
     let rel = line.rel().to_path_buf();
     cx.session.plan("Planning restore", move |ctx, _| {
-        let plan = saves_cmd::plan_restore(ctx, &rel, version)?;
-        Ok(pending::preview(SaveSync { plan, games }))
+        let plan = saves::plan_restore(&ctx.library()?, &ctx.pocket()?, &rel, version)?;
+        Ok((SaveSync { plan, games }).preview())
     });
 }
 
@@ -267,7 +268,7 @@ pub fn trash(cx: &mut Cx, line: &SaveLine) {
     }
     let rels = vec![line.rel().to_path_buf()];
     cx.session.plan("Planning", move |ctx, _| {
-        Ok(pending::preview(saves_cmd::plan_trash(ctx, &rels, target)?))
+        Ok(pending::trash(saves_cmd::plan_trash(ctx, &rels, target)?))
     });
 }
 
@@ -329,5 +330,80 @@ pub fn answer(cx: &mut Cx, step: Step, answer: Answer) {
             _ => ConflictChoice::Skip,
         },
     );
-    cx.planned(*backup);
+    cx.show((*backup).preview());
+}
+
+/// Card path of a save → the name of the game it belongs to.
+pub type SaveGames = BTreeMap<PathBuf, String>;
+
+/// Saves to back up or restore, listed under the games they belong to.
+pub struct SaveSync {
+    pub plan: SavesPlan,
+    pub games: SaveGames,
+}
+
+impl SaveSync {
+    pub fn preview(mut self) -> Preview {
+        let conflict = self
+            .plan
+            .actions()
+            .position(|a| matches!(a, SaveAction::Conflict { .. }));
+        if let Some(index) = conflict {
+            return Preview::SaveConflict {
+                backup: Box::new(self),
+                index,
+            };
+        }
+        let s = self.plan.summary();
+        let title = match (s.pull, s.push) {
+            (0, 0) => return Preview::Notice("Saves are already backed up.".into()),
+            (n, 0) => format!("Back up {n} save(s)?"),
+            (0, n) => format!("Put {n} file(s) back on AP?"),
+            (a, b) => format!("Back up {a}, put {b} back on AP?"),
+        };
+        let lines = self.by_game();
+        confirm(title, lines, move |ctx, progress| {
+            self.plan
+                .apply(&mut ctx.library()?, &ctx.pocket()?, progress)
+        })
+    }
+
+    /// Saves under the game they belong to, each with what happens in a few
+    /// words; the rest under "Other saves". Saves that stay as they are
+    /// aren't listed.
+    fn by_game(&self) -> Vec<String> {
+        let mut groups: BTreeMap<(bool, String), Vec<String>> = BTreeMap::new();
+        for a in self.plan.actions() {
+            let what = match a {
+                SaveAction::Pull {
+                    reason: reason @ (PullReason::OnlyOnCard | PullReason::CardNewer),
+                    ..
+                } => format!("← back up, {}", reason.label()),
+                SaveAction::Pull { .. } => "← back up".into(),
+                SaveAction::Push { .. } => "→ put back on AP".into(),
+                SaveAction::Conflict { .. } => "? changed on both sides, left as is".into(),
+                SaveAction::Skip { .. } => continue,
+            };
+            let rel = a.path();
+            let file = rel.file_name().unwrap_or_default().to_string_lossy();
+            let (key, line) = match self.games.get(rel) {
+                Some(game) if names::stem(&file) == game => {
+                    ((false, game.clone()), format!("  {what}"))
+                }
+                Some(game) => ((false, game.clone()), format!("  {what}: {file}")),
+                None => ((true, String::new()), format!("{what}: {file}")),
+            };
+            groups.entry(key).or_default().push(line);
+        }
+        let mut lines = Vec::new();
+        for ((other, game), items) in groups {
+            if !other {
+                lines.push(game);
+            } else if !lines.is_empty() {
+                lines.push("Other saves".into());
+            }
+            lines.extend(items);
+        }
+        lines
+    }
 }

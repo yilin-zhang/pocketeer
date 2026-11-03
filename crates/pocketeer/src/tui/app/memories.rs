@@ -17,8 +17,9 @@ use super::{
     session::Session,
 };
 use crate::{
-    ops::{memories as memories_cmd, saves as saves_cmd},
-    tui::pending::{self, SaveGames, SaveSync},
+    ops::memories as memories_cmd,
+    tui::app::{SaveGames, SaveSync},
+    tui::pending,
 };
 
 /// Which Memories to list.
@@ -135,11 +136,16 @@ impl Memories {
         let rel = m.memory.rel_path.clone();
         if cx.session.require_card().is_some() && cx.session.require_library().is_some() {
             cx.session.plan("Planning restore", move |ctx, _| {
-                let plan = memories_cmd::plan_restore(ctx, &rel)?;
-                Ok(pending::preview(SaveSync {
+                let plan = pocketeer_core::transfer::memories::plan_restore(
+                    &ctx.library()?,
+                    &ctx.pocket()?,
+                    &rel,
+                )?;
+                Ok((SaveSync {
                     plan,
                     games: SaveGames::new(),
-                }))
+                })
+                .preview())
             });
         }
     }
@@ -175,11 +181,13 @@ fn back_up(cx: &mut Cx, only: Option<Vec<PathBuf>>) {
         only,
     };
     cx.session.plan("Comparing Memories", move |ctx, progress| {
-        let plan = saves_cmd::plan_sync(ctx, opts, progress)?;
-        Ok(pending::preview(SaveSync {
+        let plan =
+            pocketeer_core::transfer::saves::plan(&ctx.library()?, &ctx.pocket()?, opts, progress)?;
+        Ok((SaveSync {
             plan,
             games: SaveGames::new(),
-        }))
+        })
+        .preview())
     });
 }
 
@@ -194,9 +202,7 @@ fn trash(cx: &mut Cx, rel: PathBuf, card: bool) {
             } else {
                 TrashTarget::Library
             };
-            Ok(pending::preview(memories_cmd::plan_trash(
-                ctx, &rel, target,
-            )?))
+            Ok(pending::trash(memories_cmd::plan_trash(ctx, &rel, target)?))
         });
     }
 }

@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::{
     Error, Result,
-    plan::{Applied, Checked, Event, Failure, Pinned, Plan, Progress, Resources},
+    plan::{Applied, Event, Failure, Pinned, Progress},
 };
 
 use super::{Library, RomRef, db};
@@ -34,25 +34,14 @@ pub struct RemovePlan {
     pinned: Pinned,
 }
 
-impl Plan for RemovePlan {
-    type Output = RemoveResult;
-
-    fn changes(&self) -> usize {
+impl RemovePlan {
+    pub fn changes(&self) -> usize {
         self.items.len()
     }
 
-    fn pinned(&self) -> &Pinned {
-        &self.pinned
-    }
-
-    fn execute(
-        &mut self,
-        res: &mut Resources,
-        progress: Progress<'_>,
-        _: Checked,
-    ) -> Result<RemoveResult> {
+    pub fn apply(&mut self, lib: &mut Library, progress: Progress<'_>) -> Result<RemoveResult> {
+        self.pinned.check_library(lib)?;
         progress(Event::Status("Removing from library".into()));
-        let lib = res.library()?;
         let root = lib.root().to_path_buf();
         let trash = root.join(&self.trash);
         let mut result = RemoveResult::default();
@@ -146,7 +135,7 @@ mod tests {
         std::fs::rename(&root, tmp.path().join("old")).unwrap();
         let other = Library::init(&root).unwrap();
         assert_eq!(
-            crate::testutil::apply(&mut plan, None, Some(&other))
+            plan.apply(&mut crate::testutil::reopen(&other), &mut |_| {})
                 .unwrap_err()
                 .code(),
             "STALE_PLAN"
@@ -166,7 +155,9 @@ mod tests {
         assert_eq!(plan.items.len(), 1, "same ROM twice counts once");
         assert!(plan.items[0].last_of_game);
 
-        let r = crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
+        let r = plan
+            .apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+            .unwrap();
         assert_eq!((r.removed, r.games_removed, r.bytes), (1, 1, 1));
         assert!(r.failed.is_empty());
         assert!(!lib.root().join("roms/fkh/Foo.fkh").exists());

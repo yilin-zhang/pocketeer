@@ -15,7 +15,6 @@ use pocketeer_core::{
         remove::{RemovePlan, RemoveResult},
         rename::{RenamePlan, RenameResult},
     },
-    plan::Plan,
     transfer::from_card::CardImportPlan,
 };
 

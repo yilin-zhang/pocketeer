@@ -7,13 +7,17 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 use pocketeer_core::{
     Result,
-    library::import::{ImportPlan, ImportResult},
-    plan::{Plan, Progress},
+    library::{
+        import::{ImportPlan, ImportResult},
+        remove,
+        rename::{self, RenamePlan},
+    },
+    plan::Progress,
 };
 
 use super::{
     ApplyArgs,
-    output::{Mode, Outcome, stage, stage_batch, verdict},
+    output::{Outcome, Staged, stage, stage_batch, verdict},
 };
 use crate::{
     ops::{
@@ -169,7 +173,7 @@ pub fn run(ctx: &Context, cmd: LibraryCommand, progress: Progress<'_>) -> Result
             true,
             "Next: pocketeer library import <folder> --platform <id> [--dat <file>]",
         )),
-        LibraryCommand::Status => Ok(Outcome::report(&ops::status(ctx)?)),
+        LibraryCommand::Status => Ok(Outcome::report(&ctx.library()?.status()?)),
         LibraryCommand::Import(args) => {
             let req = ImportRequest {
                 source: args.dir,
@@ -177,7 +181,10 @@ pub fn run(ctx: &Context, cmd: LibraryCommand, progress: Progress<'_>) -> Result
                 settings: args.flags.settings(),
             };
             let plan = ops::plan_import(ctx, &req, progress)?;
-            imported(ctx, args.apply.into(), plan, |p| p, &args.flags, progress)
+            let staged = stage(args.apply.into(), plan.changes(), plan, |p| {
+                p.apply(&mut ctx.library()?, progress)
+            })?;
+            Ok(imported(ctx, &staged, &staged.plan, &args.flags, progress))
         }
         LibraryCommand::List { platform, query } => Ok(Outcome::report(&ops::list(
             ctx,
@@ -190,23 +197,32 @@ pub fn run(ctx: &Context, cmd: LibraryCommand, progress: Progress<'_>) -> Result
             platform,
             apply,
         } => {
-            let plan = ops::plan_rename(ctx, platform.as_deref(), &rom, &new_name)?;
-            Ok(stage(ctx, apply.into(), plan, progress)?.outcome())
+            let plan = rename::plan(&ctx.library()?, platform.as_deref(), &rom, &new_name)?;
+            Ok(stage(apply.into(), plan.changes(), plan, |p| {
+                p.apply(&mut ctx.library()?, progress)
+            })?
+            .outcome())
         }
         LibraryCommand::Remove {
             roms,
             platform,
             apply,
         } => {
-            let plan = ops::plan_remove(ctx, platform.as_deref(), &roms)?;
-            Ok(stage(ctx, apply.into(), plan, progress)?.outcome())
+            let plan = remove::plan(&ctx.library()?, platform.as_deref(), &roms)?;
+            Ok(stage(apply.into(), plan.changes(), plan, |p| {
+                p.apply(&mut ctx.library()?, progress)
+            })?
+            .outcome())
         }
         LibraryCommand::Standardize { platform, apply } => {
             let renames = ops::plan_standardize(ctx, platform.as_deref())?;
             let none = renames.is_empty();
             // Each game is renamed on its own, so one failure stops no other.
             let batch = Batch::plan(renames.into_iter().map(|p| (p.rom.name.clone(), Ok(p))));
-            Ok(stage_batch(ctx, apply.into(), batch, progress).then_text(if none {
+            Ok(stage_batch(apply.into(), batch, RenamePlan::changes, |p| {
+                p.apply(&mut ctx.library()?, progress)
+            })
+            .then_text(if none {
                 "Every unverified game already has a standard name, or no standard name matches.\n"
             } else {
                 ""
@@ -224,7 +240,10 @@ pub fn covers(ctx: &Context, cmd: CoversCommand, progress: Progress<'_>) -> Resu
             apply,
         } => {
             let plan = ops::plan_import_cover(ctx, platform.as_deref(), &rom, &image)?;
-            Ok(stage(ctx, apply.into(), plan, progress)?.outcome())
+            Ok(stage(apply.into(), plan.changes(), plan, |p| {
+                p.apply(&mut ctx.library()?, progress)
+            })?
+            .outcome())
         }
         CoversCommand::Fetch {
             platform,
@@ -249,20 +268,16 @@ pub fn covers(ctx: &Context, cmd: CoversCommand, progress: Progress<'_>) -> Resu
     }
 }
 
-/// Runs an import (from a folder, or from the card: `import` finds the
-/// folder import inside it), then identifies the games it added and fetches
-/// their covers. Reports `{mode, ...plan, result?, covers?, warnings?}`.
-pub fn imported<P: Plan<Output = ImportResult> + Text>(
+/// After an import, identify its games and fetch covers, then report both.
+/// `plan` is the inner library import for either source; execution stays at the call site.
+pub fn imported<P: serde::Serialize + Text>(
     ctx: &Context,
-    mode: Mode,
-    plan: P,
-    import: impl Fn(&P) -> &ImportPlan,
+    staged: &Staged<P, ImportResult>,
+    plan: &ImportPlan,
     flags: &ImportFlags,
     progress: Progress<'_>,
-) -> Result<Outcome> {
-    // Only the platforms that get games need identifying afterwards.
-    let platforms: Vec<String> = added_platforms(import(&plan));
-    let staged = stage(ctx, mode, plan, progress)?;
+) -> Outcome {
+    let platforms = added_platforms(plan);
     let added = staged.result.as_ref().map_or(0, |r| r.added);
     let metadata = if added > 0 {
         ops::refresh_metadata(ctx, Some(&platforms), !flags.no_covers, progress)
@@ -273,13 +288,12 @@ pub fn imported<P: Plan<Output = ImportResult> + Text>(
     let mut more = String::new();
     covers_summary(&mut more, metadata.covers.as_ref());
     warning_lines(&mut more, &problems);
-    let plan = import(&staged.plan);
     let suggested = plan.suggestions().count();
     let unmapped = metadata
         .covers
         .as_ref()
         .is_some_and(|c| !c.unsupported_platforms.is_empty());
-    Ok(staged
+    staged
         .outcome()
         .then_text(&more)
         .with("covers", &metadata.covers)
@@ -294,7 +308,7 @@ pub fn imported<P: Plan<Output = ImportResult> + Text>(
                 "{suggested} file(s) have a standard name (→ above); add --standard-names to import them under it."
             ),
         )
-        .hint(unmapped, LIBRETRO_SYSTEM))
+        .hint(unmapped, LIBRETRO_SYSTEM)
 }
 
 /// The platforms an import plan adds games to.

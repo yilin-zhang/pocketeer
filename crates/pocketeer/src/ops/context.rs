@@ -14,7 +14,6 @@ use pocketeer_core::{
     config::Config,
     library::{self, Library},
     net::{Cache, Http, Net, Policy},
-    plan::Resources,
 };
 
 use crate::cli::Global;
@@ -122,17 +121,6 @@ impl Context {
 
     pub fn net(&self) -> Result<Net> {
         Ok(Net::new(self.http()?, self.cache()?, self.offline()))
-    }
-
-    /// What plans need to run, opened on first use: this context's card,
-    /// library and network.
-    pub fn resources(&self) -> Resources {
-        let (card, lib, net) = (self.clone(), self.clone(), self.clone());
-        Resources::new(
-            move || card.pocket(),
-            move || lib.library(),
-            move || net.net(),
-        )
     }
 
     /// The persistent ROM hash cache (in-memory if there is no cache dir).

@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::{
     Error, Result,
     fsutil::names::{FileRename, apply_renames, complete_name, stem, validate_name},
-    plan::{Applied, Checked, Event, Pinned, Plan, Progress, Resources},
+    plan::{Applied, Event, Pinned, Progress},
 };
 
 use super::{Library, RomRef, db, resolve_rom};
@@ -24,26 +24,15 @@ pub struct RenamePlan {
     pinned: Pinned,
 }
 
-impl Plan for RenamePlan {
-    type Output = RenameResult;
-
+impl RenamePlan {
     /// The file move plus the index update.
-    fn changes(&self) -> usize {
+    pub fn changes(&self) -> usize {
         2
     }
 
-    fn pinned(&self) -> &Pinned {
-        &self.pinned
-    }
-
-    fn execute(
-        &mut self,
-        res: &mut Resources,
-        progress: Progress<'_>,
-        _: Checked,
-    ) -> Result<RenameResult> {
+    pub fn apply(&mut self, lib: &mut Library, progress: Progress<'_>) -> Result<RenameResult> {
+        self.pinned.check_library(lib)?;
         progress(Event::Status(format!("Renaming {}", self.rom.name)));
-        let lib = res.library()?;
         let root = lib.root().to_path_buf();
         let tx = lib
             .conn_mut()
@@ -237,7 +226,9 @@ mod tests {
         write(lib.root(), "saves/Saves/fkh/common/Foo.sav", "backup");
         let mut preview = plan(&lib, None, "Foo.fkh", "New name").unwrap();
         assert_eq!(preview.new_name, "New name.fkh");
-        crate::testutil::apply(&mut preview, None, Some(&lib)).unwrap();
+        preview
+            .apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+            .unwrap();
         let (game, rom) = resolve_rom(&lib, None, "New name.fkh").unwrap();
         assert_eq!(game.name, "New name");
         assert_eq!(std::fs::read(lib.rom_abs_path(&rom)).unwrap(), b"rom");
@@ -253,7 +244,8 @@ mod tests {
         );
         // The preview was for the old name: applying it again is refused.
         assert_eq!(
-            crate::testutil::apply(&mut preview, None, Some(&lib))
+            preview
+                .apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
                 .unwrap_err()
                 .code(),
             "STALE_PLAN"
@@ -265,7 +257,11 @@ mod tests {
         let (_tmp, lib) = library_with(&[("Foo.fkh", "rom")]);
         let mut preview = plan(&lib, None, "Foo.fkh", "New name").unwrap();
         lib.conn().execute_batch("CREATE TRIGGER reject_rename BEFORE UPDATE ON roms BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
-        assert!(crate::testutil::apply(&mut preview, None, Some(&lib)).is_err());
+        assert!(
+            preview
+                .apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+                .is_err()
+        );
         let (_, rom) = resolve_rom(&lib, None, "Foo.fkh").unwrap();
         assert_eq!(std::fs::read(lib.rom_abs_path(&rom)).unwrap(), b"rom");
         assert!(!lib.root().join("roms/fkh/New name.fkh").exists());

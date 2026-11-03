@@ -3,12 +3,9 @@
 
 use std::fmt::Write;
 
-use pocketeer_core::{
-    plan::Plan,
-    transfer::saves::{
-        ConflictReason, PullReason, SaveAction, SaveSkip, SavesPlan, SavesResult, TrashPlan,
-        TrashResult, TrashTarget,
-    },
+use pocketeer_core::transfer::saves::{
+    ConflictReason, PullReason, SaveAction, SaveSkip, SavesPlan, SavesResult, TrashPlan,
+    TrashResult, TrashTarget,
 };
 
 use super::{Label, Text, bytes, failure_lines, plan_lines, table, time_ago};

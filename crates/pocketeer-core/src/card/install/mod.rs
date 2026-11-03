@@ -1,6 +1,6 @@
 //! Installing, updating and removing cores: resolve → download → plan → apply.
 
-pub mod apply;
+pub(crate) mod apply;
 pub mod plan;
 pub mod zipfile;
 
@@ -13,7 +13,7 @@ use crate::{
     card::cores::CoreList,
     catalog::inventory::{Inventory, InventoryCore, Release, update_available},
     net::Net,
-    plan::{Checked, Event, Pinned, Plan, Progress, Resources},
+    plan::{Event, Pinned, Progress},
 };
 
 pub use apply::Changes;
@@ -34,30 +34,20 @@ impl serde::Serialize for Prepared {
     }
 }
 
-impl Plan for Prepared {
-    type Output = Changes;
-
-    fn changes(&self) -> usize {
+impl Prepared {
+    pub fn changes(&self) -> usize {
         self.plan.changes()
     }
 
-    fn pinned(&self) -> &Pinned {
-        &self.pinned
-    }
-
-    fn execute(
-        &mut self,
-        res: &mut Resources,
-        progress: Progress<'_>,
-        _: Checked,
-    ) -> Result<Changes> {
+    pub fn apply(&mut self, pocket: &Pocket, progress: Progress<'_>) -> Result<Changes> {
+        self.pinned.check_card(pocket)?;
         progress(Event::Status(format!(
             "Installing {} {}",
             self.plan.core_id, self.plan.version
         )));
         let zip = &mut self.zip;
         apply::apply(
-            res.pocket()?,
+            pocket,
             &self.plan.core_id,
             &self.plan.actions,
             &mut |zip_path, dest| zip.extract_entry(zip_path, dest),
@@ -238,26 +228,16 @@ pub struct UninstallPlan {
     pinned: Pinned,
 }
 
-impl Plan for UninstallPlan {
-    type Output = Changes;
-
-    fn changes(&self) -> usize {
+impl UninstallPlan {
+    pub fn changes(&self) -> usize {
         self.actions.len()
     }
 
-    fn pinned(&self) -> &Pinned {
-        &self.pinned
-    }
-
-    fn execute(
-        &mut self,
-        res: &mut Resources,
-        progress: Progress<'_>,
-        _: Checked,
-    ) -> Result<Changes> {
+    pub fn apply(&mut self, pocket: &Pocket, progress: Progress<'_>) -> Result<Changes> {
+        self.pinned.check_card(pocket)?;
         progress(Event::Status(format!("Removing {}", self.core_id)));
         apply::apply(
-            res.pocket()?,
+            pocket,
             &format!("remove-{}", self.core_id),
             &self.actions,
             &mut |_, _| unreachable!("remove plans have no installs"),
@@ -318,8 +298,34 @@ mod tests {
         let mut plan = plan_remove(&pocket, &installed, "spiritualized.GBA", false).unwrap();
         let aside = tempfile::tempdir().unwrap();
         swap_card(&pocket, aside.path());
-        let err = crate::testutil::apply(&mut plan, Some(&pocket), None).unwrap_err();
+        let err = plan.apply(&pocket, &mut |_| {}).unwrap_err();
         assert_eq!(err.code(), "STALE_PLAN");
         assert!(pocket.root().join("Cores/spiritualized.GBA").is_dir());
+    }
+    #[test]
+    fn prepared_install_refuses_a_card_replaced_after_preview() {
+        let (_tmp, pocket) = sd();
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("core.zip");
+        let bytes = crate::testutil::build_zip(&[(
+            "Cores/spiritualized.GBA/core.json",
+            CORE_JSON.as_bytes(),
+        )]);
+        std::fs::write(&file, bytes).unwrap();
+        let net = Net::new(
+            crate::net::Http::new(None).unwrap(),
+            crate::net::Cache::new(tmp.path()),
+            true,
+        );
+        let installed = crate::card::cores::list_installed(&pocket).unwrap();
+        let mut plan = Installer::new(&pocket, &net)
+            .prepare_file(&file, &installed, PlanOptions::default(), &mut |_| {})
+            .unwrap();
+        swap_card(&pocket, tmp.path());
+        assert_eq!(
+            plan.apply(&pocket, &mut |_| {}).unwrap_err().code(),
+            "STALE_PLAN"
+        );
+        assert!(!pocket.root().join("Cores/spiritualized.GBA").exists());
     }
 }

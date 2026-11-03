@@ -9,7 +9,7 @@ use crate::{
     Error, Pocket, Result,
     card::POCKETEER_DIR,
     fsutil,
-    plan::{Applied, Checked, Failure, Pinned, Plan, Progress, Resources},
+    plan::{Applied, Failure, Pinned, Progress},
 };
 
 /// Volume-level folders macOS creates on every card. Harmless to delete
@@ -64,21 +64,16 @@ pub struct CleanPlan {
     pinned: Pinned,
 }
 
-impl Plan for CleanPlan {
-    type Output = CleanResult;
-
-    fn changes(&self) -> usize {
+impl CleanPlan {
+    pub fn changes(&self) -> usize {
         self.entries.len()
-    }
-
-    fn pinned(&self) -> &Pinned {
-        &self.pinned
     }
 
     /// Deletes everything in the plan. Junk isn't backed up. Per-entry
     /// failures are reported in the result, not returned.
-    fn execute(&mut self, res: &mut Resources, _: Progress<'_>, _: Checked) -> Result<CleanResult> {
-        let root = res.pocket()?.root();
+    pub fn apply(&mut self, pocket: &Pocket, _: Progress<'_>) -> Result<CleanResult> {
+        self.pinned.check_card(pocket)?;
+        let root = pocket.root();
         let mut result = CleanResult::default();
         for entry in &self.entries {
             let full = root.join(&entry.path);
@@ -211,9 +206,7 @@ mod tests {
         let aside = tempfile::tempdir().unwrap();
         crate::testutil::swap_card(&pocket, aside.path());
         assert_eq!(
-            crate::testutil::apply(&mut plan, Some(&pocket), None)
-                .unwrap_err()
-                .code(),
+            plan.apply(&pocket, &mut |_| {}).unwrap_err().code(),
             "STALE_PLAN"
         );
         assert!(pocket.root().join("Cores/.DS_Store").exists());
@@ -260,7 +253,7 @@ mod tests {
         assert!(p.entries.iter().any(|e| e.kind == JunkKind::SystemDir));
         assert_eq!(p.bytes, 4 + 1 + 2 + 5);
 
-        let r = crate::testutil::apply(&mut p, Some(&pocket), None).unwrap();
+        let r = p.apply(&pocket, &mut |_| {}).unwrap();
         assert_eq!(r.removed, 4);
         assert!(r.failed.is_empty());
         assert!(!tmp.path().join("Cores/.DS_Store").exists());

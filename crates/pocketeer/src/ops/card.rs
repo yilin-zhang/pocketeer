@@ -1,15 +1,13 @@
 //! The card itself and what is on it: status, the core inventory, BIOS and
 //! data files, macOS junk, and ROM transfers in both directions.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use pocketeer_core::{
     Error, ErrorInfo, Result,
     card::{
-        Status,
         bios::{self, BiosReport, PlacePlan},
-        clean::{self, CleanPlan},
-        roms::{self, CardRom, Depth, Index},
+        roms::{CardRom, Depth, Index},
     },
     catalog::inventory::{Inventory, Platforms},
     net::{Policy, Source},
@@ -17,7 +15,6 @@ use pocketeer_core::{
     transfer::{
         self, Comparison,
         from_card::{self, CardImportPlan},
-        rename as card_rename, to_card,
     },
 };
 use serde::Serialize;
@@ -27,10 +24,6 @@ use super::{
     library::{ImportSettings, suggest_standard_names},
     load_dat,
 };
-
-pub fn status(ctx: &Context) -> Result<Status> {
-    pocketeer_core::card::status(&ctx.pocket()?)
-}
 
 #[derive(Debug, Serialize)]
 pub struct RefreshReport {
@@ -82,16 +75,6 @@ pub fn plan_place(ctx: &Context) -> Result<PlacePlan> {
     bios::plan_place(&pocket, &report)
 }
 
-/// Plans deleting a ROM only the card has.
-pub fn plan_delete(ctx: &Context, path: &Path) -> Result<roms::DeletePlan> {
-    roms::plan_delete(&ctx.pocket()?, path)
-}
-
-/// Plans removing macOS junk; `system` takes the volume's system folders too.
-pub fn plan_clean(ctx: &Context, system: bool) -> Result<CleanPlan> {
-    clean::plan(&ctx.pocket()?, system)
-}
-
 #[derive(Debug, Serialize)]
 pub struct RomsReport {
     pub roms: Vec<CardRom>,
@@ -116,19 +99,6 @@ pub fn roms(ctx: &Context, depth: Depth, progress: &mut dyn FnMut(Event)) -> Res
         roms,
         warnings,
     })
-}
-
-pub fn plan_copy(
-    ctx: &Context,
-    platform: Option<&str>,
-    roms: &[String],
-    progress: &mut dyn FnMut(Event),
-) -> Result<to_card::CopyPlan> {
-    to_card::plan(&ctx.library()?, &ctx.pocket()?, platform, roms, progress)
-}
-
-pub fn plan_rename(ctx: &Context, path: &Path, name: &str) -> Result<card_rename::CardRenamePlan> {
-    card_rename::plan(&ctx.pocket()?, path, name)
 }
 
 // ---------------------------------------------------------------------------

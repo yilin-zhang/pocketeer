@@ -179,7 +179,7 @@ pub enum Job {
     Load,
     /// Plan on the worker; the plan comes back as the dialog it opens.
     Plan(Planner),
-    Apply(Box<dyn Pending>),
+    Apply(Pending),
     FetchCovers {
         platform: Option<String>,
         /// libretro system name for platforms without a built-in mapping.

@@ -8,7 +8,7 @@ use pocketeer_core::{
     Result,
     transfer::{
         memories::{self, MemoryEntry},
-        saves::{SavesPlan, TrashPlan, TrashTarget},
+        saves::{TrashPlan, TrashTarget},
     },
 };
 use serde::Serialize;
@@ -29,12 +29,6 @@ pub fn list(ctx: &Context) -> Result<MemoriesReport> {
         card: pocket.is_some(),
         memories: memories::overview(&ctx.library()?, pocket.as_ref())?,
     })
-}
-
-/// Plans putting the library's copy of the Memory at `rel` (and the files
-/// beside it) back on the card.
-pub fn plan_restore(ctx: &Context, rel: &Path) -> Result<SavesPlan> {
-    memories::plan_restore(&ctx.library()?, &ctx.pocket()?, rel)
 }
 
 /// Plans throwing away the Memory at `rel` with the files beside it.

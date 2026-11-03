@@ -8,9 +8,11 @@ use pocketeer_core::{
     Error, Result,
     card::{
         bios::{FileStatus, RootFile},
+        clean,
         roms::{Depth, Identity},
     },
     plan::Progress,
+    transfer::{rename, to_card},
 };
 
 use super::{
@@ -90,7 +92,7 @@ pub enum BiosCommand {
 }
 
 pub fn status(ctx: &Context) -> Result<Outcome> {
-    let status = ops::status(ctx)?;
+    let status = pocketeer_core::card::status(&ctx.pocket()?)?;
     Ok(Outcome::report(&status).hint(
         status.broken_cores > 0,
         "See `pocketeer cores list` for the broken cores.",
@@ -98,7 +100,10 @@ pub fn status(ctx: &Context) -> Result<Outcome> {
 }
 
 pub fn clean(ctx: &Context, system: bool, mode: Mode, progress: Progress<'_>) -> Result<Outcome> {
-    let staged = stage(ctx, mode, ops::plan_clean(ctx, system)?, progress)?;
+    let plan = clean::plan(&ctx.pocket()?, system)?;
+    let staged = stage(mode, plan.changes(), plan, |p| {
+        p.apply(&ctx.pocket()?, progress)
+    })?;
     Ok(staged.outcome().hint(
         !staged.plan.system_dirs_present.is_empty(),
         "Use --system to remove the macOS system folders too.",
@@ -123,7 +128,11 @@ pub fn bios(ctx: &Context, cmd: BiosCommand, progress: Progress<'_>) -> Result<O
             ))
         }
         BiosCommand::Place { apply } => {
-            Ok(stage(ctx, apply.into(), ops::plan_place(ctx)?, progress)?.outcome())
+            let plan = ops::plan_place(ctx)?;
+            Ok(stage(apply.into(), plan.changes(), plan, |p| {
+                p.apply(&ctx.pocket()?, progress)
+            })?
+            .outcome())
         }
     }
 }
@@ -135,16 +144,28 @@ pub fn run(ctx: &Context, cmd: CardCommand, progress: Progress<'_>) -> Result<Ou
             new_name,
             apply,
         } => {
-            let plan = ops::plan_rename(ctx, &path, &new_name)?;
-            Ok(stage(ctx, apply.into(), plan, progress)?.outcome())
+            let plan = rename::plan(&ctx.pocket()?, &path, &new_name)?;
+            Ok(stage(apply.into(), plan.changes(), plan, |p| {
+                p.apply(&ctx.pocket()?, ctx.library().ok().as_ref(), progress)
+            })?
+            .outcome())
         }
         CardCommand::Copy {
             roms,
             platform,
             apply,
         } => {
-            let plan = ops::plan_copy(ctx, platform.as_deref(), &roms, progress)?;
-            Ok(stage(ctx, apply.into(), plan, progress)?.outcome())
+            let plan = to_card::plan(
+                &ctx.library()?,
+                &ctx.pocket()?,
+                platform.as_deref(),
+                &roms,
+                progress,
+            )?;
+            Ok(stage(apply.into(), plan.changes(), plan, |p| {
+                p.apply(&ctx.pocket()?, progress)
+            })?
+            .outcome())
         }
         CardCommand::Import(args) => {
             let req = ImportRequest {
@@ -153,14 +174,18 @@ pub fn run(ctx: &Context, cmd: CardCommand, progress: Progress<'_>) -> Result<Ou
                 settings: args.flags.settings(),
             };
             let plan = ops::plan_import(ctx, &req, progress)?;
-            imported(
+            let errors = plan.errors();
+            let staged = stage(args.apply.into(), plan.changes(), plan, |p| {
+                p.apply(&mut ctx.library()?, &ctx.pocket()?, progress)
+            })?
+            .planning_errors(errors);
+            Ok(imported(
                 ctx,
-                args.apply.into(),
-                plan,
-                |p| &p.plan,
+                &staged,
+                &staged.plan.plan,
                 &args.flags,
                 progress,
-            )
+            ))
         }
         CardCommand::List => roms(ctx, Depth::Cached, progress),
         CardCommand::Check { full } => {

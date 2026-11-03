@@ -14,14 +14,6 @@ use serde::Serialize;
 
 use super::context::Context;
 
-pub fn plan_sync(
-    ctx: &Context,
-    opts: SavesOptions,
-    progress: &mut dyn FnMut(Event),
-) -> Result<SavesPlan> {
-    saves::plan(&ctx.library()?, &ctx.pocket()?, opts, progress)
-}
-
 /// Plans backing up the card's saves in `scope`. `conflicts` settles every
 /// conflict the same way; `None` leaves them for the user.
 pub fn plan_backup(
@@ -30,17 +22,16 @@ pub fn plan_backup(
     conflicts: Option<ConflictChoice>,
     progress: &mut dyn FnMut(Event),
 ) -> Result<SavesPlan> {
-    let mut plan = plan_sync(ctx, SavesOptions { scope, only: None }, progress)?;
+    let mut plan = saves::plan(
+        &ctx.library()?,
+        &ctx.pocket()?,
+        SavesOptions { scope, only: None },
+        progress,
+    )?;
     if let Some(choice) = conflicts {
         plan.resolve_all(choice);
     }
     Ok(plan)
-}
-
-/// Plans putting the library's copy of `rel` (or an older version) back on
-/// the card.
-pub fn plan_restore(ctx: &Context, rel: &Path, version: Option<i64>) -> Result<SavesPlan> {
-    saves::plan_restore(&ctx.library()?, &ctx.pocket()?, rel, version)
 }
 
 #[derive(Debug, Serialize)]

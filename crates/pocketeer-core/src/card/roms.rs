@@ -19,7 +19,7 @@ use crate::{
     Error, ErrorInfo, Pocket, Result,
     card::bios,
     fsutil::{self, Stamp},
-    plan::{Checked, Event, Pinned, Plan, Progress, Resources},
+    plan::{Event, Pinned, Progress},
 };
 
 // ---------------------------------------------------------------------------
@@ -534,29 +534,23 @@ pub struct DeletePlan {
     pinned: Pinned,
 }
 
-impl Plan for DeletePlan {
-    type Output = crate::card::install::Changes;
-
-    fn changes(&self) -> usize {
+impl DeletePlan {
+    pub fn changes(&self) -> usize {
         1
     }
 
-    fn pinned(&self) -> &Pinned {
-        &self.pinned
-    }
-
-    fn execute(
+    pub fn apply(
         &mut self,
-        res: &mut Resources,
+        pocket: &Pocket,
         progress: Progress<'_>,
-        _: Checked,
-    ) -> Result<Self::Output> {
+    ) -> Result<crate::card::install::Changes> {
+        self.pinned.check_card(pocket)?;
         let actions = [crate::card::install::Action::Remove {
             path: self.path.clone(),
             reason: crate::card::install::plan::RemoveReason::Uninstall,
         }];
         crate::card::install::apply::apply(
-            res.pocket()?,
+            pocket,
             "delete-rom",
             &actions,
             &mut |_, _| unreachable!("a delete installs nothing"),
@@ -584,7 +578,7 @@ mod index_tests {
         let mut plan = plan_delete(&pocket, Path::new("Assets/gba/common/a.gba")).unwrap();
         let aside = tempfile::tempdir().unwrap();
         crate::testutil::swap_card(&pocket, aside.path());
-        let err = crate::testutil::apply(&mut plan, Some(&pocket), None).unwrap_err();
+        let err = plan.apply(&pocket, &mut |_| {}).unwrap_err();
         assert_eq!(err.code(), "STALE_PLAN");
         assert!(pocket.root().join("Assets/gba/common/a.gba").exists());
     }

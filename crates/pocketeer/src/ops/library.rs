@@ -9,8 +9,7 @@ use pocketeer_core::{
         self, Game, Library, PlatformStats,
         covers::{self, FetchOptions, FetchReport, import::CoverImportPlan},
         import::{self, ImportOptions, ImportPlan},
-        remove::{self, RemovePlan},
-        rename::{self, RenamePlan},
+        rename::RenamePlan,
     },
     plan::{Event, Progress},
 };
@@ -31,10 +30,6 @@ pub fn init(ctx: &Context) -> Result<InitReport> {
         root,
         created: true,
     })
-}
-
-pub fn status(ctx: &Context) -> Result<library::Status> {
-    ctx.library()?.status()
 }
 
 /// How an import treats its files, wherever they come from (a folder or
@@ -220,20 +215,6 @@ pub fn list(ctx: &Context, platform: Option<&str>, query: Option<&str>) -> Resul
     })
 }
 
-/// Rename a managed ROM locally.
-pub fn plan_rename(
-    ctx: &Context,
-    platform: Option<&str>,
-    spec: &str,
-    new_name: &str,
-) -> Result<RenamePlan> {
-    rename::plan(&ctx.library()?, platform, spec, new_name)
-}
-
-pub fn plan_remove(ctx: &Context, platform: Option<&str>, specs: &[String]) -> Result<RemovePlan> {
-    remove::plan(&ctx.library()?, platform, specs)
-}
-
 /// A rename for every unverified game that matches a standard name.
 pub fn plan_standardize(ctx: &Context, platform: Option<&str>) -> Result<Vec<RenamePlan>> {
     library::rename::standardize_plan(&ctx.library()?, platform, |p| names_for(ctx, p))
@@ -249,11 +230,6 @@ pub fn plan_import_cover(
     let lib = ctx.library()?;
     let hits = library::resolve_game_roms(&lib, platform, spec)?;
     covers::import::plan(&lib, hits[0].0.id, image)
-}
-
-/// Plans copying a local image in as the cover of game `game_id`.
-pub fn plan_cover(ctx: &Context, game_id: i64, image: &Path) -> Result<CoverImportPlan> {
-    covers::import::plan(&ctx.library()?, game_id, image)
 }
 
 pub fn identify(

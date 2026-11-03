@@ -7,10 +7,11 @@ use crate::fsutil::Stamp;
 use crate::fsutil::names::{
     FileRename, apply_renames, complete_name, extension, stem, validate_name,
 };
-use crate::plan::{Applied, Checked, Pinned, Plan, Progress, Resources};
+use crate::plan::{Applied, Pinned, Progress};
 use crate::transfer::saves;
-use crate::{Error, ErrorInfo, Result};
+use crate::{Error, ErrorInfo, Pocket, Result, library::Library};
 use serde::Serialize;
+
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize)]
@@ -25,24 +26,18 @@ pub struct CardRenamePlan {
     #[serde(skip)]
     stamp: Stamp,
 }
-impl Plan for CardRenamePlan {
-    type Output = CardRenameResult;
-
-    fn changes(&self) -> usize {
+impl CardRenamePlan {
+    pub fn changes(&self) -> usize {
         1 + self.saves.len()
     }
 
-    fn pinned(&self) -> &Pinned {
-        &self.pinned
-    }
-
-    fn execute(
+    pub fn apply(
         &mut self,
-        res: &mut Resources,
+        pocket: &Pocket,
+        lib: Option<&Library>,
         _: Progress<'_>,
-        _: Checked,
     ) -> Result<CardRenameResult> {
-        let pocket = res.pocket()?.clone();
+        self.pinned.check_card(pocket)?;
         let rom = &self.rom;
         let source = pocket.root().join(&rom.from);
         if Stamp::of(&source)? != self.stamp {
@@ -50,14 +45,14 @@ impl Plan for CardRenamePlan {
                 what: rom.from.display().to_string(),
             });
         }
-        let mut index = Index::scan(&pocket)?;
+        let mut index = Index::scan(pocket)?;
         let renamed = apply_renames(pocket.root(), std::iter::once(rom).chain(&self.saves))?;
-        index.relocate(&pocket, &rom.from, &rom.to);
-        index.save(&pocket);
+        index.relocate(pocket, &rom.from, &rom.to);
+        index.save(pocket);
         let warnings = index.take_warnings();
         // Without a library there are no backups to follow.
         if !self.saves.is_empty()
-            && let Ok(lib) = res.library()
+            && let Some(lib) = lib
         {
             let moves: Vec<_> = self
                 .saves
@@ -197,7 +192,7 @@ mod card_tests {
         )
         .unwrap();
         assert_eq!(preview.saves.len(), 2);
-        let result = crate::testutil::apply(&mut preview, Some(&pocket), None).unwrap();
+        let result = preview.apply(&pocket, None, &mut |_| {}).unwrap();
         assert_eq!(result.renamed, 3);
         assert_eq!(
             std::fs::read(tmp.path().join("Memories/Save States/game.state")).unwrap(),
@@ -269,7 +264,7 @@ mod card_tests {
         assert_eq!(index.roms().len(), 1);
         assert_eq!(index.roms()[0].platform, "gbstudio");
         let mut preview = plan(&pocket, Path::new("GB Studio/demo.pocket"), "new").unwrap();
-        crate::testutil::apply(&mut preview, Some(&pocket), None).unwrap();
+        preview.apply(&pocket, None, &mut |_| {}).unwrap();
         let scanned = Index::scan(&pocket).unwrap();
         assert_eq!(scanned.roms().len(), 1);
         assert_eq!(scanned.roms()[0].name, "new.pocket");
@@ -277,5 +272,23 @@ mod card_tests {
             std::fs::read(tmp.path().join("GB Studio/Saves/new.sav")).unwrap(),
             b"save"
         );
+    }
+    #[test]
+    fn rename_refuses_a_card_replaced_after_preview() {
+        let (_tmp, pocket) = crate::testutil::sd();
+        crate::testutil::write(pocket.root(), "Assets/gba/common/game.gba", "ROM");
+        let mut preview =
+            plan(&pocket, Path::new("Assets/gba/common/game.gba"), "renamed").unwrap();
+        let aside = tempfile::tempdir().unwrap();
+        crate::testutil::swap_card(&pocket, aside.path());
+        assert_eq!(
+            preview
+                .apply(&pocket, None, &mut |_| {})
+                .unwrap_err()
+                .code(),
+            "STALE_PLAN"
+        );
+        assert!(pocket.root().join("Assets/gba/common/game.gba").exists());
+        assert!(!pocket.root().join("Assets/gba/common/renamed.gba").exists());
     }
 }

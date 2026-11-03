@@ -489,7 +489,8 @@ mod tests {
             .save(&source)
             .unwrap();
         let mut plan = covers::import::plan(&lib, id, &source).unwrap();
-        crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
+        plan.apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+            .unwrap();
         let before = db::cover(lib.conn(), id).unwrap();
         store(
             &cache,

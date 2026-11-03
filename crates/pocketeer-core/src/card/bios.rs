@@ -23,7 +23,7 @@ use crate::{
     },
     fsutil,
     fsutil::hash::digest_hex,
-    plan::{Checked, Pinned, Plan, Progress, Resources},
+    plan::{Pinned, Progress},
 };
 
 /// Cores whose instance JSONs describe things that aren't downloadable files.
@@ -409,26 +409,16 @@ pub struct PlacePlan {
     pinned: Pinned,
 }
 
-impl Plan for PlacePlan {
-    type Output = install::Changes;
-
-    fn changes(&self) -> usize {
+impl PlacePlan {
+    pub fn changes(&self) -> usize {
         self.actions.len()
     }
 
-    fn pinned(&self) -> &Pinned {
-        &self.pinned
-    }
-
     /// Moves the planned files.
-    fn execute(
-        &mut self,
-        res: &mut Resources,
-        progress: Progress<'_>,
-        _: Checked,
-    ) -> Result<install::Changes> {
+    pub fn apply(&mut self, pocket: &Pocket, progress: Progress<'_>) -> Result<install::Changes> {
+        self.pinned.check_card(pocket)?;
         install::apply::apply(
-            res.pocket()?,
+            pocket,
             "bios-place",
             &self.actions,
             &mut |_, _| unreachable!("place plans have no installs"),
@@ -524,7 +514,7 @@ mod tests {
         assert_eq!(plan.actions.len(), 1);
         let aside = tempfile::tempdir().unwrap();
         crate::testutil::swap_card(&pocket, aside.path());
-        let err = crate::testutil::apply(&mut plan, Some(&pocket), None).unwrap_err();
+        let err = plan.apply(&pocket, &mut |_| {}).unwrap_err();
         assert_eq!(err.code(), "STALE_PLAN");
         assert!(pocket.root().join("game1.hex").exists());
     }

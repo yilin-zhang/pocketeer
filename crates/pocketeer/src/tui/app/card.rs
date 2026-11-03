@@ -164,10 +164,10 @@ impl Cores {
         let id = row.id.clone();
         cx.session.plan("Planning removal", move |ctx, _| {
             let batch = cores_cmd::plan_remove(ctx, std::slice::from_ref(&id), false)?;
-            if batch.changes() == 0 {
+            if batch.changes(pocketeer_core::card::install::UninstallPlan::changes) == 0 {
                 return Ok(Preview::Notice(format!("{id} has no folders on the card.")));
             }
-            Ok(pending::preview(batch))
+            Ok(pending::uninstall(batch))
         });
     }
 }
@@ -211,7 +211,7 @@ fn prepare(cx: &mut Cx, specs: Vec<String>) {
     };
     cx.session.plan("Preparing", move |ctx, progress| {
         let plans = cores_cmd::prepare(ctx, &inventory, &specs, PlanOptions::default(), progress)?;
-        Ok(pending::preview(Batch::plan(plans)))
+        Ok(pending::install(Batch::plan(plans)))
     });
 }
 
@@ -298,7 +298,7 @@ fn place(cx: &mut Cx) {
         return;
     }
     cx.session.plan("Planning", move |ctx, _| {
-        Ok(pending::preview(card_cmd::plan_place(ctx)?))
+        Ok(pending::place(card_cmd::plan_place(ctx)?))
     });
 }
 
@@ -309,7 +309,10 @@ fn place(cx: &mut Cx) {
 pub fn card_key(key: KeyEvent, cx: &mut Cx) {
     if key.code == KeyCode::Char('x') && cx.session.require_card().is_some() {
         cx.session.plan("Scanning for junk", |ctx, _| {
-            Ok(pending::preview(card_cmd::plan_clean(ctx, false)?))
+            Ok(pending::clean(pocketeer_core::card::clean::plan(
+                &ctx.pocket()?,
+                false,
+            )?))
         });
     }
 }

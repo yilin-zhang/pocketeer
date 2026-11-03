@@ -10,13 +10,13 @@ use std::{
 
 use pocketeer_core::{
     Error, ErrorInfo, Remedy, Result,
-    plan::{self, Applied, Event, Plan, Progress},
+    plan::{Applied, Event},
 };
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    ops::{Batch, BatchState, context::Context},
+    ops::{Batch, BatchState},
     text::Text,
 };
 
@@ -120,71 +120,81 @@ pub fn verdict(changes: usize, failed: usize) -> Option<Error> {
 /// applying did (or that it was a dry run); serialises as
 /// `{mode, ...plan fields, result?}`.
 #[derive(Serialize)]
-pub struct Staged<P: Plan> {
+pub struct Staged<P, R> {
     pub mode: Mode,
     #[serde(flatten)]
     pub plan: P,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<P::Output>,
+    pub result: Option<R>,
+    #[serde(skip)]
+    changes: usize,
+    #[serde(skip)]
+    errors: usize,
 }
 
 /// Applies `plan` unless this is a dry run or there is nothing to do.
-pub fn stage<P: Plan>(
-    ctx: &Context,
+pub fn stage<P, R>(
     mode: Mode,
+    changes: usize,
     mut plan: P,
-    progress: Progress<'_>,
-) -> Result<Staged<P>> {
-    let result = if mode == Mode::Applied && plan.changes() > 0 {
-        Some(plan::apply(&mut ctx.resources(), &mut plan, progress)?)
+    apply: impl FnOnce(&mut P) -> Result<R>,
+) -> Result<Staged<P, R>> {
+    let result = if mode == Mode::Applied && changes > 0 {
+        Some(apply(&mut plan)?)
     } else {
         None
     };
-    Ok(Staged { mode, plan, result })
+    Ok(Staged {
+        mode,
+        plan,
+        result,
+        changes,
+        errors: 0,
+    })
 }
 
-impl<P: Plan + Text> Staged<P>
-where
-    P::Output: Text,
-{
+impl<P: Serialize + Text, R: Applied + Text> Staged<P, R> {
+    /// Unresolved planning problems also fail a dry run or a zero-change run.
+    pub fn planning_errors(mut self, errors: usize) -> Self {
+        self.errors = errors;
+        self
+    }
+
     pub fn outcome(&self) -> Outcome {
-        let failed = self.result.as_ref().map_or(0, Applied::failed) + self.plan.errors();
+        let failed = self.result.as_ref().map_or(0, Applied::failed) + self.errors;
         let mut text = self.plan.text();
         match &self.result {
             Some(result) => text.push_str(&result.text()),
-            None => text.push_str(dry_run_line(self.mode, self.plan.changes())),
+            None => text.push_str(dry_run_line(self.mode, self.changes)),
         }
         Outcome {
             data: serde_json::to_value(self).expect("our reports serialise"),
             text,
             hints: Vec::new(),
-            error: verdict(self.plan.changes(), failed),
+            error: verdict(self.changes, failed),
         }
     }
 }
 
 /// Applies every item of `batch` unless this is a dry run, and reports it:
 /// `{mode, items}`, each item's text, and its remedy when it failed.
-pub fn stage_batch<P: Plan + Text>(
-    ctx: &Context,
+pub fn stage_batch<P: Serialize + Text, R: Serialize + Text>(
     mode: Mode,
-    batch: Batch<P>,
-    progress: Progress<'_>,
-) -> Outcome
-where
-    P::Output: Text,
-{
+    batch: Batch<P, R>,
+    count: impl Fn(&P) -> usize,
+    apply: impl FnMut(&mut P) -> Result<R>,
+) -> Outcome {
     let batch = match mode {
-        Mode::Applied => batch.apply(&mut ctx.resources(), progress),
+        Mode::Applied => batch.apply(&count, apply),
         Mode::DryRun => batch,
     };
     #[derive(Serialize)]
-    struct Shape<'a, P: Plan> {
+    struct Shape<'a, P, R> {
         mode: Mode,
         #[serde(flatten)]
-        batch: &'a Batch<P>,
+        batch: &'a Batch<P, R>,
     }
-    let changes = batch.changes();
+    let changes = batch.changes(count);
     let applied = batch
         .items
         .iter()

@@ -34,8 +34,10 @@ pub use dialog::{Modal, SUGGESTIONS_SHOWN, Suggestion};
 #[cfg(test)]
 pub use games::CoverStep;
 pub use games::GameRef;
+pub use import::Import;
 pub use layout::{Layout, Splitter};
 pub use pane::{Cycle, PaneOps};
+pub use saves::{SaveGames, SaveSync};
 pub use saves::{SaveLine, SaveMark, status as save_status};
 pub use session::{JobProgress, Session};
 
@@ -47,10 +49,7 @@ use layout::Hit;
 use memories::Memories;
 use session::Update;
 
-use super::{
-    pending::{self, Pending, Preview},
-    worker::Job,
-};
+use super::{pending::Preview, worker::Job};
 use crate::cli::Global;
 
 pub const HELP: &str = include_str!("../../../docs/tui-help.txt");
@@ -104,11 +103,6 @@ struct Cx<'a> {
 }
 
 impl Cx<'_> {
-    /// A plan is ready: open the dialog it asks for.
-    fn planned(&mut self, pending: impl Pending + 'static) {
-        self.show(pending::preview(pending));
-    }
-
     fn show(&mut self, preview: Preview) {
         match preview {
             Preview::Notice(line) => self.session.notice(line),
@@ -561,12 +555,11 @@ mod tests {
     #[test]
     fn removing_a_game_asks_first_then_moves_it_to_the_library_trash() {
         use pocketeer_core::{
-            Error, HashCache,
+            HashCache,
             library::{
                 Library,
                 import::{self, ImportOptions},
             },
-            plan::{self, Resources},
         };
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
@@ -585,12 +578,8 @@ mod tests {
             &mut |_| {},
         )
         .unwrap();
-        let mut res = Resources::new(
-            || Err(Error::NoHomeDir),
-            move || Library::open(&root),
-            || Err(Error::NoCacheDir),
-        );
-        plan::apply(&mut res, &mut plan, &mut |_| {}).unwrap();
+        plan.apply(&mut Library::open(&root).unwrap(), &mut |_| {})
+            .unwrap();
         drop(lib);
 
         let mut app = test_app(tmp.path());
@@ -616,6 +605,61 @@ mod tests {
             .filter(|e| e.file_name() == "Only Game.gba")
             .collect();
         assert_eq!(trashed.len(), 1, "the file went to the trash, not away");
+    }
+
+    #[test]
+    fn copying_waits_for_confirmation_and_cancel_leaves_the_card_untouched() {
+        use pocketeer_core::{
+            HashCache,
+            library::{
+                Library,
+                import::{self, ImportOptions},
+            },
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let card = tmp.path().join("no-card");
+        std::fs::create_dir_all(card.join("Assets")).unwrap();
+        std::fs::create_dir_all(card.join("Cores")).unwrap();
+        std::fs::write(card.join("Analogue_Pocket.json"), "{}").unwrap();
+        let source = tmp.path().join("Game.gba");
+        std::fs::write(&source, "ROM").unwrap();
+        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
+        import::plan_folder(
+            &lib,
+            &source,
+            Some("gba"),
+            &[],
+            &ImportOptions::default(),
+            None,
+            &mut HashCache::in_memory(),
+            &mut |_| {},
+        )
+        .unwrap()
+        .apply(&mut lib, &mut |_| {})
+        .unwrap();
+        let mut app = test_app(tmp.path());
+        app.reload();
+        settle(&mut app, "loaded", |a| {
+            a.session().library().is_some_and(|l| l.games.len() == 1) && !a.session().is_busy()
+        });
+        let destination = card.join("Assets/gba/common/Game.gba");
+        app.key(KeyEvent::from(KeyCode::Char('s')));
+        settle(&mut app, "copy preview", |a| {
+            matches!(a.modal(), Some(Modal::Confirm { .. }))
+        });
+        assert!(!destination.exists());
+        app.key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.modal().is_none());
+        assert!(!destination.exists());
+        app.key(KeyEvent::from(KeyCode::Char('s')));
+        settle(&mut app, "second copy preview", |a| {
+            matches!(a.modal(), Some(Modal::Confirm { .. }))
+        });
+        app.key(KeyEvent::from(KeyCode::Char('y')));
+        settle(&mut app, "copy applied", |a| {
+            destination.exists() && !a.session().is_busy()
+        });
+        assert_eq!(std::fs::read(destination).unwrap(), b"ROM");
     }
 
     #[test]

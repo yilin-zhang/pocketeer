@@ -1,10 +1,5 @@
-//! What the CLI and the TUI both do, in one place: queries that read the
-//! card and the library, and the `plan_*` functions that open what a plan
-//! needs from the [`Context`](context::Context) (flags, config, the card)
-//! and make it. Applying a plan is core's [`plan::apply`]; whether to apply
-//! (`--dry-run`, a dialog) and how to show the outcome is each front end's.
-//!
-//! [`plan::apply`]: pocketeer_core::plan::apply
+//! Shared application workflows and independent batch results.
+//! Simple operations call core directly; front ends decide when to apply.
 
 pub mod card;
 pub mod context;
@@ -15,33 +10,29 @@ pub mod saves;
 
 use std::path::Path;
 
-use pocketeer_core::{
-    ErrorInfo, Result,
-    catalog::Dat,
-    plan::{self, Plan, Progress, Resources},
-};
+use pocketeer_core::{ErrorInfo, Result, catalog::Dat};
 use serde::Serialize;
 
 /// Independent plans made and applied together (`cores install`, `update`,
 /// `remove`, `library standardize`): each item is planned and applied on its
 /// own, and a failure stays with its item instead of stopping the rest.
 #[derive(Serialize)]
-pub struct Batch<P: Plan> {
-    pub items: Vec<BatchItem<P>>,
+pub struct Batch<P, R> {
+    pub items: Vec<BatchItem<P, R>>,
 }
 
 #[derive(Serialize)]
-pub struct BatchItem<P: Plan> {
+pub struct BatchItem<P, R> {
     /// What the user named: `id`, `id@version`, a zip path or a ROM.
     pub target: String,
     #[serde(flatten)]
-    pub state: BatchState<P>,
+    pub state: BatchState<P, R>,
 }
 
 /// How far one item of a [`Batch`] got.
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub enum BatchState<P: Plan> {
+pub enum BatchState<P, R> {
     /// It couldn't be planned.
     Unplanned {
         error: ErrorInfo,
@@ -52,7 +43,7 @@ pub enum BatchState<P: Plan> {
     },
     Applied {
         plan: P,
-        result: P::Output,
+        result: R,
     },
     /// Planned, but applying it failed.
     Failed {
@@ -61,7 +52,7 @@ pub enum BatchState<P: Plan> {
     },
 }
 
-impl<P: Plan> Batch<P> {
+impl<P, R> Batch<P, R> {
     /// One item per target: its plan, or why there is none.
     pub fn plan(plans: impl IntoIterator<Item = (String, Result<P>)>) -> Self {
         let items = plans
@@ -78,14 +69,18 @@ impl<P: Plan> Batch<P> {
     }
 
     /// Applies every planned item that changes something, each on its own.
-    pub fn apply(self, res: &mut Resources, progress: Progress<'_>) -> Self {
+    pub fn apply(
+        self,
+        changes: impl Fn(&P) -> usize,
+        mut execute: impl FnMut(&mut P) -> Result<R>,
+    ) -> Self {
         let items = self
             .items
             .into_iter()
             .map(|item| {
                 let state = match item.state {
-                    BatchState::Planned { mut plan } if plan.changes() > 0 => {
-                        match plan::apply(res, &mut plan, progress) {
+                    BatchState::Planned { mut plan } if changes(&plan) > 0 => {
+                        match execute(&mut plan) {
                             Ok(result) => BatchState::Applied { plan, result },
                             Err(e) => BatchState::Failed {
                                 plan,
@@ -110,8 +105,8 @@ impl<P: Plan> Batch<P> {
     }
 
     /// What applying the planned items would change.
-    pub fn changes(&self) -> usize {
-        self.plans().map(Plan::changes).sum()
+    pub fn changes(&self, count: impl Fn(&P) -> usize) -> usize {
+        self.plans().map(count).sum()
     }
 
     pub fn failed(&self) -> usize {
@@ -119,7 +114,7 @@ impl<P: Plan> Batch<P> {
     }
 }
 
-impl<P: Plan> BatchItem<P> {
+impl<P, R> BatchItem<P, R> {
     pub fn is_failed(&self) -> bool {
         matches!(
             self.state,
@@ -142,64 +137,36 @@ pub fn load_dat(path: Option<&Path>) -> Result<Option<Dat>> {
     path.map(Dat::read).transpose()
 }
 
+impl<P: Serialize, R: Serialize> pocketeer_core::plan::Applied for Batch<P, R> {
+    fn failed(&self) -> usize {
+        Batch::failed(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pocketeer_core::{
-        Error,
-        card::install::Changes,
-        plan::{Checked, Pinned},
-    };
-
-    /// Applying fails when `fails` is set.
-    #[derive(Serialize)]
-    struct Fake {
-        fails: bool,
-        #[serde(skip)]
-        pinned: Pinned,
-    }
-
-    impl Plan for Fake {
-        type Output = Changes;
-
-        fn changes(&self) -> usize {
-            1
-        }
-
-        fn pinned(&self) -> &Pinned {
-            &self.pinned
-        }
-
-        fn execute(&mut self, _: &mut Resources, _: Progress<'_>, _: Checked) -> Result<Changes> {
-            match self.fails {
-                true => Err(Error::NoHomeDir),
-                false => Ok(Changes::default()),
-            }
-        }
-    }
-
-    fn fake(fails: bool) -> Result<Fake> {
-        Ok(Fake {
-            fails,
-            pinned: Pinned::default(),
-        })
-    }
+    use pocketeer_core::Error;
 
     #[test]
     fn a_failing_item_does_not_stop_the_rest_of_the_batch() {
-        let plans = [fake(false), fake(true), Err(Error::NoHomeDir), fake(false)];
+        let plans = [Ok(false), Ok(true), Err(Error::NoHomeDir), Ok(false)];
         let batch = Batch::plan(
             plans
                 .into_iter()
                 .enumerate()
                 .map(|(i, p)| (i.to_string(), p)),
         );
-        let mut res = Resources::new(
-            || Err(Error::NoHomeDir),
-            || Err(Error::NoHomeDir),
-            || Err(Error::NoCacheDir),
+        let batch = batch.apply(
+            |_| 1,
+            |fails| {
+                if *fails {
+                    Err(Error::NoHomeDir)
+                } else {
+                    Ok(())
+                }
+            },
         );
-        let batch = batch.apply(&mut res, &mut |_| {});
         let states: Vec<_> = batch
             .items
             .iter()

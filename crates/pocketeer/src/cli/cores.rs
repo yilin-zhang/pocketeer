@@ -8,7 +8,7 @@ use pocketeer_core::{
     Result,
     card::install::{Prepared, Targets},
     catalog::inventory::InventoryStatus,
-    plan::{Plan, Progress},
+    plan::Progress,
 };
 
 use super::{
@@ -140,7 +140,12 @@ pub fn run(ctx: &Context, cmd: CoresCommand, progress: Progress<'_>) -> Result<O
         }
         CoresCommand::Remove { ids, purge, apply } => {
             let batch = ops::cores::plan_remove(ctx, &ids, purge)?;
-            Ok(stage_batch(ctx, apply.into(), batch, progress))
+            Ok(stage_batch(
+                apply.into(),
+                batch,
+                pocketeer_core::card::install::UninstallPlan::changes,
+                |p| p.apply(&ctx.pocket()?, progress),
+            ))
         }
     }
 }
@@ -153,11 +158,14 @@ pub fn inventory_refresh(ctx: &Context) -> Result<Outcome> {
 fn installs(
     ctx: &Context,
     mode: super::output::Mode,
-    batch: Batch<Prepared>,
+    batch: Batch<Prepared, pocketeer_core::card::install::Changes>,
     progress: Progress<'_>,
 ) -> Outcome {
     let current = batch.plans().any(|p| p.changes() == 0);
-    stage_batch(ctx, mode, batch, progress).hint(
+    stage_batch(mode, batch, Prepared::changes, |p| {
+        p.apply(&ctx.pocket()?, progress)
+    })
+    .hint(
         current,
         "Use --force to reinstall a core that is already at this version.",
     )

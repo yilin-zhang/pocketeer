@@ -267,7 +267,7 @@ impl Session {
         if matches!(job, Job::Load | Job::Apply(_)) {
             self.verify.epoch = epoch;
         }
-        if matches!(&job, Job::Apply(p) if p.adds_games()) {
+        if matches!(&job, Job::Apply(p) if p.adds_games) {
             // New games: show each as it lands, check them after the reload.
             self.auto.importing = true;
             self.auto.metadata_done = false;

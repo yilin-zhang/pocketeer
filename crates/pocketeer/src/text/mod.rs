@@ -20,8 +20,6 @@ use pocketeer_core::{
     plan::Failure,
 };
 
-use pocketeer_core::plan::Plan;
-
 use crate::ops::{Batch, BatchState};
 
 pub mod card;
@@ -328,10 +326,7 @@ pub fn warning_lines(out: &mut String, warnings: &[ErrorInfo]) {
 
 /// Each item: why it couldn't be planned, or its plan and how applying it
 /// went.
-impl<P: Plan + Text> Text for Batch<P>
-where
-    P::Output: Text,
-{
+impl<P: Text, R: Text> Text for Batch<P, R> {
     fn text(&self) -> String {
         let mut out = String::new();
         for (i, item) in self.items.iter().enumerate() {

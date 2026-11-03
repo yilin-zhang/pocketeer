@@ -2,6 +2,9 @@
 //! (only if the files don't say) the platform, then (only if some files
 //! look like known games) which standard names to take, then the plan.
 
+use crate::text;
+use pocketeer_core::{library::import::ImportPlan, transfer::from_card::CardImportPlan};
+
 use std::{collections::HashSet, path::PathBuf};
 
 use super::{
@@ -11,7 +14,7 @@ use super::{
 };
 use crate::{
     ops::library as library_cmd,
-    tui::pending::{self, Import, Preview},
+    tui::pending::{Preview, confirm, info},
 };
 
 /// The last item of the platform list, for typing another id.
@@ -101,7 +104,7 @@ pub fn answer(cx: &mut Cx, step: Step, answer: Answer) {
                 import.plan_mut().take_suggestions(&lib, |platform, name| {
                     accepted.contains(&(platform.to_string(), name.to_string()))
                 })?;
-                Ok(pending::preview(*import))
+                Ok((*import).preview())
             });
         }
         _ => {}
@@ -123,7 +126,7 @@ fn plan(cx: &mut Cx, source: PathBuf, platform: Option<String>) {
                 files: plan.unknown.len(),
             });
         }
-        Ok(pending::preview(Import::Folder(plan)))
+        Ok((Import::Folder(plan)).preview())
     });
 }
 
@@ -170,4 +173,53 @@ pub fn offer_names(cx: &mut Cx, import: Box<Import>) {
         items,
         DialogStep::Import(Step::Names { import, keys }),
     );
+}
+
+/// ROMs to copy into the library. A closed pair: the standard-names step
+/// works on either.
+pub enum Import {
+    /// From a folder on this computer.
+    Folder(ImportPlan),
+    /// From the card.
+    Card(CardImportPlan),
+}
+
+impl Import {
+    pub fn plan(&self) -> &ImportPlan {
+        match self {
+            Import::Folder(p) => p,
+            Import::Card(c) => &c.plan,
+        }
+    }
+
+    pub fn plan_mut(&mut self) -> &mut ImportPlan {
+        match self {
+            Import::Folder(p) => p,
+            Import::Card(c) => &mut c.plan,
+        }
+    }
+
+    pub fn preview(mut self) -> Preview {
+        let import_plan = self.plan();
+        if import_plan.suggestions().next().is_some() {
+            return Preview::PickImportNames(Box::new(self));
+        }
+        let lines = text::library::import_brief(import_plan);
+        let n = import_plan.changes();
+        let title = match &self {
+            Import::Folder(_) => format!("Import {n} ROM(s)?"),
+            Import::Card(_) => format!("Copy {n} ROM(s) into the library?"),
+        };
+        if n == 0 {
+            return info("Nothing new to import", lines);
+        }
+        let mut preview = confirm(title, lines, move |ctx, progress| match &mut self {
+            Import::Folder(p) => p.apply(&mut ctx.library()?, progress),
+            Import::Card(p) => p.apply(&mut ctx.library()?, &ctx.pocket()?, progress),
+        });
+        if let Preview::Confirm { pending, .. } = &mut preview {
+            pending.adds_games = true;
+        }
+        preview
+    }
 }

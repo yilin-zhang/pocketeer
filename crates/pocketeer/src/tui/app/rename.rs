@@ -13,7 +13,7 @@ use super::{
     games::GameRef,
 };
 use crate::{
-    ops::{Batch, card as card_cmd, library as library_cmd},
+    ops::{Batch, library as library_cmd},
     tui::pending::{self, Preview},
 };
 
@@ -190,16 +190,21 @@ fn choose(cx: &mut Cx, choice: Choice) {
 
 fn rename_in_library(cx: &mut Cx, platform: String, spec: String, new_name: String) {
     cx.session.plan("Planning rename", move |ctx, _| {
-        let plan = library_cmd::plan_rename(ctx, Some(&platform), &spec, &new_name)?;
-        Ok(pending::preview(plan))
+        let plan = pocketeer_core::library::rename::plan(
+            &ctx.library()?,
+            Some(&platform),
+            &spec,
+            &new_name,
+        )?;
+        Ok(pending::rename(plan))
     });
 }
 
 fn rename_on_card(cx: &mut Cx, path: PathBuf, new_name: String) {
     cx.session.plan("Planning AP rename", move |ctx, _| {
-        Ok(pending::preview(card_cmd::plan_rename(
-            ctx, &path, &new_name,
-        )?))
+        Ok(pending::card_rename(
+            pocketeer_core::transfer::rename::plan(&ctx.pocket()?, &path, &new_name)?,
+        ))
     });
 }
 
@@ -264,7 +269,7 @@ pub fn answer(cx: &mut Cx, step: Step, answer: Answer) {
                 return;
             }
             let named = chosen.into_iter().map(|p| (p.rom.name.clone(), Ok(p)));
-            cx.planned(Batch::plan(named));
+            cx.show(pending::renames(Batch::plan(named)));
         }
         _ => {}
     }

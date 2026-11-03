@@ -28,7 +28,7 @@ pub enum Modal {
         scroll: u16,
         /// Which button has keyboard focus: Apply (true) or Cancel.
         focus_apply: bool,
-        pending: Box<dyn Pending>,
+        pending: Pending,
     },
     /// Something to read (errors, reports, explanations).
     Info {
@@ -91,7 +91,7 @@ pub enum Answer {
 
 pub enum Submitted {
     /// Apply was pressed on a plan.
-    Apply(Box<dyn Pending>),
+    Apply(Pending),
     /// A prompt was answered.
     Answer(Step, Answer),
 }
@@ -124,12 +124,7 @@ impl Dialog {
 
     // -- opening ------------------------------------------------------------
 
-    pub fn confirm(
-        &mut self,
-        title: impl Into<String>,
-        lines: Vec<String>,
-        pending: Box<dyn Pending>,
-    ) {
+    pub fn confirm(&mut self, title: impl Into<String>, lines: Vec<String>, pending: Pending) {
         self.open(Modal::Confirm {
             title: title.into(),
             lines,

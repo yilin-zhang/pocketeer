@@ -6,7 +6,7 @@ use crate::{
     card::roms::{Depth, Identity, Index},
     fsutil,
     fsutil::hash::copy_and_hash,
-    plan::{Applied, Checked, Event, Failure, Pinned, Plan, Progress, Resources},
+    plan::{Applied, Event, Failure, Pinned, Progress},
 };
 use serde::Serialize;
 use std::{fs::File, path::PathBuf};
@@ -27,24 +27,13 @@ pub struct CopyPlan {
     pub already_present: Vec<PathBuf>,
     pub warnings: Vec<ErrorInfo>,
 }
-impl Plan for CopyPlan {
-    type Output = CopyResult;
-
-    fn changes(&self) -> usize {
+impl CopyPlan {
+    pub fn changes(&self) -> usize {
         self.files.len()
     }
 
-    fn pinned(&self) -> &Pinned {
-        &self.pinned
-    }
-
-    fn execute(
-        &mut self,
-        res: &mut Resources,
-        progress: Progress<'_>,
-        _: Checked,
-    ) -> Result<CopyResult> {
-        let pocket = &res.pocket()?.clone();
+    pub fn apply(&mut self, pocket: &Pocket, progress: Progress<'_>) -> Result<CopyResult> {
+        self.pinned.check_card(pocket)?;
         let mut index = Index::scan(pocket)?;
         let mut result = CopyResult::default();
         for (i, file) in self.files.iter().enumerate() {
@@ -197,7 +186,7 @@ mod tests {
         let (_tmp, lib) = library_with(&[("local.fkh", "ROM")]);
         let (tmp, pocket) = sd();
         let mut preview = plan(&lib, &pocket, None, &["local.fkh".into()], &mut |_| {}).unwrap();
-        crate::testutil::apply(&mut preview, Some(&pocket), None).unwrap();
+        preview.apply(&pocket, &mut |_| {}).unwrap();
         write(tmp.path(), "Assets/fkh/common/a-unresolved.fkh", "???");
 
         let preview = plan(&lib, &pocket, None, &["local.fkh".into()], &mut |_| {}).unwrap();
@@ -221,7 +210,7 @@ mod tests {
         let (tmp, pocket) = sd();
         let mut preview = plan(&lib, &pocket, None, &["local.fkh".into()], &mut |_| {}).unwrap();
         assert_eq!(preview.files.len(), 1);
-        let result = crate::testutil::apply(&mut preview, Some(&pocket), None).unwrap();
+        let result = preview.apply(&pocket, &mut |_| {}).unwrap();
         assert_eq!(result.copied, 1);
         assert!(result.failed.is_empty());
         assert!(result.warnings.is_empty());
@@ -241,21 +230,18 @@ mod tests {
             [PathBuf::from("Assets/fkh/common/renamed.fkh")]
         );
         write(tmp.path(), "Assets/fkh/common/local.fkh", "other content");
-        let result = crate::testutil::apply(
-            &mut CopyPlan {
-                pinned: Pinned::card(&pocket).unwrap(),
-                files: vec![CopyFile {
-                    source: lib.root().join("roms/fkh/local.fkh"),
-                    destination: "Assets/fkh/common/local.fkh".into(),
-                    sha1: "invalid".into(),
-                    size: 3,
-                }],
-                already_present: Vec::new(),
-                warnings: Vec::new(),
-            },
-            Some(&pocket),
-            None,
-        )
+        let result = (CopyPlan {
+            pinned: Pinned::card(&pocket).unwrap(),
+            files: vec![CopyFile {
+                source: lib.root().join("roms/fkh/local.fkh"),
+                destination: "Assets/fkh/common/local.fkh".into(),
+                sha1: "invalid".into(),
+                size: 3,
+            }],
+            already_present: Vec::new(),
+            warnings: Vec::new(),
+        })
+        .apply(&pocket, &mut |_| {})
         .unwrap();
         assert_eq!(result.copied, 0);
         assert_eq!(result.failed.len(), 1);
@@ -263,5 +249,18 @@ mod tests {
             std::fs::read(tmp.path().join("Assets/fkh/common/local.fkh")).unwrap(),
             b"other content"
         );
+    }
+    #[test]
+    fn copy_refuses_a_card_replaced_after_preview() {
+        let (_tmp, lib) = library_with(&[("local.fkh", "ROM")]);
+        let (_card, pocket) = sd();
+        let mut preview = plan(&lib, &pocket, None, &["local.fkh".into()], &mut |_| {}).unwrap();
+        let aside = tempfile::tempdir().unwrap();
+        crate::testutil::swap_card(&pocket, aside.path());
+        assert_eq!(
+            preview.apply(&pocket, &mut |_| {}).unwrap_err().code(),
+            "STALE_PLAN"
+        );
+        assert!(!pocket.root().join("Assets/fkh/common/local.fkh").exists());
     }
 }

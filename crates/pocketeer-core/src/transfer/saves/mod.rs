@@ -8,7 +8,7 @@ use crate::{
     card::SAVE_ROOTS,
     fsutil::hash::{copy_and_hash, hash_file},
     fsutil::{self, mtime_secs, set_mtime},
-    plan::{Applied, Checked, Event, Failure, Pinned, Plan, Progress, Resources},
+    plan::{Applied, Event, Failure, Pinned, Progress},
 };
 use serde::Serialize;
 use std::{
@@ -169,31 +169,25 @@ pub struct SavesPlan {
     pinned: Pinned,
 }
 
-impl Plan for SavesPlan {
-    type Output = SavesResult;
-
-    fn changes(&self) -> usize {
+impl SavesPlan {
+    pub fn changes(&self) -> usize {
         self.summary.pull + self.summary.push
     }
     /// Unresolved conflicts count as failures: the CLI exits 1 on them.
-    fn errors(&self) -> usize {
+    pub fn errors(&self) -> usize {
         self.summary.conflicts
-    }
-
-    fn pinned(&self) -> &Pinned {
-        &self.pinned
     }
 
     /// Copies each pulled or pushed save, then links new backups to their
     /// games by name.
-    fn execute(
+    pub fn apply(
         &mut self,
-        res: &mut Resources,
+        lib: &mut Library,
+        pocket: &Pocket,
         progress: Progress<'_>,
-        _: Checked,
     ) -> Result<SavesResult> {
-        let pocket = res.pocket()?.clone();
-        let lib = res.library()?;
+        self.pinned.check_card(pocket)?;
+        self.pinned.check_library(lib)?;
         let mut result = SavesResult::default();
         let mut done = 0;
         for item in &self.items {
@@ -205,7 +199,7 @@ impl Plan for SavesPlan {
             };
             let rel = action.path();
             validate_path(rel)?;
-            match copy_one(lib, &pocket, self, item) {
+            match copy_one(lib, pocket, self, item) {
                 Ok((archived, size)) => {
                     if pull {
                         result.pulled += 1;
@@ -827,12 +821,15 @@ mod tests {
             (plan.summary.pull, plan.summary.push, plan.summary.retained),
             (1, 0, 1)
         );
-        let result = crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
+        let result = plan
+            .apply(&mut crate::testutil::reopen(&lib), &pocket, &mut |_| {})
+            .unwrap();
         assert_eq!(result.pulled, 1);
         assert!(!pocket.root().join("Saves/gb/common/offline.sav").exists());
         write(pocket.root(), REL, "AP two", 300);
         let mut plan = plan_backup(&lib, &pocket);
-        crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
+        plan.apply(&mut crate::testutil::reopen(&lib), &pocket, &mut |_| {})
+            .unwrap();
         let history = versions(&lib, Path::new(REL)).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(
@@ -843,14 +840,17 @@ mod tests {
         let mut plan = plan_backup(&lib, &pocket);
         assert_eq!(plan.summary.conflicts, 1);
         assert_eq!(plan.changes(), 0);
-        crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
+        plan.apply(&mut crate::testutil::reopen(&lib), &pocket, &mut |_| {})
+            .unwrap();
         assert_eq!(std::fs::read(pocket.root().join(REL)).unwrap(), b"AP two");
         let i = plan
             .actions()
             .position(|a| matches!(a, SaveAction::Conflict { .. }))
             .unwrap();
         plan.resolve(i, ConflictChoice::Computer);
-        let result = crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
+        let result = plan
+            .apply(&mut crate::testutil::reopen(&lib), &pocket, &mut |_| {})
+            .unwrap();
         assert_eq!(result.pushed, 1);
         assert_eq!(std::fs::read(pocket.root().join(REL)).unwrap(), b"PC new");
         assert!(
@@ -867,10 +867,12 @@ mod tests {
         let lib = Library::init(&tmp.path().join("library")).unwrap();
         write(pocket.root(), REL, "one", 100);
         let mut plan = plan_backup(&lib, &pocket);
-        crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
+        plan.apply(&mut crate::testutil::reopen(&lib), &pocket, &mut |_| {})
+            .unwrap();
         write(pocket.root(), REL, "two", 200);
         let mut plan = plan_backup(&lib, &pocket);
-        crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
+        plan.apply(&mut crate::testutil::reopen(&lib), &pocket, &mut |_| {})
+            .unwrap();
         let to = PathBuf::from("Saves/gba/common/nested/renamed.sav");
         std::fs::rename(pocket.root().join(REL), pocket.root().join(&to)).unwrap();
         assert_eq!(
@@ -904,7 +906,9 @@ mod tests {
         let mut planned = plan(&lib, &pocket, memories, &mut |_| {}).unwrap();
         let paths: Vec<&Path> = planned.actions().map(SaveAction::path).collect();
         assert_eq!(paths, [Path::new(sav), Path::new(sta)]);
-        crate::testutil::apply(&mut planned, Some(&pocket), Some(&lib)).unwrap();
+        planned
+            .apply(&mut crate::testutil::reopen(&lib), &pocket, &mut |_| {})
+            .unwrap();
         // Cartridge saves alone leave Memories out.
         let saves = SavesOptions {
             scope: Scope::Saves,
@@ -920,7 +924,9 @@ mod tests {
         let rels = [PathBuf::from(sta), PathBuf::from(sav)];
         let mut restore = plan_restore_all(&lib, &pocket, &rels).unwrap();
         assert_eq!(restore.summary.push, 2);
-        crate::testutil::apply(&mut restore, Some(&pocket), Some(&lib)).unwrap();
+        restore
+            .apply(&mut crate::testutil::reopen(&lib), &pocket, &mut |_| {})
+            .unwrap();
         assert_eq!(std::fs::read(pocket.root().join(sta)).unwrap(), b"state");
         assert_eq!(std::fs::read(pocket.root().join(sav)).unwrap(), b"sram");
         assert!(
@@ -968,7 +974,8 @@ mod tests {
         let lib = Library::init(&tmp.path().join("library")).unwrap();
         write(pocket.root(), REL, "one", 100);
         let mut plan = plan_backup(&lib, &pocket);
-        crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
+        plan.apply(&mut crate::testutil::reopen(&lib), &pocket, &mut |_| {})
+            .unwrap();
         write(pocket.root(), REL, "two", 300);
         write(lib.root(), "saves/Saves/gb/common/offline.sav", "kept", 100);
         let seen = overview(&lib, Some(&pocket), Scope::Saves).unwrap();
@@ -1003,7 +1010,9 @@ mod tests {
         write(pocket.root(), REL, "one", 100);
         let mut plan = plan_backup(&lib, &pocket);
         crate::testutil::swap_card(&pocket, elsewhere.path());
-        let err = crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap_err();
+        let err = plan
+            .apply(&mut crate::testutil::reopen(&lib), &pocket, &mut |_| {})
+            .unwrap_err();
         assert_eq!(err.code(), "STALE_PLAN");
         assert!(!current(&lib, Path::new(REL)).exists());
     }
@@ -1018,7 +1027,9 @@ mod tests {
         assert_eq!(plan.summary.conflicts, 1);
         plan.resolve(0, ConflictChoice::Card);
         write(lib.root(), &format!("saves/{REL}"), "CCCC", 100);
-        let result = crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
+        let result = plan
+            .apply(&mut crate::testutil::reopen(&lib), &pocket, &mut |_| {})
+            .unwrap();
         assert_eq!(result.failed.len(), 1);
         assert_eq!(
             std::fs::read(current(&lib, Path::new(REL))).unwrap(),
@@ -1036,14 +1047,18 @@ mod tests {
         let lib = Library::init(&tmp.path().join("library")).unwrap();
         write(pocket.root(), REL, "old", 100);
         let mut plan = plan_backup(&lib, &pocket);
-        crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
+        plan.apply(&mut crate::testutil::reopen(&lib), &pocket, &mut |_| {})
+            .unwrap();
         write(pocket.root(), REL, "new", 200);
         let mut plan = plan_backup(&lib, &pocket);
-        crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
+        plan.apply(&mut crate::testutil::reopen(&lib), &pocket, &mut |_| {})
+            .unwrap();
         let old = versions(&lib, Path::new(REL)).unwrap().remove(0);
         write(pocket.root(), REL, "unbacked AP", 300);
         let mut plan = plan_restore(&lib, &pocket, Path::new(REL), Some(old.id)).unwrap();
-        let result = crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
+        let result = plan
+            .apply(&mut crate::testutil::reopen(&lib), &pocket, &mut |_| {})
+            .unwrap();
         assert_eq!(result.pushed, 1);
         assert_eq!(std::fs::read(pocket.root().join(REL)).unwrap(), b"old");
         assert!(

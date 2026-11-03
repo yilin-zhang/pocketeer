@@ -131,7 +131,8 @@ mod tests {
         let mut plan =
             crate::library::rename::plan(&lib, Some("fkh"), "Metroid Fusion (USA).fkh", "Renamed")
                 .unwrap();
-        crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
+        plan.apply(&mut crate::testutil::reopen(&lib), &mut |_| {})
+            .unwrap();
         let games = lib.list_games(None, None).unwrap();
         assert_eq!(games[0].roms[0].name, "Renamed.fkh");
         let owners = link_owners(&lib, &games, &BTreeMap::new()).unwrap();
