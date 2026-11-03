@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use pocketeer_core::{
-    Error, Result,
+    Error, ErrorInfo, Result,
     card::{
         Status,
         bios::{self, BiosReport, PlacePlan},
@@ -106,7 +106,7 @@ pub fn clean(
 pub struct RomsReport {
     pub roms: Vec<CardRom>,
     pub comparison: Comparison,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<ErrorInfo>,
 }
 
 impl Outcome for RomsReport {
@@ -137,7 +137,7 @@ pub fn roms(
         Err(e) => return Err(e),
     };
     let mut index = Index::scan(&pocket)?;
-    let mut warnings: Vec<String> = index.warning.take().into_iter().collect();
+    let mut warnings: Vec<ErrorInfo> = index.warning.take().into_iter().collect();
     if let Some(full) = check {
         for i in 0..index.roms.len() {
             progress(Event::Status(format!(
@@ -151,9 +151,12 @@ pub fn roms(
             });
         }
         if let Err(e) = index.save(&pocket) {
-            warnings.push(format!(
-                "ROM identities updated in memory; cache not saved: {e}"
-            ));
+            warnings.push(
+                Error::IndexNotSaved {
+                    source: Box::new(e),
+                }
+                .to_info(),
+            );
         }
     }
     Ok(RomsReport {

@@ -12,6 +12,7 @@
 use std::{collections::BTreeMap, fmt::Write};
 
 use pocketeer_core::{
+    ErrorInfo,
     card::install::{
         Action,
         plan::{RemoveReason, SkipReason},
@@ -404,7 +405,7 @@ fn failure_lines(out: &mut String, failures: &[Failure]) {
 }
 
 /// Lines that say an import's follow-up work (DAT check, covers) had trouble.
-fn warning_lines(out: &mut String, warnings: &[String]) {
+fn warning_lines(out: &mut String, warnings: &[ErrorInfo]) {
     for w in warnings {
         let _ = writeln!(out, "! {w}");
     }
@@ -471,8 +472,8 @@ fn batch_report<P: Plan>(
                     "{}: error [{}] {}",
                     item.target, error.code, error.message
                 );
-                if let Some(hint) = &error.hint {
-                    let _ = writeln!(out, "  hint: {hint}");
+                if let Some(remedy) = error.remedy {
+                    let _ = writeln!(out, "  hint: {}", crate::output::remedy_hint(remedy));
                 }
             }
             BatchState::Planned { plan: p } => plan(&mut out, p, reader),

@@ -21,5 +21,5 @@ expression: json_of(&out)
     "warnings": []
   },
   "ok": true,
-  "schema_version": 1
+  "schema_version": 2
 }

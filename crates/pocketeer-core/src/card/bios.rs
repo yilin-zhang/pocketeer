@@ -85,8 +85,20 @@ pub struct RequiredFile {
 pub struct CoreRequirements {
     pub core_id: String,
     pub files: Vec<RequiredFile>,
-    /// Non-fatal observations ("no data.json", unreadable instance file, ...).
-    pub notes: Vec<String>,
+    /// What reading the core's declarations ran into; its file list may be
+    /// incomplete because of them.
+    pub notes: Vec<Note>,
+}
+
+/// Something about a core's declarations that limits what is known of the
+/// files it needs.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "note", rename_all = "snake_case")]
+pub enum Note {
+    /// The core has no `data.json`, so it declares no files.
+    NoDataJson,
+    /// Its `data.json` or an instance file could not be read.
+    Unreadable { error: ErrorInfo },
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
@@ -185,13 +197,13 @@ fn requirements_for(pocket: &Pocket, core: &InstalledCore) -> CoreRequirements {
     };
     let data_json_path = core.path.join("data.json");
     if !data_json_path.exists() {
-        req.notes.push("no data.json".into());
+        req.notes.push(Note::NoDataJson);
         return req;
     }
     let data = match DataJson::read(&data_json_path) {
         Ok(d) => d,
         Err(e) => {
-            req.notes.push(format!("data.json unreadable: {e}"));
+            req.notes.push(Note::Unreadable { error: e.to_info() });
             return req;
         }
     };
@@ -226,7 +238,7 @@ fn requirements_for(pocket: &Pocket, core: &InstalledCore) -> CoreRequirements {
             let instance = match InstanceJson::read(&instance_path) {
                 Ok(i) => i,
                 Err(e) => {
-                    req.notes.push(format!("instance file unreadable: {e}"));
+                    req.notes.push(Note::Unreadable { error: e.to_info() });
                     continue;
                 }
             };
@@ -549,7 +561,7 @@ mod tests {
         // .sav is not a user-supplied file.
         assert!(r.all_files().all(|f| !f.path.ends_with("x.sav")));
         let nodata = r.cores.iter().find(|c| c.core_id == "nodata.Core").unwrap();
-        assert_eq!(nodata.notes, ["no data.json"]);
+        assert_eq!(nodata.notes, [Note::NoDataJson]);
         assert_eq!(r.summary.missing, 2);
     }
 

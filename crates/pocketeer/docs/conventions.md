@@ -3,8 +3,12 @@
 ### Output
 
 - `--json` (global): stdout carries exactly one object,
-  `{"schema_version": N, "ok": bool, "data"?: …, "error"?: {code, message, hint?, details?}}`.
+  `{"schema_version": N, "ok": bool, "data"?: …, "error"?: {code, message, remedy?, hint?, details?}}`.
   Progress and logs never go to stdout. `error.code` values are stable (table at the end).
+  `remedy` names the obvious next step (`insert_card`, `find_rom`, `replan`, …); `hint` says
+  it in words for the command line.
+- Errors and warnings inside `data` (per-item failures, `warnings`, `errors`) have the same
+  shape as `error`, without `hint`: branch on `code` and `remedy`.
   A wrong command line or `--help` still yields the envelope: clap's text goes to stderr,
   the error code is `USAGE` (exit 2).
 - Exit codes: `0` success, `1` error, `2` usage error.

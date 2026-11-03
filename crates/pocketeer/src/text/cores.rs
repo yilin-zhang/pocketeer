@@ -211,8 +211,8 @@ fn inventory_footer(out: &mut String, status: &InventoryStatus) {
         }
         InventoryStatus::Unavailable { error } => {
             let _ = writeln!(out, "\nwarning: inventory unavailable: {}", error.message);
-            if let Some(hint) = &error.hint {
-                let _ = writeln!(out, "hint: {hint}");
+            if let Some(remedy) = error.remedy {
+                let _ = writeln!(out, "hint: {}", crate::output::remedy_hint(remedy));
             }
         }
     }

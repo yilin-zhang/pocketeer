@@ -8,7 +8,7 @@
 use std::{collections::VecDeque, path::PathBuf, sync::atomic::Ordering};
 
 use pocketeer_core::{
-    Error, ErrorInfo, Pocket,
+    Error, ErrorInfo, Pocket, Remedy,
     library::identify,
     plan::{Event, Progress},
 };
@@ -388,7 +388,7 @@ impl Session {
                     match result {
                         Ok(mut index) => {
                             if let Some(warning) = index.warning.take() {
-                                self.notice(warning);
+                                self.notice(warning.message);
                             }
                             if let Some(snap) = &mut self.snapshot
                                 && let Some(card) = &mut snap.card
@@ -438,7 +438,7 @@ impl Session {
                         Ok(mut snap) => {
                             let index = snap.card.as_mut().and_then(|c| c.index.as_mut());
                             if let Some(warning) = index.and_then(|i| i.warning.take()) {
-                                self.notice(warning);
+                                self.notice(warning.message);
                             }
                             self.snapshot = Some(*snap);
                             self.verify.next = 0;
@@ -569,6 +569,7 @@ impl Session {
                 self.card = Card::Missing(ErrorInfo {
                     code: "SD_NOT_FOUND",
                     message: "SD card removed".into(),
+                    remedy: Some(Remedy::InsertCard),
                     hint: Some("Plug it back in; pocketeer picks it up by itself.".into()),
                     details: None,
                 });

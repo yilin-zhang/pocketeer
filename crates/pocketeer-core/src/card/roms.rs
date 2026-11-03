@@ -16,7 +16,7 @@ use sha1::{Digest, Sha1};
 
 use crate::fsutil::hash;
 use crate::{
-    Error, Pocket, Result,
+    Error, ErrorInfo, Pocket, Result,
     card::bios,
     fsutil::{self, Stamp},
     plan::{Checked, Pinned, Plan, Progress, Resources},
@@ -142,7 +142,7 @@ pub enum Identity {
     /// Confirmed by reading every byte.
     Full { sha1: String },
     /// Reading it failed.
-    Error { error: String },
+    Error { error: ErrorInfo },
 }
 
 impl Identity {
@@ -190,7 +190,7 @@ pub struct Index {
     pinned: Pinned,
     pub roms: Vec<CardRom>,
     /// Cache failures do not prevent listing or operating on ROM files.
-    pub warning: Option<String>,
+    pub warning: Option<ErrorInfo>,
     entries: BTreeMap<PathBuf, Cached>,
     dirty: bool,
 }
@@ -209,11 +209,24 @@ impl Index {
                 Ok(store) if store.version == VERSION => (store.entries, None),
                 _ => (
                     BTreeMap::new(),
-                    Some("ROM cache unreadable or obsolete; rebuilding".into()),
+                    Some(
+                        Error::IndexRebuilt {
+                            reason: "unreadable or written by another version".into(),
+                        }
+                        .to_info(),
+                    ),
                 ),
             },
             Err(e) if e.kind() == io::ErrorKind::NotFound => (BTreeMap::new(), None),
-            Err(e) => (BTreeMap::new(), Some(format!("Cannot read ROM cache: {e}"))),
+            Err(e) => (
+                BTreeMap::new(),
+                Some(
+                    Error::IndexRebuilt {
+                        reason: Error::io(&cache_path, e).to_string(),
+                    }
+                    .to_info(),
+                ),
+            ),
         };
         let mut roms = Vec::new();
         for (platform, owner, path) in walk(pocket)? {
@@ -285,9 +298,7 @@ impl Index {
             }
             Err(e) => {
                 self.dirty |= self.entries.remove(&rel).is_some();
-                rom.identity = Identity::Error {
-                    error: e.to_string(),
-                };
+                rom.identity = Identity::Error { error: e.to_info() };
             }
         }
         true

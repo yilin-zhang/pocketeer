@@ -22,7 +22,7 @@ expression: "s.run(& [\"saves\", \"list\"])"
       ]
     },
     "ok": true,
-    "schema_version": 1
+    "schema_version": 2
   },
   "exit": 0
 }

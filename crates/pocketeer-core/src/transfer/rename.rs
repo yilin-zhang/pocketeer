@@ -9,16 +9,16 @@ use crate::fsutil::names::{
 };
 use crate::plan::{Applied, Checked, Pinned, Plan, Progress, Resources};
 use crate::transfer::saves;
-use crate::{Error, Result};
+use crate::{Error, ErrorInfo, Result};
 use serde::Serialize;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CardRenamePlan {
     pub rom: FileRename,
-    /// The ROM's ordinary saves, which follow its name.
+    /// The ROM's ordinary saves, which follow its name. Memories (save
+    /// states) never do: they keep the old ROM name.
     pub saves: Vec<FileRename>,
-    pub warnings: Vec<String>,
     #[serde(skip)]
     pinned: Pinned,
     /// The ROM as it was when planned.
@@ -52,12 +52,17 @@ impl Plan for CardRenamePlan {
         }
         let mut index = Index::scan(&pocket)?;
         let renamed = apply_renames(pocket.root(), std::iter::once(rom).chain(&self.saves))?;
-        let mut warnings = self.warnings.clone();
+        let mut warnings = Vec::new();
         if let Err(e) = index
             .relocate(&pocket, &rom.from, &rom.to)
             .and_then(|_| index.save(&pocket))
         {
-            warnings.push(format!("Files renamed, but cache update failed: {e}"));
+            warnings.push(
+                Error::IndexNotSaved {
+                    source: Box::new(e),
+                }
+                .to_info(),
+            );
         }
         // Without a library there are no backups to follow.
         if !self.saves.is_empty()
@@ -77,7 +82,7 @@ impl Plan for CardRenamePlan {
 #[derive(Debug, Clone, Serialize)]
 pub struct CardRenameResult {
     pub renamed: usize,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<ErrorInfo>,
 }
 
 impl Applied for CardRenameResult {
@@ -155,14 +160,9 @@ pub fn plan(pocket: &crate::Pocket, path: &Path, new_name: &str) -> Result<CardR
         }
     }
     saves.sort_by(|a, b| a.from.cmp(&b.from));
-    let warnings = vec![
-        "Memories stay unchanged; loading an existing save state may require the old ROM name."
-            .into(),
-    ];
     Ok(CardRenamePlan {
         rom: rom_move,
         saves,
-        warnings,
         pinned: Pinned::card(pocket)?,
         stamp: Stamp::of(&pocket.root().join(path))?,
     })
@@ -214,7 +214,7 @@ mod card_tests {
             std::fs::read(tmp.path().join("Memories/Save States/game.state")).unwrap(),
             b"state"
         );
-        assert_eq!(result.warnings, preview.warnings);
+        assert!(result.warnings.is_empty());
         assert_eq!(
             std::fs::read(tmp.path().join("Saves/gba/common/one/new name.sav")).unwrap(),
             b"save"

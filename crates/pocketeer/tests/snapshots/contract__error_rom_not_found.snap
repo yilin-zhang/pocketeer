@@ -10,10 +10,11 @@ expression: "s.run(& [\"library\", \"rename\", \"nope.gba\", \"x\", \"--dry-run\
         "spec": "nope.gba"
       },
       "hint": "Use `pocketeer library list [query]` to find the file name or id",
-      "message": "no library ROM matches nope.gba"
+      "message": "no library ROM matches nope.gba",
+      "remedy": "find_rom"
     },
     "ok": false,
-    "schema_version": 1
+    "schema_version": 2
   },
   "exit": 1
 }

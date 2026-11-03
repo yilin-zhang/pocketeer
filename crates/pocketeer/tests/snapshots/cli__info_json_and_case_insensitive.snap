@@ -35,5 +35,5 @@ expression: json_of(&out)
     "update_available": true
   },
   "ok": true,
-  "schema_version": 1
+  "schema_version": 2
 }

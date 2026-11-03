@@ -19,7 +19,7 @@ expression: "s.run(& [\"library\", \"rename\", \"Hello World (USA).fkh\", \"Hell
       "rom_id": 1
     },
     "ok": true,
-    "schema_version": 1
+    "schema_version": 2
   },
   "exit": 0
 }

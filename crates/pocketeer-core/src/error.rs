@@ -195,6 +195,26 @@ pub enum Error {
     #[error("{}: {reason}", path.display())]
     UnsupportedImage { path: PathBuf, reason: String },
 
+    /// The card's ROM index could not be brought up to date; the files
+    /// themselves are fine, and the next scan re-reads what it must.
+    #[error("the card's ROM index was not updated: {source}")]
+    IndexNotSaved { source: Box<Error> },
+
+    /// The card's ROM index could not be used and is being rebuilt.
+    #[error("the card's ROM index was rebuilt: {reason}")]
+    IndexRebuilt { reason: String },
+
+    /// A platform's DAT could not be had, so its ROMs were not identified.
+    #[error("{platform}: no DAT: {source}")]
+    DatUnavailable {
+        platform: String,
+        source: Box<Error>,
+    },
+
+    /// A platform's DAT was taken from the cache because fetching it failed.
+    #[error("{platform}: used the cached DAT: {reason}")]
+    DatCached { platform: String, reason: String },
+
     /// The command line could not be parsed (CLI-level; exit 2).
     #[error("{message}")]
     Usage {
@@ -327,6 +347,22 @@ pub const CODES: &[(&str, &str)] = &[
     (
         "CONTENT_MISMATCH",
         "a file's contents don't match what the library recorded (details.what)",
+    ),
+    (
+        "INDEX_NOT_SAVED",
+        "the files changed as planned, but the card's ROM index was not updated (warning)",
+    ),
+    (
+        "INDEX_REBUILT",
+        "the card's ROM index was unreadable or from another version and is rebuilt (warning)",
+    ),
+    (
+        "DAT_UNAVAILABLE",
+        "a platform's DAT could not be had; its ROMs were not identified (details.platform)",
+    ),
+    (
+        "DAT_CACHED",
+        "a platform's DAT came from the cache because fetching it failed (warning)",
     ),
 ];
 
@@ -482,61 +518,48 @@ impl Error {
                 "CONTENT_MISMATCH",
                 Some(json!({ "path": path, "what": what })),
             ),
+            Error::IndexNotSaved { source } => (
+                "INDEX_NOT_SAVED",
+                Some(json!({ "cause": source.to_info() })),
+            ),
+            Error::IndexRebuilt { reason } => ("INDEX_REBUILT", Some(json!({ "reason": reason }))),
+            Error::DatUnavailable { platform, source } => (
+                "DAT_UNAVAILABLE",
+                Some(json!({ "platform": platform, "cause": source.to_info() })),
+            ),
+            Error::DatCached { platform, reason } => (
+                "DAT_CACHED",
+                Some(json!({ "platform": platform, "reason": reason })),
+            ),
         }
     }
 
-    /// A suggestion for what to do next, if there is an obvious one.
-    pub fn hint(&self) -> Option<String> {
-        match self {
-            Error::Usage { hint, .. } => hint.clone(),
-            Error::SdNotFound { .. } => {
-                Some("Insert the SD card (or mount the Pocket), or pass --root <PATH>".into())
-            }
-            Error::MultipleSdCards { .. } => Some("Pass --root <PATH> to choose one".into()),
-            Error::NotAPocket { .. } => Some(
-                "A Pocket SD card has Analogue_Pocket.json, Assets/ and Cores/ at its root".into(),
-            ),
-            Error::OfflineNoCache { .. } => {
-                Some("Run once without --offline to populate the cache".into())
-            }
+    /// What the user can do about it, if there is an obvious next step.
+    pub fn remedy(&self) -> Option<Remedy> {
+        Some(match self {
+            Error::SdNotFound { .. } => Remedy::InsertCard,
+            Error::MultipleSdCards { .. } => Remedy::ChooseCard,
+            Error::NotAPocket { .. } => Remedy::CheckCardRoot,
+            Error::OfflineNoCache { .. } => Remedy::GoOnline,
             Error::Http {
                 status: 403 | 429,
                 url,
-            } if url.contains("github.com") => {
-                Some("GitHub rate limit? Set POCKETEER_GITHUB_TOKEN or pass --github-token".into())
-            }
-            Error::CoreNotFound { .. } => {
-                Some("Use `pocketeer cores search <query>` to find the exact id".into())
-            }
-            Error::CoreNotInstalled { .. } => {
-                Some("Use `pocketeer cores list` to see installed cores".into())
-            }
-            Error::VersionNotFound { .. } => {
-                Some("Pick one of the listed versions, or omit @version for the latest".into())
-            }
+            } if url.contains("github.com") => Remedy::SetGithubToken,
+            Error::CoreNotFound { .. } => Remedy::SearchCores,
+            Error::CoreNotInstalled { .. } => Remedy::ListInstalledCores,
+            Error::VersionNotFound { .. } => Remedy::PickVersion,
             Error::ApplyFailed {
                 rolled_back: false, ..
-            } => Some("Some changes could not be rolled back; inspect the reported paths. Core install recovery files, if any, are under .pocketeer/staging".into()),
-            Error::LibraryNotFound { .. } => Some(
-                "Run `pocketeer library init`, or point at one with --library / `pocketeer config set library <DIR>`"
-                    .into(),
-            ),
-            Error::LibraryTooNew { .. } => {
-                Some("Upgrade pocketeer; downgrading the library is not supported".into())
-            }
-            Error::RomNotFound { .. } => {
-                Some("Use `pocketeer library list [query]` to find the file name or id".into())
-            }
-            Error::RomAmbiguous { .. } => {
-                Some("Pass the ROM id (from `pocketeer library list --json`) or --platform".into())
-            }
-            Error::Stale { .. } => Some("Run the command again to plan from the current state".into()),
-            Error::Changed { .. } => Some("Retry once nothing else is writing to it".into()),
-            Error::UnsupportedImage { .. } => Some(
-                "Choose a PNG, JPEG or WebP image (up to 32 MiB and 8192 × 8192 pixels)".into(),
-            ),
-            _ => None,
-        }
+            } => Remedy::InspectStaging,
+            Error::LibraryNotFound { .. } => Remedy::CreateLibrary,
+            Error::LibraryTooNew { .. } => Remedy::UpgradePocketeer,
+            Error::RomNotFound { .. } => Remedy::FindRom,
+            Error::RomAmbiguous { .. } => Remedy::PickRom,
+            Error::Stale { .. } => Remedy::Replan,
+            Error::Changed { .. } => Remedy::Retry,
+            Error::UnsupportedImage { .. } => Remedy::ChooseImage,
+            _ => return None,
+        })
     }
 
     pub fn to_info(&self) -> ErrorInfo {
@@ -544,17 +567,68 @@ impl Error {
     }
 }
 
+/// The obvious next step after an error. Each front end says it in its own
+/// words (a flag at the command line, a key in the TUI).
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Remedy {
+    /// Insert or mount the card, or name its folder.
+    InsertCard,
+    /// Several cards are mounted: name the one to use.
+    ChooseCard,
+    /// The folder is not a Pocket card's root.
+    CheckCardRoot,
+    /// Go online once so the cache fills.
+    GoOnline,
+    /// GitHub is rate-limiting: give a token.
+    SetGithubToken,
+    /// Look the core's exact id up in the inventory.
+    SearchCores,
+    /// See which cores are installed.
+    ListInstalledCores,
+    /// Pick one of the versions the error lists.
+    PickVersion,
+    /// Some changes were not rolled back: look at the paths, and at the
+    /// card's staging folder.
+    InspectStaging,
+    /// Create the library, or point at an existing one.
+    CreateLibrary,
+    /// The library was written by a newer pocketeer.
+    UpgradePocketeer,
+    /// Look the ROM's name or id up in the library.
+    FindRom,
+    /// Several ROMs match: give the id or the platform.
+    PickRom,
+    /// Something changed since the plan was made: plan again.
+    Replan,
+    /// A file was being written: try again later.
+    Retry,
+    /// Choose a PNG, JPEG or WebP image within the limits.
+    ChooseImage,
+}
+
 /// Serializable form of an [`Error`], used in JSON output and for per-item
 /// failures (e.g. one broken core in a list) that should not abort the whole
 /// operation.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ErrorInfo {
     pub code: &'static str,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub remedy: Option<Remedy>,
+    /// The remedy in words, filled in by the front end that shows it (or
+    /// the usage hint the command line gave).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
+}
+
+/// The message, as a person reads it.
+impl std::fmt::Display for ErrorInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 impl From<&Error> for ErrorInfo {
@@ -562,7 +636,11 @@ impl From<&Error> for ErrorInfo {
         ErrorInfo {
             code: err.code(),
             message: err.to_string(),
-            hint: err.hint(),
+            remedy: err.remedy(),
+            hint: match err {
+                Error::Usage { hint, .. } => hint.clone(),
+                _ => None,
+            },
             details: err.details(),
         }
     }

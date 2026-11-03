@@ -433,7 +433,7 @@ pub struct ImportResult {
     /// Things that went wrong around the import without failing it (a card
     /// cache that couldn't be updated, say).
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
+    pub warnings: Vec<ErrorInfo>,
     #[serde(skip)]
     pub(crate) verified_sources: Vec<VerifiedSource>,
 }

@@ -5,7 +5,7 @@ use std::fmt::Write;
 use pocketeer_core::{
     card::{
         Status,
-        bios::{BiosReport, FileStatus, RootFile},
+        bios::{BiosReport, FileStatus, Note, RootFile},
         clean::JunkKind,
         roms::Identity,
     },
@@ -63,6 +63,14 @@ impl Text for Status {
     }
 }
 
+/// What limits what is known of a core's files.
+pub fn note(n: &Note) -> String {
+    match n {
+        Note::NoDataJson => "no data.json".into(),
+        Note::Unreadable { error } => format!("unreadable: {}", error.message),
+    }
+}
+
 impl Text for BiosReport {
     fn text(&self, _: Reader) -> String {
         let r = self;
@@ -106,8 +114,8 @@ impl Text for BiosReport {
                 };
                 let _ = writeln!(out, "{line}");
             }
-            for note in &core.notes {
-                let _ = writeln!(out, "  note: {note}");
+            for n in &core.notes {
+                let _ = writeln!(out, "  note: {}", note(n));
             }
         }
         let s = &r.summary;
@@ -358,9 +366,10 @@ impl Text for RenameReport {
                 file.to.display()
             );
         }
-        for warning in &report.plan.warnings {
-            let _ = writeln!(text, "Warning: {warning}");
-        }
+        let _ = writeln!(
+            text,
+            "Warning: Memories stay unchanged; loading an existing save state may require the old ROM name."
+        );
         staged_footer(
             &mut text,
             report.mode,

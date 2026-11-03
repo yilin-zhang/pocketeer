@@ -12,8 +12,8 @@ expression: "s.run(& [\"cores\", \"update\", \"--all\", \"--dry-run\"])"
             "details": {
               "what": "download of https://github.com/spiritualized1997/openFPGA-GBA/releases/download/v1.3.0/spiritualized.GBA_1.3.0.zip"
             },
-            "hint": "Run once without --offline to populate the cache",
-            "message": "download of https://github.com/spiritualized1997/openFPGA-GBA/releases/download/v1.3.0/spiritualized.GBA_1.3.0.zip is not available offline and nothing is cached"
+            "message": "download of https://github.com/spiritualized1997/openFPGA-GBA/releases/download/v1.3.0/spiritualized.GBA_1.3.0.zip is not available offline and nothing is cached",
+            "remedy": "go_online"
           },
           "state": "unplanned",
           "target": "spiritualized.GBA"
@@ -30,7 +30,7 @@ expression: "s.run(& [\"cores\", \"update\", \"--all\", \"--dry-run\"])"
       "message": "1 of 1 operation(s) failed"
     },
     "ok": false,
-    "schema_version": 1
+    "schema_version": 2
   },
   "exit": 1
 }

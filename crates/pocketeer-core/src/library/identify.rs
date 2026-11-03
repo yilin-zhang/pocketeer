@@ -3,7 +3,7 @@
 use super::{Library, db};
 
 use crate::{
-    Error, Result,
+    Error, ErrorInfo, Result,
     catalog::libretro,
     fsutil,
     net::{Cache, Http, Policy},
@@ -56,7 +56,9 @@ pub struct Report {
     pub ambiguous: usize,
     pub unsupported: usize,
     pub unchanged: usize,
-    pub errors: Vec<String>,
+    /// Platforms whose DAT could not be had (`DAT_UNAVAILABLE`) or came
+    /// from the cache (`DAT_CACHED`).
+    pub errors: Vec<ErrorInfo>,
 }
 
 pub struct Options<'a> {
@@ -111,16 +113,25 @@ pub fn run(
         let catalog = match Catalog::load(http, cache, opts.base, system, opts.policy) {
             Ok(c) => c,
             Err(e) => {
-                let error = e.to_string();
-                mark_failed(lib, &roms, &error)?;
-                report.errors.push(format!("{platform}: {error}"));
+                mark_failed(lib, &roms, &e.to_string())?;
+                report.errors.push(
+                    Error::DatUnavailable {
+                        platform,
+                        source: Box::new(e),
+                    }
+                    .to_info(),
+                );
                 continue;
             }
         };
-        if let Some(error) = &catalog.fallback {
-            report
-                .errors
-                .push(format!("{platform}: using cached DAT: {error}"));
+        if let Some(reason) = &catalog.fallback {
+            report.errors.push(
+                Error::DatCached {
+                    platform: platform.clone(),
+                    reason: reason.clone(),
+                }
+                .to_info(),
+            );
         }
         for rom in &roms {
             let state = match catalog.identify(rom) {

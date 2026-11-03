@@ -212,7 +212,7 @@ pub(super) fn draw_games(frame: &mut Frame, app: &mut App, area: Rect) {
             lines.push(kv_text("SHA-1", sha1.to_string()));
         }
         if let Identity::Error { error } = &o.identity {
-            lines.push(Line::from(Palette::Bad.span(error.clone())));
+            lines.push(Line::from(Palette::Bad.span(error.message.clone())));
         }
     }
     if let Some((game, _)) = &selected {

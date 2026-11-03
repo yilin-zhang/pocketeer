@@ -224,7 +224,7 @@ fn usage_errors_are_json_envelopes() {
     let (v, code, stderr) = run(&["--json"]);
     assert_eq!(code, 2);
     assert_eq!(v["ok"], false);
-    assert_eq!(v["schema_version"], 1);
+    assert_eq!(v["schema_version"], 2);
     assert_eq!(v["error"]["code"], "USAGE");
     assert!(v["data"].is_null());
     assert!(

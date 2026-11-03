@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use pocketeer_core::{
-    Error, Result,
+    Error, ErrorInfo, Result,
     library::{
         self, Game, Library, PlatformStats,
         covers::{self, FetchOptions, FetchReport},
@@ -72,7 +72,7 @@ pub struct Imported<P: Plan> {
     /// Problems identifying or fetching covers for the new games; the
     /// import itself succeeded.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
+    pub warnings: Vec<ErrorInfo>,
 }
 
 impl<P: ImportsRoms> Imported<P> {
@@ -101,7 +101,7 @@ impl<P: ImportsRoms> Imported<P> {
             metadata_after_import(ctx, &platforms, (added, covers), progress).unwrap_or_default();
         Ok(Imported {
             staged,
-            warnings: metadata.problems().map(str::to_owned).collect(),
+            warnings: metadata.problems().cloned().collect(),
             covers: metadata.covers,
         })
     }
@@ -170,7 +170,7 @@ pub struct MetadataReport {
     pub covers: Option<FetchReport>,
     /// A step that failed as a whole (no library, no HTTP client, …).
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub errors: Vec<String>,
+    pub errors: Vec<ErrorInfo>,
 }
 
 impl MetadataReport {
@@ -184,11 +184,10 @@ impl MetadataReport {
 
     /// Every problem worth telling the user: whole-step failures, then the
     /// per-platform ones each step reported.
-    pub fn problems(&self) -> impl Iterator<Item = &str> {
+    pub fn problems(&self) -> impl Iterator<Item = &ErrorInfo> {
         self.errors
             .iter()
             .chain(self.identify.iter().flat_map(|r| r.errors.iter()))
-            .map(String::as_str)
     }
 }
 
@@ -203,12 +202,12 @@ pub fn refresh_metadata(
     let mut report = MetadataReport::default();
     match identify(ctx, platforms, progress) {
         Ok(r) => report.identify = Some(r),
-        Err(e) => report.errors.push(format!("DAT check: {e}")),
+        Err(e) => report.errors.push(e.to_info()),
     }
     if covers && !ctx.offline() {
         match covers_fetch(ctx, platforms, false, None, progress) {
             Ok(c) => report.covers = Some(c),
-            Err(e) => report.errors.push(format!("Covers: {e}")),
+            Err(e) => report.errors.push(e.to_info()),
         }
     }
     report

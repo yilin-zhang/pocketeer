@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use serde::Serialize;
 
 use crate::{
-    Pocket, Result,
+    Error, Pocket, Result,
     card::roms::CardRom,
     catalog::Dat,
     fsutil::{
@@ -96,13 +96,21 @@ impl Plan for CardImportPlan {
             if Stamp::of(&verified.path).ok() == Some(verified.stamp)
                 && let Err(e) = index.record_copy(&pocket, relative, &verified.sha1)
             {
-                result
-                    .warnings
-                    .push(format!("Imported ROM, but cache was not updated: {e}"));
+                result.warnings.push(
+                    Error::IndexNotSaved {
+                        source: Box::new(e),
+                    }
+                    .to_info(),
+                );
             }
         }
         if let Err(e) = index.save(&pocket) {
-            result.warnings.push(format!("Cache not saved: {e}"));
+            result.warnings.push(
+                Error::IndexNotSaved {
+                    source: Box::new(e),
+                }
+                .to_info(),
+            );
         }
         Ok(result)
     }

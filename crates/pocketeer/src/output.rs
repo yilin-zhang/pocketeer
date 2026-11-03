@@ -8,13 +8,13 @@ use std::{
     process::ExitCode,
 };
 
-use pocketeer_core::{Error, ErrorInfo, plan::Event};
+use pocketeer_core::{Error, ErrorInfo, Remedy, plan::Event};
 use serde::Serialize;
 
 use crate::text::{Reader, Text};
 
 /// Bump when a released JSON shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Serialize)]
 struct Envelope<'a, T: Serialize> {
@@ -98,10 +98,10 @@ impl Output {
                 schema_version: SCHEMA_VERSION,
                 ok: false,
                 data: None,
-                error: Some(error.to_info()),
+                error: Some(described(&error)),
             });
         } else {
-            print_error(&error.to_info());
+            print_error(&described(&error));
         }
         ExitCode::FAILURE
     }
@@ -110,8 +110,8 @@ impl Output {
     /// failure, if the data reports one or the command failed outright.
     pub fn emit<T: Outcome + Text>(&self, result: Result<T, Error>) -> ExitCode {
         let (data, error) = match &result {
-            Ok(data) => (Some(data), data.error().map(|e| e.to_info())),
-            Err(err) => (None, Some(err.to_info())),
+            Ok(data) => (Some(data), data.error().map(|e| described(&e))),
+            Err(err) => (None, Some(described(err))),
         };
 
         if self.json {
@@ -169,6 +169,47 @@ impl Output {
             }
             Event::Step { .. } => {}
         })
+    }
+}
+
+/// The error as the command line reports it: its remedy in words.
+fn described(error: &Error) -> ErrorInfo {
+    let mut info = error.to_info();
+    if info.hint.is_none() {
+        info.hint = info.remedy.map(|r| remedy_hint(r).to_string());
+    }
+    info
+}
+
+/// What to do next, said for someone at the command line.
+pub fn remedy_hint(remedy: Remedy) -> &'static str {
+    match remedy {
+        Remedy::InsertCard => "Insert the SD card (or mount the Pocket), or pass --root <PATH>",
+        Remedy::ChooseCard => "Pass --root <PATH> to choose one",
+        Remedy::CheckCardRoot => {
+            "A Pocket SD card has Analogue_Pocket.json, Assets/ and Cores/ at its root"
+        }
+        Remedy::GoOnline => "Run once without --offline to populate the cache",
+        Remedy::SetGithubToken => {
+            "GitHub rate limit? Set POCKETEER_GITHUB_TOKEN or pass --github-token"
+        }
+        Remedy::SearchCores => "Use `pocketeer cores search <query>` to find the exact id",
+        Remedy::ListInstalledCores => "Use `pocketeer cores list` to see installed cores",
+        Remedy::PickVersion => "Pick one of the listed versions, or omit @version for the latest",
+        Remedy::InspectStaging => {
+            "Some changes could not be rolled back; inspect the reported paths. Core install recovery files, if any, are under .pocketeer/staging"
+        }
+        Remedy::CreateLibrary => {
+            "Run `pocketeer library init`, or point at one with --library / `pocketeer config set library <DIR>`"
+        }
+        Remedy::UpgradePocketeer => "Upgrade pocketeer; downgrading the library is not supported",
+        Remedy::FindRom => "Use `pocketeer library list [query]` to find the file name or id",
+        Remedy::PickRom => "Pass the ROM id (from `pocketeer library list --json`) or --platform",
+        Remedy::Replan => "Run the command again to plan from the current state",
+        Remedy::Retry => "Retry once nothing else is writing to it",
+        Remedy::ChooseImage => {
+            "Choose a PNG, JPEG or WebP image (up to 32 MiB and 8192 × 8192 pixels)"
+        }
     }
 }
 

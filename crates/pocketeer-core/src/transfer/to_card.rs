@@ -2,7 +2,7 @@
 
 use crate::library::{Library, resolve_rom};
 use crate::{
-    Error, Pocket, Result,
+    Error, ErrorInfo, Pocket, Result,
     card::roms::{Identity, Index},
     fsutil,
     fsutil::hash::copy_and_hash,
@@ -25,7 +25,7 @@ pub struct CopyPlan {
     pinned: Pinned,
     pub files: Vec<CopyFile>,
     pub already_present: Vec<PathBuf>,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<ErrorInfo>,
 }
 impl Plan for CopyPlan {
     type Output = CopyResult;
@@ -70,9 +70,12 @@ impl Plan for CopyPlan {
                 Ok(()) => {
                     result.copied += 1;
                     if let Err(e) = index.record_copy(pocket, &file.destination, &file.sha1) {
-                        result
-                            .warnings
-                            .push(format!("Copied ROM, but could not update its cache: {e}"));
+                        result.warnings.push(
+                            Error::IndexNotSaved {
+                                source: Box::new(e),
+                            }
+                            .to_info(),
+                        );
                     }
                 }
                 Err(e) => result.failed.push(Failure::new(&file.destination, &e)),
@@ -83,7 +86,12 @@ impl Plan for CopyPlan {
             });
         }
         if let Err(e) = index.save(pocket) {
-            result.warnings.push(format!("Cache not saved: {e}"));
+            result.warnings.push(
+                Error::IndexNotSaved {
+                    source: Box::new(e),
+                }
+                .to_info(),
+            );
         }
         Ok(result)
     }
@@ -93,7 +101,7 @@ impl Plan for CopyPlan {
 pub struct CopyResult {
     pub copied: usize,
     pub failed: Vec<Failure>,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<ErrorInfo>,
 }
 
 impl Applied for CopyResult {
@@ -171,7 +179,7 @@ pub fn plan(
         if let Some((card, error)) = unreadable {
             return Err(Error::Mismatch {
                 path: pocket.root().join(&card.rel_path),
-                what: error.clone(),
+                what: error.message.clone(),
             });
         }
         crate::fsutil::names::validate_name(&game.platform)?;
@@ -188,7 +196,12 @@ pub fn plan(
         });
     }
     if let Err(e) = index.save(pocket) {
-        plan.warnings.push(format!("Cache not saved: {e}"));
+        plan.warnings.push(
+            Error::IndexNotSaved {
+                source: Box::new(e),
+            }
+            .to_info(),
+        );
     }
     Ok(plan)
 }

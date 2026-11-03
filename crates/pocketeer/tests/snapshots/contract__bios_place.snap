@@ -18,7 +18,7 @@ expression: "s.run(& [\"bios\", \"place\", \"--dry-run\"])"
       "zipped": []
     },
     "ok": true,
-    "schema_version": 1
+    "schema_version": 2
   },
   "exit": 0
 }

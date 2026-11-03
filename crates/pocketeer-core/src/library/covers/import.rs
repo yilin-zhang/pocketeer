@@ -3,7 +3,7 @@
 use super::Cover;
 use crate::library::{Library, db};
 use crate::plan::{Applied, Checked, Pinned, Plan, Progress, Resources};
-use crate::{Error, Result, fsutil};
+use crate::{Error, ErrorInfo, Result, fsutil};
 use image::{ImageFormat, ImageReader, Limits};
 use serde::Serialize;
 use sha1::{Digest, Sha1};
@@ -101,9 +101,8 @@ impl Plan for CoverImportPlan {
             && let Err(e) = fs::remove_file(root.join(rel))
             && e.kind() != std::io::ErrorKind::NotFound
         {
-            warnings.push(format!(
-                "New cover saved; old image could not be removed: {e}"
-            ));
+            // The new cover is saved; the old image is merely left behind.
+            warnings.push(Error::io(root.join(rel), e).to_info());
         }
         Ok(CoverImportResult {
             path: self.destination.clone(),
@@ -169,7 +168,7 @@ pub fn plan(lib: &Library, game_id: i64, source: &Path) -> Result<CoverImportPla
 pub struct CoverImportResult {
     pub path: PathBuf,
     pub replaced: bool,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<ErrorInfo>,
 }
 
 impl Applied for CoverImportResult {

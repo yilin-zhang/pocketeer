@@ -273,7 +273,7 @@ pub(super) fn draw_bios(frame: &mut Frame, app: &mut App, area: Rect) {
                 lines.push(Line::from(a).dim());
             }
             for n in &core.notes {
-                lines.push(Line::from(format!("note: {n}")).dim());
+                lines.push(Line::from(format!("note: {}", text::card::note(n))).dim());
             }
         }
         None if app.bios().pane().filter() == BiosFilter::Problems

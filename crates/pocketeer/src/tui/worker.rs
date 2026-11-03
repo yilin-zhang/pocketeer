@@ -313,7 +313,12 @@ fn run(ctx: &Context, job: Job, progress: &mut dyn FnMut(Event)) -> Msg {
                 }
                 if !cancelled() {
                     if let Err(e) = index.save(&pocket) {
-                        index.warning = Some(e.to_string());
+                        index.warning = Some(
+                            Error::IndexNotSaved {
+                                source: Box::new(e),
+                            }
+                            .to_info(),
+                        );
                     }
                 }
                 index
@@ -478,7 +483,12 @@ fn load_card(
     let mut index = Index::scan_with_protected(pocket, &declared)?;
     // Persist removed paths even when no ROM remains to schedule verification.
     if let Err(e) = index.save(pocket) {
-        index.warning = Some(format!("Cache not saved: {e}"));
+        index.warning = Some(
+            Error::IndexNotSaved {
+                source: Box::new(e),
+            }
+            .to_info(),
+        );
     }
     let cores = installed.report(&inventory);
     let mut card = CardSnapshot {

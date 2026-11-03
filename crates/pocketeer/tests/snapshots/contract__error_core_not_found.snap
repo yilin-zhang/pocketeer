@@ -10,10 +10,11 @@ expression: "s.run(& [\"cores\", \"info\", \"nobody.Nothing\"])"
         "id": "nobody.Nothing"
       },
       "hint": "Use `pocketeer cores search <query>` to find the exact id",
-      "message": "core nobody.Nothing is not installed and not in the inventory"
+      "message": "core nobody.Nothing is not installed and not in the inventory",
+      "remedy": "search_cores"
     },
     "ok": false,
-    "schema_version": 1
+    "schema_version": 2
   },
   "exit": 1
 }

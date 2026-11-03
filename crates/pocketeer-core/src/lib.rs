@@ -18,7 +18,7 @@ pub mod transfer;
 pub(crate) mod testutil;
 
 pub use card::Pocket;
-pub use error::{Error, ErrorInfo, Result};
+pub use error::{Error, ErrorInfo, Remedy, Result};
 pub use fsutil::hash::HashCache;
 /// File-name rules (stems, rename kinds) the front ends show.
 pub use fsutil::names;
