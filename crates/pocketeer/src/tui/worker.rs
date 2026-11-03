@@ -22,7 +22,7 @@ use pocketeer_core::{
     card::bios::{self, BiosReport},
     card::cores::{self, CoreList, CoreListReport},
     card::memories::Header,
-    card::roms::{CardRom, Index},
+    card::roms::{CardRom, Depth, Index},
     catalog::inventory::{Inventory, InventoryLoad},
     library::{Game, Library, covers},
     plan::Event,
@@ -104,7 +104,7 @@ impl CardSnapshot {
     /// what the screens show. Library presence follows with `rematch`.
     pub fn set_index(&mut self, index: Box<Index>) {
         self.files = index
-            .roms
+            .roms()
             .iter()
             .map(|rom| CardFile {
                 rom: rom.clone(),
@@ -308,18 +308,11 @@ fn run(ctx: &Context, job: Job, progress: &mut dyn FnMut(Event)) -> Msg {
             let cancelled = || token.load(Ordering::Relaxed) != epoch;
             let mut next = cursor;
             let result = ctx.pocket().map(|pocket| {
-                if index.verify(&pocket, cursor, false, &cancelled) {
+                if index.verify(&pocket, cursor, Depth::Sample, &cancelled) {
                     next += 1;
                 }
                 if !cancelled() {
-                    if let Err(e) = index.save(&pocket) {
-                        index.warning = Some(
-                            Error::IndexNotSaved {
-                                source: Box::new(e),
-                            }
-                            .to_info(),
-                        );
-                    }
+                    index.save(&pocket);
                 }
                 index
             });
@@ -482,14 +475,7 @@ fn load_card(
     let declared = bios.all_files().map(|f| f.path.clone()).collect();
     let mut index = Index::scan_with_protected(pocket, &declared)?;
     // Persist removed paths even when no ROM remains to schedule verification.
-    if let Err(e) = index.save(pocket) {
-        index.warning = Some(
-            Error::IndexNotSaved {
-                source: Box::new(e),
-            }
-            .to_info(),
-        );
-    }
+    index.save(pocket);
     let cores = installed.report(&inventory);
     let mut card = CardSnapshot {
         status,

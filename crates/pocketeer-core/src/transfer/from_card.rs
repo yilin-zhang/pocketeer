@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use serde::Serialize;
 
 use crate::{
-    Error, Pocket, Result,
+    Pocket, Result,
     card::roms::CardRom,
     catalog::Dat,
     fsutil::{
@@ -36,9 +36,9 @@ fn unmatched(
     platform: Option<&str>,
 ) -> Result<Vec<CardRom>> {
     let games = lib.list_games(platform, None)?;
-    let comparison = crate::transfer::compare(&games, &index.roms);
+    let comparison = crate::transfer::compare(&games, index.roms());
     Ok(index
-        .roms
+        .roms()
         .iter()
         .zip(comparison.card)
         .filter(|(rom, presence)| {
@@ -93,25 +93,12 @@ impl Plan for CardImportPlan {
             let Ok(relative) = verified.path.strip_prefix(pocket.root()) else {
                 continue;
             };
-            if Stamp::of(&verified.path).ok() == Some(verified.stamp)
-                && let Err(e) = index.record_copy(&pocket, relative, &verified.sha1)
-            {
-                result.warnings.push(
-                    Error::IndexNotSaved {
-                        source: Box::new(e),
-                    }
-                    .to_info(),
-                );
+            if Stamp::of(&verified.path).ok() == Some(verified.stamp) {
+                index.record_copy(&pocket, relative, &verified.sha1);
             }
         }
-        if let Err(e) = index.save(&pocket) {
-            result.warnings.push(
-                Error::IndexNotSaved {
-                    source: Box::new(e),
-                }
-                .to_info(),
-            );
-        }
+        index.save(&pocket);
+        result.warnings.extend(index.take_warnings());
         Ok(result)
     }
 }
@@ -151,6 +138,7 @@ pub fn plan_import(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::card::roms::Depth;
 
     use crate::testutil::{library_with, sd, write};
 
@@ -191,10 +179,8 @@ mod tests {
         };
         assert_eq!(list(&lib, &pocket, None).unwrap().len(), 6);
         let mut index = crate::card::roms::Index::scan(&pocket).unwrap();
-        for i in 0..index.roms.len() {
-            index.verify(&pocket, i, false, &|| false);
-        }
-        index.save(&pocket).unwrap();
+        index.check(&pocket, Depth::Sample, &mut |_| {});
+        index.save(&pocket);
         let all = list(&lib, &pocket, None).unwrap();
         assert_eq!(
             names(&all),

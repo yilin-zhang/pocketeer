@@ -387,7 +387,7 @@ impl Session {
                     }
                     match result {
                         Ok(mut index) => {
-                            if let Some(warning) = index.warning.take() {
+                            for warning in index.take_warnings() {
                                 self.notice(warning.message);
                             }
                             if let Some(snap) = &mut self.snapshot
@@ -437,7 +437,7 @@ impl Session {
                     match result {
                         Ok(mut snap) => {
                             let index = snap.card.as_mut().and_then(|c| c.index.as_mut());
-                            if let Some(warning) = index.and_then(|i| i.warning.take()) {
+                            for warning in index.map(|i| i.take_warnings()).unwrap_or_default() {
                                 self.notice(warning.message);
                             }
                             self.snapshot = Some(*snap);
@@ -526,14 +526,14 @@ impl Session {
         let Some(index) = card.and_then(|c| c.index.take()) else {
             return;
         };
-        if self.verify.next >= index.roms.len() {
+        if self.verify.next >= index.roms().len() {
             self.busy.roms = None;
             return;
         }
         self.busy.roms = Some(format!(
             "ROM check {}/{}",
             self.verify.next + 1,
-            index.roms.len()
+            index.roms().len()
         ));
         self.verify.inflight = true;
         self.worker.submit(

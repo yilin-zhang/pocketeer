@@ -19,7 +19,7 @@ use crate::{
     Error, ErrorInfo, Pocket, Result,
     card::bios,
     fsutil::{self, Stamp},
-    plan::{Checked, Pinned, Plan, Progress, Resources},
+    plan::{Checked, Event, Pinned, Plan, Progress, Resources},
 };
 
 // ---------------------------------------------------------------------------
@@ -185,12 +185,27 @@ struct Store {
     entries: BTreeMap<PathBuf, Cached>,
 }
 
+/// How closely to look at a ROM file before trusting what the index says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Depth {
+    /// Trust the index; read nothing.
+    Cached,
+    /// Hash files whose size or date changed; for the rest, a sample of
+    /// their bytes must still match.
+    Sample,
+    /// Hash every byte of every file.
+    Full,
+}
+
+/// The ROM files on a card and what is known of their contents, kept in a
+/// cache on the card so a check needn't hash unchanged files again.
 pub struct Index {
     /// The card this index describes; every write checks it is still mounted.
     pinned: Pinned,
-    pub roms: Vec<CardRom>,
-    /// Cache failures do not prevent listing or operating on ROM files.
-    pub warning: Option<ErrorInfo>,
+    roms: Vec<CardRom>,
+    /// Problems with the cache itself; they never stop listing or operating
+    /// on the ROM files.
+    warnings: Vec<ErrorInfo>,
     entries: BTreeMap<PathBuf, Cached>,
     dirty: bool,
 }
@@ -263,22 +278,59 @@ impl Index {
         Ok(Self {
             pinned,
             roms,
-            warning,
+            warnings: warning.into_iter().collect(),
             entries,
             dirty,
         })
     }
 
-    /// Returns false when cancelled. Failures invalidate this file's cached
-    /// identity; other files can still be verified. Full verification bypasses
-    /// both the metadata shortcut and the sample check.
+    pub fn roms(&self) -> &[CardRom] {
+        &self.roms
+    }
+
+    pub fn into_roms(self) -> Vec<CardRom> {
+        self.roms
+    }
+
+    /// The cache problems met so far, for the caller to report.
+    pub fn take_warnings(&mut self) -> Vec<ErrorInfo> {
+        std::mem::take(&mut self.warnings)
+    }
+
+    /// Checks every ROM at `depth`, then saves what it learned.
+    pub fn check(&mut self, pocket: &Pocket, depth: Depth, progress: Progress<'_>) {
+        if depth == Depth::Cached {
+            return;
+        }
+        for i in 0..self.roms.len() {
+            progress(Event::Status(format!(
+                "Checking {}",
+                self.roms[i].rel_path.display()
+            )));
+            self.verify(pocket, i, depth, &|| false);
+            progress(Event::Step {
+                done: i + 1,
+                total: self.roms.len(),
+            });
+        }
+        self.save(pocket);
+    }
+
+    /// Checks ROM `i` at `depth`. Returns false when cancelled. Failures
+    /// invalidate this file's cached identity; other files can still be
+    /// verified.
     pub fn verify(
         &mut self,
         pocket: &Pocket,
         i: usize,
-        full: bool,
+        depth: Depth,
         cancelled: &dyn Fn() -> bool,
     ) -> bool {
+        let full = match depth {
+            Depth::Cached => return true,
+            Depth::Sample => false,
+            Depth::Full => true,
+        };
         if cancelled() {
             return false;
         }
@@ -354,7 +406,14 @@ impl Index {
         Ok((entry, identity))
     }
 
-    pub fn relocate(&mut self, pocket: &Pocket, from: &Path, to: &Path) -> Result<()> {
+    /// A ROM file was renamed: its entry follows it.
+    pub fn relocate(&mut self, pocket: &Pocket, from: &Path, to: &Path) {
+        if let Err(e) = self.try_relocate(pocket, from, to) {
+            self.not_saved(e);
+        }
+    }
+
+    fn try_relocate(&mut self, pocket: &Pocket, from: &Path, to: &Path) -> Result<()> {
         self.pinned.check_card(pocket)?;
         if let Some(entry) = self.entries.remove(from) {
             self.dirty = true;
@@ -367,7 +426,13 @@ impl Index {
 
     /// The caller has just copied and fully hashed these bytes. Reading only
     /// the sample here seeds future checks without rereading the whole ROM.
-    pub fn record_copy(&mut self, pocket: &Pocket, path: &Path, sha1: &str) -> Result<()> {
+    pub fn record_copy(&mut self, pocket: &Pocket, path: &Path, sha1: &str) {
+        if let Err(e) = self.try_record_copy(pocket, path, sha1) {
+            self.not_saved(e);
+        }
+    }
+
+    fn try_record_copy(&mut self, pocket: &Pocket, path: &Path, sha1: &str) -> Result<()> {
         self.pinned.check_card(pocket)?;
         let full = pocket.root().join(path);
         let before = Stamp::of(&full)?;
@@ -392,9 +457,24 @@ impl Index {
         Ok(())
     }
 
-    /// Batch persistence is separate from file operations: a failed cache write
-    /// must never turn a successful copy or rename into an apparent failure.
-    pub fn save(&mut self, pocket: &Pocket) -> Result<()> {
+    /// Writes the cache back to the card. A failed cache write never turns a
+    /// successful copy or rename into a failure: it becomes a warning.
+    pub fn save(&mut self, pocket: &Pocket) {
+        if let Err(e) = self.try_save(pocket) {
+            self.not_saved(e);
+        }
+    }
+
+    fn not_saved(&mut self, e: Error) {
+        self.warnings.push(
+            Error::IndexNotSaved {
+                source: Box::new(e),
+            }
+            .to_info(),
+        );
+    }
+
+    fn try_save(&mut self, pocket: &Pocket) -> Result<()> {
         if !self.dirty {
             return Ok(());
         }
@@ -517,7 +597,7 @@ mod index_tests {
         let mut index = Index::scan(&pocket).unwrap();
         assert_eq!(index.roms.len(), 2);
         for i in 0..2 {
-            assert!(index.verify(&pocket, i, false, &|| false));
+            assert!(index.verify(&pocket, i, Depth::Sample, &|| false));
         }
         assert_eq!(index.roms[0].identity.sha1(), index.roms[1].identity.sha1());
         // `shasum` of "same bytes".
@@ -525,7 +605,7 @@ mod index_tests {
             index.roms[0].identity.sha1(),
             Some("9ad949ae6c2f37319cfa43f410db66843000a047")
         );
-        index.save(&pocket).unwrap();
+        index.save(&pocket);
         let mut index = Index::scan(&pocket).unwrap();
         assert!(
             index
@@ -533,7 +613,7 @@ mod index_tests {
                 .iter()
                 .all(|r| matches!(r.identity, Identity::Cached { .. }))
         );
-        index.verify(&pocket, 0, false, &|| false);
+        index.verify(&pocket, 0, Depth::Sample, &|| false);
         assert!(matches!(index.roms[0].identity, Identity::Sampled { .. }));
         fs::rename(
             tmp.path().join("Assets/gba/common/two.gba"),
@@ -547,9 +627,9 @@ mod index_tests {
             .position(|r| r.name == "renamed.gba")
             .unwrap();
         assert!(matches!(index.roms[i].identity, Identity::Pending));
-        index.verify(&pocket, i, false, &|| false);
+        index.verify(&pocket, i, Depth::Sample, &|| false);
         assert_eq!(index.roms[0].identity.sha1(), index.roms[1].identity.sha1());
-        index.save(&pocket).unwrap();
+        index.save(&pocket);
         let store: Store =
             rmp_serde::from_slice(&fs::read(pocket.pocketeer_dir().join(CACHE_FILE)).unwrap())
                 .unwrap();
@@ -572,9 +652,9 @@ mod index_tests {
         );
         let time = fs::metadata(&path).unwrap().modified().unwrap();
         let mut index = Index::scan(&pocket).unwrap();
-        index.verify(&pocket, 0, false, &|| false);
+        index.verify(&pocket, 0, Depth::Sample, &|| false);
         let original = index.roms[0].identity.sha1().map(str::to_owned);
-        index.save(&pocket).unwrap();
+        index.save(&pocket);
         // An edit outside the sample is deliberately NOT claimed as fully verified.
         let mut bytes = fs::read(&path).unwrap();
         bytes[32 * 1024] = b'b';
@@ -586,10 +666,10 @@ mod index_tests {
             .set_modified(time)
             .unwrap();
         let mut index = Index::scan(&pocket).unwrap();
-        index.verify(&pocket, 0, false, &|| false);
+        index.verify(&pocket, 0, Depth::Sample, &|| false);
         assert!(matches!(index.roms[0].identity, Identity::Sampled { .. }));
         assert_eq!(index.roms[0].identity.sha1(), original.as_deref());
-        index.verify(&pocket, 0, true, &|| false);
+        index.verify(&pocket, 0, Depth::Full, &|| false);
         assert_ne!(index.roms[0].identity.sha1(), original.as_deref());
         let previous = index.roms[0].identity.sha1().map(str::to_owned);
         bytes[0] = b'c';
@@ -600,7 +680,7 @@ mod index_tests {
             .unwrap()
             .set_modified(time)
             .unwrap();
-        index.verify(&pocket, 0, false, &|| false);
+        index.verify(&pocket, 0, Depth::Sample, &|| false);
         assert!(matches!(index.roms[0].identity, Identity::Full { .. }));
         assert_ne!(index.roms[0].identity.sha1(), previous.as_deref());
     }
@@ -611,13 +691,13 @@ mod index_tests {
         write(&pocket.pocketeer_dir(), CACHE_FILE, "broken");
         write(tmp.path(), "Assets/gb/common/test.gb", "rom");
         let mut index = Index::scan(&pocket).unwrap();
-        assert!(index.warning.is_some());
-        assert!(!index.verify(&pocket, 0, false, &|| true));
+        assert!(!index.warnings.is_empty());
+        assert!(!index.verify(&pocket, 0, Depth::Sample, &|| true));
         assert!(matches!(index.roms[0].identity, Identity::Pending));
-        index.verify(&pocket, 0, false, &|| false);
+        index.verify(&pocket, 0, Depth::Sample, &|| false);
         assert!(matches!(index.roms[0].identity, Identity::Full { .. }));
         fs::remove_file(tmp.path().join(&index.roms[0].rel_path)).unwrap();
-        index.verify(&pocket, 0, false, &|| false);
+        index.verify(&pocket, 0, Depth::Sample, &|| false);
         assert!(matches!(index.roms[0].identity, Identity::Error { .. }));
     }
 }

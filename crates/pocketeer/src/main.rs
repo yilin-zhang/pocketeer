@@ -11,6 +11,7 @@ use std::{io::IsTerminal, process::ExitCode};
 
 use clap::{CommandFactory, Parser};
 use pocketeer_core::{
+    card::roms::Depth,
     plan::Event,
     transfer::saves::{Scope, TrashTarget},
 };
@@ -246,8 +247,11 @@ fn run_card(
             let mode = args.apply.into();
             out.emit(card::import(ctx, &args.into(), mode, progress))
         }
-        CardCommand::List => out.emit(card::roms(ctx, None, progress)),
-        CardCommand::Check { full } => out.emit(card::roms(ctx, Some(full), progress)),
+        CardCommand::List => out.emit(card::roms(ctx, Depth::Cached, progress)),
+        CardCommand::Check { full } => {
+            let depth = if full { Depth::Full } else { Depth::Sample };
+            out.emit(card::roms(ctx, depth, progress))
+        }
     }
 }
 

@@ -165,7 +165,7 @@ pub fn fingerprint(pocket: Option<&Pocket>, library: Option<&Path>) -> u64 {
 mod matching_tests {
     use super::*;
     use crate::{
-        card::roms::Index,
+        card::roms::{Depth, Index},
         testutil::{library_with, sd, write},
     };
 
@@ -183,7 +183,7 @@ mod matching_tests {
         write(tmp.path(), "Assets/gb/common/local.gba", "ROM A");
         let games = lib.list_games(None, None).unwrap();
         let mut index = Index::scan(&pocket).unwrap();
-        let pending = compare(&games, &index.roms);
+        let pending = compare(&games, index.roms());
         assert!(
             pending
                 .local
@@ -191,10 +191,8 @@ mod matching_tests {
                 .all(|m| m.presence == Presence::Unknown)
         );
         assert!(pending.card.iter().all(|p| *p == Presence::Unknown));
-        for i in 0..index.roms.len() {
-            index.verify(&pocket, i, false, &|| false);
-        }
-        let matched = compare(&games, &index.roms);
+        index.check(&pocket, Depth::Sample, &mut |_| {});
+        let matched = compare(&games, index.roms());
         let local = matched
             .local
             .values()

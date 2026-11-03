@@ -52,18 +52,9 @@ impl Plan for CardRenamePlan {
         }
         let mut index = Index::scan(&pocket)?;
         let renamed = apply_renames(pocket.root(), std::iter::once(rom).chain(&self.saves))?;
-        let mut warnings = Vec::new();
-        if let Err(e) = index
-            .relocate(&pocket, &rom.from, &rom.to)
-            .and_then(|_| index.save(&pocket))
-        {
-            warnings.push(
-                Error::IndexNotSaved {
-                    source: Box::new(e),
-                }
-                .to_info(),
-            );
-        }
+        index.relocate(&pocket, &rom.from, &rom.to);
+        index.save(&pocket);
+        let warnings = index.take_warnings();
         // Without a library there are no backups to follow.
         if !self.saves.is_empty()
             && let Ok(lib) = res.library()
@@ -94,7 +85,7 @@ impl Applied for CardRenameResult {
 pub fn plan(pocket: &crate::Pocket, path: &Path, new_name: &str) -> Result<CardRenamePlan> {
     let index = Index::scan(pocket)?;
     let rom = index
-        .roms
+        .roms()
         .iter()
         .find(|r| r.rel_path == path)
         .ok_or_else(|| Error::RomNotFound {
@@ -118,7 +109,7 @@ pub fn plan(pocket: &crate::Pocket, path: &Path, new_name: &str) -> Result<CardR
     let old_stem = stem(&rom.name);
     let new_stem = stem(&new_name);
     if old_stem != new_stem {
-        if index.roms.iter().any(|r| {
+        if index.roms().iter().any(|r| {
             r.rel_path != path
                 && r.rel_path.parent() == path.parent()
                 && [old_stem, new_stem]
@@ -172,7 +163,7 @@ pub fn plan(pocket: &crate::Pocket, path: &Path, new_name: &str) -> Result<CardR
 mod card_tests {
     use super::*;
     use crate::{
-        card::roms::{Identity, Index},
+        card::roms::{Depth, Identity, Index},
         testutil::{sd, write},
     };
 
@@ -196,11 +187,9 @@ mod card_tests {
         write(tmp.path(), "Assets/gba/common/one/game.v2.gba", "other ROM");
         write(tmp.path(), "Saves/gba/common/one/game.v2.sav", "other save");
         let mut index = Index::scan(&pocket).unwrap();
-        for i in 0..index.roms.len() {
-            index.verify(&pocket, i, false, &|| false);
-        }
-        let sha1 = index.roms[0].identity.sha1().map(str::to_owned);
-        index.save(&pocket).unwrap();
+        index.check(&pocket, Depth::Sample, &mut |_| {});
+        let sha1 = index.roms()[0].identity.sha1().map(str::to_owned);
+        index.save(&pocket);
         let mut preview = plan(
             &pocket,
             Path::new("Assets/gba/common/one/game.gba"),
@@ -241,7 +230,7 @@ mod card_tests {
         );
         let index = Index::scan(&pocket).unwrap();
         let renamed = index
-            .roms
+            .roms()
             .iter()
             .find(|r| r.name == "new name.gba")
             .unwrap();
@@ -277,13 +266,13 @@ mod card_tests {
         );
         write(tmp.path(), "GB Studio/Saves/demo.sav", "save");
         let index = Index::scan(&pocket).unwrap();
-        assert_eq!(index.roms.len(), 1);
-        assert_eq!(index.roms[0].platform, "gbstudio");
+        assert_eq!(index.roms().len(), 1);
+        assert_eq!(index.roms()[0].platform, "gbstudio");
         let mut preview = plan(&pocket, Path::new("GB Studio/demo.pocket"), "new").unwrap();
         crate::testutil::apply(&mut preview, Some(&pocket), None).unwrap();
         let scanned = Index::scan(&pocket).unwrap();
-        assert_eq!(scanned.roms.len(), 1);
-        assert_eq!(scanned.roms[0].name, "new.pocket");
+        assert_eq!(scanned.roms().len(), 1);
+        assert_eq!(scanned.roms()[0].name, "new.pocket");
         assert_eq!(
             std::fs::read(tmp.path().join("GB Studio/Saves/new.sav")).unwrap(),
             b"save"

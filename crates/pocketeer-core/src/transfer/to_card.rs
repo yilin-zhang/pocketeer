@@ -3,7 +3,7 @@
 use crate::library::{Library, resolve_rom};
 use crate::{
     Error, ErrorInfo, Pocket, Result,
-    card::roms::{Identity, Index},
+    card::roms::{Depth, Identity, Index},
     fsutil,
     fsutil::hash::copy_and_hash,
     plan::{Applied, Checked, Event, Failure, Pinned, Plan, Progress, Resources},
@@ -69,14 +69,7 @@ impl Plan for CopyPlan {
             match copied {
                 Ok(()) => {
                     result.copied += 1;
-                    if let Err(e) = index.record_copy(pocket, &file.destination, &file.sha1) {
-                        result.warnings.push(
-                            Error::IndexNotSaved {
-                                source: Box::new(e),
-                            }
-                            .to_info(),
-                        );
-                    }
+                    index.record_copy(pocket, &file.destination, &file.sha1);
                 }
                 Err(e) => result.failed.push(Failure::new(&file.destination, &e)),
             }
@@ -85,14 +78,8 @@ impl Plan for CopyPlan {
                 total: self.files.len(),
             });
         }
-        if let Err(e) = index.save(pocket) {
-            result.warnings.push(
-                Error::IndexNotSaved {
-                    source: Box::new(e),
-                }
-                .to_info(),
-            );
-        }
+        index.save(pocket);
+        result.warnings.extend(index.take_warnings());
         Ok(result)
     }
 }
@@ -128,18 +115,18 @@ pub fn plan(
         }
     }
     let mut index = Index::scan(pocket)?;
-    let mut checked = vec![false; index.roms.len()];
+    let mut checked = vec![false; index.roms().len()];
     let mut plan = CopyPlan {
         pinned: Pinned::card(pocket)?,
         files: Vec::new(),
         already_present: Vec::new(),
-        warnings: index.warning.take().into_iter().collect(),
+        warnings: index.take_warnings(),
     };
     for (game, rom) in selected {
         // Confirm a known match first. Only unresolved identities can hide
         // another copy; equal capacity alone is common across unrelated ROMs.
         let mut candidates: Vec<_> = index
-            .roms
+            .roms()
             .iter()
             .enumerate()
             .filter(|(_, c)| {
@@ -155,13 +142,13 @@ pub fn plan(
             if !checked[i] {
                 progress(Event::Status(format!(
                     "Checking existing copy {}",
-                    index.roms[i].rel_path.display()
+                    index.roms()[i].rel_path.display()
                 )));
-                index.verify(pocket, i, false, &|| false);
+                index.verify(pocket, i, Depth::Sample, &|| false);
                 checked[i] = true;
             }
-            if index.roms[i].identity.sha1() == Some(&rom.sha1) {
-                found = Some(index.roms[i].rel_path.clone());
+            if index.roms()[i].identity.sha1() == Some(&rom.sha1) {
+                found = Some(index.roms()[i].rel_path.clone());
                 break;
             }
         }
@@ -170,7 +157,7 @@ pub fn plan(
             continue;
         }
         // A same-size card file that couldn't be read might be this ROM.
-        let unreadable = index.roms.iter().find_map(|c| match &c.identity {
+        let unreadable = index.roms().iter().find_map(|c| match &c.identity {
             Identity::Error { error } if c.platform == game.platform && c.size == rom.size => {
                 Some((c, error))
             }
@@ -195,14 +182,8 @@ pub fn plan(
             size: rom.size,
         });
     }
-    if let Err(e) = index.save(pocket) {
-        plan.warnings.push(
-            Error::IndexNotSaved {
-                source: Box::new(e),
-            }
-            .to_info(),
-        );
-    }
+    index.save(pocket);
+    plan.warnings.extend(index.take_warnings());
     Ok(plan)
 }
 
@@ -227,7 +208,7 @@ mod tests {
         );
         let index = Index::scan(&pocket).unwrap();
         let unresolved = index
-            .roms
+            .roms()
             .iter()
             .find(|r| r.name == "a-unresolved.fkh")
             .unwrap();
@@ -245,7 +226,7 @@ mod tests {
         assert!(result.failed.is_empty());
         assert!(result.warnings.is_empty());
         assert!(matches!(
-            Index::scan(&pocket).unwrap().roms[0].identity,
+            Index::scan(&pocket).unwrap().roms()[0].identity,
             Identity::Cached { .. }
         ));
         std::fs::rename(

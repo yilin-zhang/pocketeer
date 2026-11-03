@@ -9,7 +9,7 @@ use pocketeer_core::{
         Status,
         bios::{self, BiosReport, PlacePlan},
         clean::{self, CleanPlan},
-        roms::{CardRom, Identity, Index},
+        roms::{CardRom, Depth, Identity, Index},
     },
     catalog::inventory::{Inventory, Platforms},
     library::import::ImportPlan,
@@ -123,13 +123,8 @@ impl Outcome for RomsReport {
     }
 }
 
-/// Card ROMs with their library presence. `check` verifies cached
-/// identities first (`Some(true)` reads every byte); `None` lists only.
-pub fn roms(
-    ctx: &Context,
-    check: Option<bool>,
-    progress: &mut dyn FnMut(Event),
-) -> Result<RomsReport> {
+/// Card ROMs with their library presence, after checking them at `depth`.
+pub fn roms(ctx: &Context, depth: Depth, progress: &mut dyn FnMut(Event)) -> Result<RomsReport> {
     let pocket = ctx.pocket()?;
     let games = match ctx.library() {
         Ok(lib) => lib.list_games(None, None)?,
@@ -137,31 +132,12 @@ pub fn roms(
         Err(e) => return Err(e),
     };
     let mut index = Index::scan(&pocket)?;
-    let mut warnings: Vec<ErrorInfo> = index.warning.take().into_iter().collect();
-    if let Some(full) = check {
-        for i in 0..index.roms.len() {
-            progress(Event::Status(format!(
-                "Checking {}",
-                index.roms[i].rel_path.display()
-            )));
-            index.verify(&pocket, i, full, &|| false);
-            progress(Event::Step {
-                done: i + 1,
-                total: index.roms.len(),
-            });
-        }
-        if let Err(e) = index.save(&pocket) {
-            warnings.push(
-                Error::IndexNotSaved {
-                    source: Box::new(e),
-                }
-                .to_info(),
-            );
-        }
-    }
+    index.check(&pocket, depth, progress);
+    let warnings = index.take_warnings();
+    let roms = index.into_roms();
     Ok(RomsReport {
-        comparison: transfer::compare(&games, &index.roms),
-        roms: index.roms,
+        comparison: transfer::compare(&games, &roms),
+        roms,
         warnings,
     })
 }
