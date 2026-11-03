@@ -2,10 +2,16 @@
 //! panel) and the Memories tab.
 
 use super::*;
-use pocketeer_core::{card::memories::Header, transfer::saves::SaveAction};
+use pocketeer_core::{
+    card::memories::Header,
+    transfer::{
+        memories::{MemoryEntry, Place},
+        saves::SaveAction,
+    },
+};
 
 use crate::{
-    ops::memories::{MemoryEntry, Place},
+    text::Label,
     tui::app::{GameRef, SaveLine, SaveMark, save_status},
 };
 

@@ -8,6 +8,7 @@
 //! desired card state.
 
 pub mod from_card;
+pub mod memories;
 pub mod rename;
 pub mod saves;
 pub mod to_card;

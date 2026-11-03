@@ -594,7 +594,11 @@ pub fn plan_restore(
 
 /// Restores the library's current copy of each of `rels` (a Memory and
 /// the files beside it) in one plan.
-pub fn plan_restore_paths(lib: &Library, pocket: &Pocket, rels: &[PathBuf]) -> Result<SavesPlan> {
+pub(crate) fn plan_restore_all(
+    lib: &Library,
+    pocket: &Pocket,
+    rels: &[PathBuf],
+) -> Result<SavesPlan> {
     let mut plans = rels.iter().map(|rel| plan_restore(lib, pocket, rel, None));
     let mut plan = plans.next().ok_or_else(|| Error::InvalidPath {
         path: PathBuf::new(),
@@ -914,7 +918,7 @@ mod tests {
         write(pocket.root(), sta, "newer state", 200);
         std::fs::remove_file(pocket.root().join(sav)).unwrap();
         let rels = [PathBuf::from(sta), PathBuf::from(sav)];
-        let mut restore = plan_restore_paths(&lib, &pocket, &rels).unwrap();
+        let mut restore = plan_restore_all(&lib, &pocket, &rels).unwrap();
         assert_eq!(restore.summary.push, 2);
         crate::testutil::apply(&mut restore, Some(&pocket), Some(&lib)).unwrap();
         assert_eq!(std::fs::read(pocket.root().join(sta)).unwrap(), b"state");

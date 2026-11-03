@@ -64,6 +64,11 @@ pub enum Reader {
     Tui,
 }
 
+/// The word for a state, the same in every table and report that shows it.
+pub trait Label {
+    fn label(&self) -> &'static str;
+}
+
 /// A report as people read it.
 pub trait Text {
     fn text(&self, reader: Reader) -> String;

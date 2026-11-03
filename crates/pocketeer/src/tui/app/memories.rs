@@ -5,7 +5,10 @@
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent};
-use pocketeer_core::transfer::saves::{SavesOptions, Scope};
+use pocketeer_core::transfer::{
+    memories::{MemoryEntry, Place},
+    saves::{SavesOptions, Scope, TrashTarget},
+};
 
 use super::{
     Cx,
@@ -14,10 +17,7 @@ use super::{
     session::Session,
 };
 use crate::{
-    ops::{
-        memories::{self as memories_cmd, MemoryEntry, Place},
-        saves as saves_cmd,
-    },
+    ops::{memories as memories_cmd, saves as saves_cmd},
     tui::pending::{self, SaveGames, SaveSync},
 };
 
@@ -189,7 +189,14 @@ fn trash(cx: &mut Cx, rel: PathBuf, card: bool) {
     }
     if cx.session.require_library().is_some() {
         cx.session.plan("Planning", move |ctx, _| {
-            Ok(pending::preview(memories_cmd::plan_trash(ctx, &rel, card)?))
+            let target = if card {
+                TrashTarget::Card
+            } else {
+                TrashTarget::Library
+            };
+            Ok(pending::preview(memories_cmd::plan_trash(
+                ctx, &rel, target,
+            )?))
         });
     }
 }

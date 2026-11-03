@@ -2,34 +2,14 @@
 
 use std::fmt::Write;
 
-use super::{Reader, Text, bytes, table, time_ago};
-use pocketeer_core::card::memories::Header;
+use super::{Label, Reader, Text, bytes, table, time_ago};
 
-use crate::ops::memories::{MemoriesReport, MemoryEntry, Place};
+use pocketeer_core::transfer::memories::Place;
 
-impl MemoryEntry {
-    /// What the Memory is of: the ROM (with its core) or the cartridge.
-    pub fn game(&self) -> String {
-        match &self.memory.header {
-            Header::Cartridge { title } if title.is_empty() => "cartridge".into(),
-            Header::Cartridge { title } => title.clone(),
-            // A core names the ROM file; the extension adds nothing here.
-            Header::Core { game, .. } if !game.is_empty() => {
-                pocketeer_core::names::stem(game).to_string()
-            }
-            Header::Core { .. } => self
-                .memory
-                .rel_path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        }
-    }
-}
+use crate::ops::memories::MemoriesReport;
 
-impl Place {
-    /// The WHERE column.
-    pub fn label(self) -> &'static str {
+impl Label for Place {
+    fn label(&self) -> &'static str {
         match self {
             Place::Card => "card",
             Place::Library => "library",

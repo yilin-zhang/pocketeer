@@ -28,17 +28,14 @@ use pocketeer_core::{
     plan::Event,
     transfer::{
         self, LocalMatch, Presence,
+        memories::MemoryEntry,
         saves::{SaveOverview, Scope},
     },
 };
 
 use super::pending::{Pending, Planner, Preview, text_lines};
 use crate::{
-    ops::{
-        context::Context,
-        library as library_cmd,
-        memories::{self as memories_cmd, MemoryEntry},
-    },
+    ops::{context::Context, library as library_cmd, memories as memories_cmd},
     text::{self, Reader, Text},
 };
 

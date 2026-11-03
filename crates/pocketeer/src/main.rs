@@ -316,7 +316,12 @@ fn run_memories(
             out.emit(memories::restore(ctx, &path, apply.into(), progress))
         }
         MemoriesCommand::Trash { path, card, apply } => {
-            out.emit(memories::trash(ctx, &path, card, apply.into()))
+            let target = if card {
+                TrashTarget::Card
+            } else {
+                TrashTarget::Library
+            };
+            out.emit(memories::trash(ctx, &path, target, apply.into()))
         }
     }
 }
