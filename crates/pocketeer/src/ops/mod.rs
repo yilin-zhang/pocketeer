@@ -1,11 +1,10 @@
-//! The use cases, shared by the CLI and the TUI. Each function takes a
-//! [`Context`](context::Context) and plain arguments (never clap types) and
-//! returns `Result<T>` where `T: Serialize`; `main` and the TUI decide how to
-//! show it (see `text`).
+//! What the CLI and the TUI both do, in one place: queries that read the
+//! card and the library, and the `plan_*` functions that open what a plan
+//! needs from the [`Context`](context::Context) (flags, config, the card)
+//! and make it. Applying a plan is core's [`plan::apply`]; whether to apply
+//! (`--dry-run`, a dialog) and how to show the outcome is each front end's.
 //!
-//! Commands that change something follow one shape: plan, then apply unless
-//! `--dry-run` was given. [`Staged`] is that shape; [`verdict`] is the rule
-//! that turns failures into the exit status every command shares.
+//! [`plan::apply`]: pocketeer_core::plan::apply
 
 pub mod card;
 pub mod context;
@@ -16,112 +15,18 @@ pub mod saves;
 
 use std::path::Path;
 
-use pocketeer_core::plan::{self, Resources};
-pub use pocketeer_core::plan::{Applied, Plan};
-use pocketeer_core::{Error, ErrorInfo, Result, catalog::Dat, plan::Progress};
+use pocketeer_core::{
+    ErrorInfo, Result,
+    catalog::Dat,
+    plan::{self, Plan, Progress, Resources},
+};
 use serde::Serialize;
 
-use crate::output::Outcome;
-use context::Context;
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum Mode {
-    /// `--dry-run`: plans only.
-    DryRun,
-    /// The default: plans applied.
-    Applied,
-}
-
-/// The one rule behind every command's exit status: any failure is an
-/// error, otherwise success (a dry run included).
-pub fn verdict(changes: usize, failed: usize) -> Option<Error> {
-    (failed > 0).then_some(Error::SomeFailed {
-        failed,
-        total: failed + changes,
-    })
-}
-
-/// A plan plus, when it was applied, its result. Serialises as
-/// `{mode, ...plan fields, result?}`.
-#[derive(Serialize)]
-pub struct Staged<P: Plan> {
-    pub mode: Mode,
-    #[serde(flatten)]
-    pub plan: P,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<P::Output>,
-}
-
-impl<P: Plan> Staged<P> {
-    /// A plan that was not (or not yet) applied.
-    pub fn new(mode: Mode, plan: P) -> Self {
-        Staged {
-            mode,
-            plan,
-            result: None,
-        }
-    }
-
-    /// A plan shown in a TUI dialog before it is applied.
-    pub fn preview(plan: P) -> Self {
-        Self::new(Mode::DryRun, plan)
-    }
-
-    pub fn changes(&self) -> usize {
-        self.plan.changes()
-    }
-
-    /// Failures so far: planning problems plus, once applied, failed items.
-    pub fn failed(&self) -> usize {
-        self.result.as_ref().map_or(0, Applied::failed) + self.plan.errors()
-    }
-}
-
-impl<P: Plan> Outcome for Staged<P> {
-    fn error(&self) -> Option<Error> {
-        verdict(self.changes(), self.failed())
-    }
-}
-
-/// Applies `plan` unless this is a dry run or there is nothing to do.
-pub fn stage<P: Plan>(
-    ctx: &Context,
-    mode: Mode,
-    mut plan: P,
-    progress: Progress<'_>,
-) -> Result<Staged<P>> {
-    let result = if mode == Mode::Applied && plan.changes() > 0 {
-        Some(plan::apply(&mut ctx.resources(), &mut plan, progress)?)
-    } else {
-        None
-    };
-    Ok(Staged { mode, plan, result })
-}
-
-/// Like [`stage`], for a plan that must not run because of problems found
-/// alongside it (names that don't exist, say) unless `allowed`. Those
-/// problems are the caller's to count as failures.
-pub fn stage_if<P: Plan>(
-    ctx: &Context,
-    mode: Mode,
-    allowed: bool,
-    plan: P,
-    progress: Progress<'_>,
-) -> Result<Staged<P>> {
-    if allowed {
-        stage(ctx, mode, plan, progress)
-    } else {
-        Ok(Staged::new(mode, plan))
-    }
-}
-
-/// A batch of independent plans (`cores install`, `update`, `remove`,
-/// `library standardize`): each item is planned and applied on its own,
-/// and a failure stays with its item instead of aborting the rest.
+/// Independent plans made and applied together (`cores install`, `update`,
+/// `remove`, `library standardize`): each item is planned and applied on its
+/// own, and a failure stays with its item instead of stopping the rest.
 #[derive(Serialize)]
 pub struct Batch<P: Plan> {
-    pub mode: Mode,
     pub items: Vec<BatchItem<P>>,
 }
 
@@ -141,7 +46,7 @@ pub enum BatchState<P: Plan> {
     Unplanned {
         error: ErrorInfo,
     },
-    /// Planned and left alone: a dry run, or nothing to change.
+    /// Planned and not applied (yet): a dry run, or nothing to change.
     Planned {
         plan: P,
     },
@@ -157,29 +62,8 @@ pub enum BatchState<P: Plan> {
 }
 
 impl<P: Plan> Batch<P> {
-    /// Stages every planned item in turn (see [`BatchItem::stage`]).
-    pub fn stage(
-        ctx: &Context,
-        mode: Mode,
-        plans: impl IntoIterator<Item = (String, Result<P>)>,
-        progress: Progress<'_>,
-    ) -> Self {
-        let mut res = ctx.resources();
-        let items = plans
-            .into_iter()
-            .map(|(target, plan)| match plan {
-                Ok(plan) => BatchItem::stage(target, &mut res, mode, plan, progress),
-                Err(e) => BatchItem {
-                    target,
-                    state: BatchState::Unplanned { error: e.to_info() },
-                },
-            })
-            .collect();
-        Batch { mode, items }
-    }
-
-    /// What the batch would do, applying nothing (a dry run).
-    pub fn planned(plans: impl IntoIterator<Item = (String, Result<P>)>) -> Self {
+    /// One item per target: its plan, or why there is none.
+    pub fn plan(plans: impl IntoIterator<Item = (String, Result<P>)>) -> Self {
         let items = plans
             .into_iter()
             .map(|(target, plan)| BatchItem {
@@ -190,20 +74,44 @@ impl<P: Plan> Batch<P> {
                 },
             })
             .collect();
-        Batch {
-            mode: Mode::DryRun,
-            items,
-        }
+        Batch { items }
     }
 
-    /// The items that have a plan, to apply them.
-    pub fn into_plans(self) -> impl Iterator<Item = (String, P)> {
-        self.items.into_iter().filter_map(|i| match i.state {
-            BatchState::Unplanned { .. } => None,
-            BatchState::Planned { plan }
-            | BatchState::Applied { plan, .. }
-            | BatchState::Failed { plan, .. } => Some((i.target, plan)),
-        })
+    /// Applies every planned item that changes something, each on its own.
+    pub fn apply(self, res: &mut Resources, progress: Progress<'_>) -> Self {
+        let items = self
+            .items
+            .into_iter()
+            .map(|item| {
+                let state = match item.state {
+                    BatchState::Planned { mut plan } if plan.changes() > 0 => {
+                        match plan::apply(res, &mut plan, progress) {
+                            Ok(result) => BatchState::Applied { plan, result },
+                            Err(e) => BatchState::Failed {
+                                plan,
+                                error: e.to_info(),
+                            },
+                        }
+                    }
+                    other => other,
+                };
+                BatchItem {
+                    target: item.target,
+                    state,
+                }
+            })
+            .collect();
+        Batch { items }
+    }
+
+    /// The plans, for asking about them (failures to plan left out).
+    pub fn plans(&self) -> impl Iterator<Item = &P> {
+        self.items.iter().filter_map(BatchItem::plan)
+    }
+
+    /// What applying the planned items would change.
+    pub fn changes(&self) -> usize {
+        self.plans().map(Plan::changes).sum()
     }
 
     pub fn failed(&self) -> usize {
@@ -211,40 +119,7 @@ impl<P: Plan> Batch<P> {
     }
 }
 
-impl<P: Plan> Outcome for Batch<P> {
-    fn error(&self) -> Option<Error> {
-        let changes = self
-            .items
-            .iter()
-            .filter_map(BatchItem::plan)
-            .map(Plan::changes);
-        verdict(changes.sum(), self.failed())
-    }
-}
-
 impl<P: Plan> BatchItem<P> {
-    /// The same gate as [`stage`], but a failure to apply stays with the item.
-    pub fn stage(
-        target: String,
-        res: &mut Resources,
-        mode: Mode,
-        mut plan: P,
-        progress: Progress<'_>,
-    ) -> Self {
-        let state = if mode != Mode::Applied || plan.changes() == 0 {
-            BatchState::Planned { plan }
-        } else {
-            match plan::apply(res, &mut plan, progress) {
-                Ok(result) => BatchState::Applied { plan, result },
-                Err(e) => BatchState::Failed {
-                    plan,
-                    error: e.to_info(),
-                },
-            }
-        };
-        BatchItem { target, state }
-    }
-
     pub fn is_failed(&self) -> bool {
         matches!(
             self.state,
@@ -271,11 +146,10 @@ pub fn load_dat(path: Option<&Path>) -> Result<Option<Dat>> {
 mod tests {
     use super::*;
     use pocketeer_core::{
+        Error,
         card::install::Changes,
         plan::{Checked, Pinned},
     };
-
-    use crate::cli::Global;
 
     /// Applying fails when `fails` is set.
     #[derive(Serialize)]
@@ -283,15 +157,6 @@ mod tests {
         fails: bool,
         #[serde(skip)]
         pinned: Pinned,
-    }
-
-    impl Fake {
-        fn new(fails: bool) -> Self {
-            Fake {
-                fails,
-                pinned: Pinned::default(),
-            }
-        }
     }
 
     impl Plan for Fake {
@@ -313,26 +178,28 @@ mod tests {
         }
     }
 
-    fn run(mode: Mode, plans: Vec<Result<Fake>>) -> Batch<Fake> {
-        let ctx = Context::new(Global::default());
-        let named = plans
-            .into_iter()
-            .enumerate()
-            .map(|(i, p)| (i.to_string(), p));
-        Batch::stage(&ctx, mode, named, &mut |_| {})
+    fn fake(fails: bool) -> Result<Fake> {
+        Ok(Fake {
+            fails,
+            pinned: Pinned::default(),
+        })
     }
 
     #[test]
     fn a_failing_item_does_not_stop_the_rest_of_the_batch() {
-        let batch = run(
-            Mode::Applied,
-            vec![
-                Ok(Fake::new(false)),
-                Ok(Fake::new(true)),
-                Err(Error::NoHomeDir),
-                Ok(Fake::new(false)),
-            ],
+        let plans = [fake(false), fake(true), Err(Error::NoHomeDir), fake(false)];
+        let batch = Batch::plan(
+            plans
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| (i.to_string(), p)),
         );
+        let mut res = Resources::new(
+            || Err(Error::NoHomeDir),
+            || Err(Error::NoHomeDir),
+            || Err(Error::NoCacheDir),
+        );
+        let batch = batch.apply(&mut res, &mut |_| {});
         let states: Vec<_> = batch
             .items
             .iter()
@@ -344,13 +211,6 @@ mod tests {
             })
             .collect();
         assert_eq!(states, ["applied", "failed", "unplanned", "applied"]);
-        assert_eq!(batch.error().unwrap().code(), "SOME_FAILED");
-    }
-
-    #[test]
-    fn a_dry_run_applies_nothing() {
-        let batch = run(Mode::DryRun, vec![Ok(Fake::new(true))]);
-        assert!(matches!(batch.items[0].state, BatchState::Planned { .. }));
-        assert!(batch.error().is_none());
+        assert_eq!(batch.failed(), 2);
     }
 }

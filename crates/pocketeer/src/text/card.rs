@@ -5,21 +5,22 @@ use std::fmt::Write;
 use pocketeer_core::{
     card::{
         Status,
-        bios::{BiosReport, FileStatus, Note, RootFile},
-        clean::JunkKind,
+        bios::{BiosReport, FileStatus, Note, PlacePlan, RootFile},
+        clean::{CleanPlan, CleanResult, JunkKind},
         roms::Identity,
     },
-    plan::Plan,
-    transfer::Presence,
+    transfer::{
+        Presence,
+        rename::{CardRenamePlan, CardRenameResult},
+        to_card::{CopyPlan, CopyResult},
+    },
 };
 
-use super::{Reader, Text, actions, bytes, failure_lines, source, staged_footer};
-use crate::ops::card::{
-    CleanReport, CopyReport, PlaceReport, RefreshReport, RenameReport, RomsReport,
-};
+use super::{Label, Text, actions, bytes, failure_lines, source};
+use crate::ops::card::{RefreshReport, RomsReport};
 
 impl Text for Status {
-    fn text(&self, _: Reader) -> String {
+    fn text(&self) -> String {
         let s = self;
         let mut out = String::new();
         let _ = writeln!(out, "SD card    {}", s.root.display());
@@ -51,7 +52,7 @@ impl Text for Status {
             );
         }
         let broken = if s.broken_cores > 0 {
-            format!(" ({} broken, see `pocketeer cores list`)", s.broken_cores)
+            format!(" ({} broken)", s.broken_cores)
         } else {
             String::new()
         };
@@ -72,7 +73,7 @@ pub fn note(n: &Note) -> String {
 }
 
 impl Text for BiosReport {
-    fn text(&self, _: Reader) -> String {
+    fn text(&self) -> String {
         let r = self;
         let mut out = String::new();
         for core in &r.cores {
@@ -128,18 +129,17 @@ impl Text for BiosReport {
     }
 }
 
-impl Text for PlaceReport {
-    fn text(&self, reader: Reader) -> String {
-        let r = self;
+impl Text for PlacePlan {
+    fn text(&self) -> String {
         let mut out = String::new();
-        let list = &r.plan.actions;
+        let list = &self.actions;
         if list.is_empty() {
             let _ = writeln!(out, "No root files to place.");
         } else {
             let _ = writeln!(out, "{} file(s) to move into place:", list.len());
             actions(&mut out, list);
         }
-        for z in &r.plan.zipped {
+        for z in &self.zipped {
             if let FileStatus::AtRoot {
                 found: RootFile::Zip { zip, inner },
             } = &z.status
@@ -152,91 +152,65 @@ impl Text for PlaceReport {
                 );
             }
         }
-        staged_footer(
-            &mut out,
-            r.mode,
-            reader,
-            r.result.as_ref(),
-            list.len(),
-            "",
-            |out, a| {
-                let _ = writeln!(out, "  ✓ done: {} file(s) moved", a.moved_files);
-            },
-        );
         out
     }
 }
 
-impl Text for CleanReport {
-    fn text(&self, reader: Reader) -> String {
-        let r = self;
+impl Text for CleanPlan {
+    fn text(&self) -> String {
         let mut out = String::new();
-        if r.plan.entries.is_empty() {
+        if self.entries.is_empty() {
             let _ = writeln!(out, "No macOS junk found.");
         } else {
-            for e in &r.plan.entries {
-                let kind = match e.kind {
-                    JunkKind::AppleDouble => "AppleDouble",
-                    JunkKind::DsStore => ".DS_Store",
-                    JunkKind::MacosxDir => "__MACOSX",
-                    JunkKind::SystemDir => "system dir",
-                    JunkKind::OldBackups => "old pocketeer backups",
-                };
+            for e in &self.entries {
                 let _ = writeln!(
                     out,
-                    "  - {}  ({kind}, {})",
+                    "  - {}  ({}, {})",
                     e.path.display(),
+                    e.kind.label(),
                     bytes(e.bytes)
                 );
             }
-            let _ = writeln!(
-                out,
-                "{} item(s), {}",
-                r.plan.entries.len(),
-                bytes(r.plan.bytes)
-            );
+            let _ = writeln!(out, "{} item(s), {}", self.entries.len(), bytes(self.bytes));
         }
-        if !r.plan.system_dirs_present.is_empty() {
-            let names: Vec<String> = r
-                .plan
+        if !self.system_dirs_present.is_empty() {
+            let names: Vec<String> = self
                 .system_dirs_present
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect();
-            let _ = writeln!(
-                out,
-                "macOS system folders left alone: {}{}",
-                names.join(", "),
-                if reader == Reader::Tui {
-                    ""
-                } else {
-                    " (use --system to remove)"
-                }
-            );
+            let _ = writeln!(out, "macOS system folders left alone: {}", names.join(", "));
         }
-        staged_footer(
-            &mut out,
-            r.mode,
-            reader,
-            r.result.as_ref(),
-            r.plan.entries.len(),
-            "",
-            |out, res| {
-                let _ = writeln!(
-                    out,
-                    "✓ removed {} item(s), {}",
-                    res.removed,
-                    bytes(res.bytes)
-                );
-                failure_lines(out, &res.failed);
-            },
-        );
         out
     }
 }
 
+impl Text for CleanResult {
+    fn text(&self) -> String {
+        let mut out = format!(
+            "✓ removed {} item(s), {}\n",
+            self.removed,
+            bytes(self.bytes)
+        );
+        failure_lines(&mut out, &self.failed);
+        out
+    }
+}
+
+impl Label for JunkKind {
+    fn label(&self) -> &'static str {
+        match self {
+            JunkKind::AppleDouble => "AppleDouble",
+            JunkKind::DsStore => ".DS_Store",
+            JunkKind::MacosxDir => "__MACOSX",
+            JunkKind::SystemDir => "system dir",
+            JunkKind::OldBackups => "old pocketeer backups",
+        }
+    }
+}
+
 impl Text for RefreshReport {
-    fn text(&self, _: Reader) -> String {
+    fn text(&self) -> String {
         let r = self;
         format!(
             "Inventory: {} cores ({}), {} platforms ({})\nCache: {}\n",
@@ -271,7 +245,7 @@ pub fn identity(identity: &Identity) -> &'static str {
 }
 
 impl Text for RomsReport {
-    fn text(&self, _: Reader) -> String {
+    fn text(&self) -> String {
         let report = self;
         let mut text = String::new();
         for (rom, presence) in report.roms.iter().zip(&report.comparison.card) {
@@ -314,11 +288,10 @@ impl Text for RomsReport {
     }
 }
 
-impl Text for CopyReport {
-    fn text(&self, reader: Reader) -> String {
-        let report = self;
+impl Text for CopyPlan {
+    fn text(&self) -> String {
         let mut text = String::new();
-        for file in &report.plan.files {
+        for file in &self.files {
             let _ = writeln!(
                 text,
                 "+ {} ({})",
@@ -326,38 +299,35 @@ impl Text for CopyReport {
                 bytes(file.size)
             );
         }
-        for path in &report.plan.already_present {
+        for path in &self.already_present {
             let _ = writeln!(text, "= already present: {}", path.display());
         }
-        for warning in &report.plan.warnings {
+        for warning in &self.warnings {
             let _ = writeln!(text, "Warning: {warning}");
         }
-        staged_footer(
-            &mut text,
-            report.mode,
-            reader,
-            report.result.as_ref(),
-            report.plan.changes(),
-            "Nothing to copy.",
-            |text, result| {
-                let _ = writeln!(text, "Copied {} ROM(s)", result.copied);
-                failure_lines(text, &result.failed);
-                for warning in &result.warnings {
-                    let _ = writeln!(text, "Warning: {warning}");
-                }
-            },
-        );
+        if self.files.is_empty() {
+            let _ = writeln!(text, "Nothing to copy.");
+        }
         text
     }
 }
 
-impl Text for RenameReport {
-    fn text(&self, reader: Reader) -> String {
-        let report = self;
+impl Text for CopyResult {
+    fn text(&self) -> String {
+        let mut text = format!("Copied {} ROM(s)\n", self.copied);
+        failure_lines(&mut text, &self.failed);
+        for warning in &self.warnings {
+            let _ = writeln!(text, "Warning: {warning}");
+        }
+        text
+    }
+}
+
+impl Text for CardRenamePlan {
+    fn text(&self) -> String {
         let mut text = String::new();
-        let plan = &report.plan;
         let files =
-            std::iter::once(("ROM", &plan.rom)).chain(plan.saves.iter().map(|s| ("save", s)));
+            std::iter::once(("ROM", &self.rom)).chain(self.saves.iter().map(|s| ("save", s)));
         for (what, file) in files {
             let _ = writeln!(
                 text,
@@ -366,24 +336,21 @@ impl Text for RenameReport {
                 file.to.display()
             );
         }
+        // A rename never touches Memories (see CardRenamePlan::saves).
         let _ = writeln!(
             text,
             "Warning: Memories stay unchanged; loading an existing save state may require the old ROM name."
         );
-        staged_footer(
-            &mut text,
-            report.mode,
-            reader,
-            report.result.as_ref(),
-            report.plan.changes(),
-            "Nothing to rename.",
-            |text, result| {
-                let _ = writeln!(text, "Renamed {} file(s)", result.renamed);
-                for warning in &result.warnings {
-                    let _ = writeln!(text, "Warning: {warning}");
-                }
-            },
-        );
+        text
+    }
+}
+
+impl Text for CardRenameResult {
+    fn text(&self) -> String {
+        let mut text = format!("Renamed {} file(s)\n", self.renamed);
+        for warning in &self.warnings {
+            let _ = writeln!(text, "Warning: {warning}");
+        }
         text
     }
 }

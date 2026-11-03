@@ -1,29 +1,31 @@
-//! Text for `ops::library`.
+//! Text for the library: its contents, imports, renames, removals, DAT
+//! checks and covers.
 
 use std::{collections::BTreeMap, fmt::Write};
 
 use pocketeer_core::{
     library::{
         Status as LibraryStatus,
-        covers::{CoverStatus, FetchReport},
+        covers::{
+            CoverStatus, FetchReport,
+            import::{CoverImportPlan, CoverImportResult},
+        },
         identify,
-        import::{ImportAction, ImportPlan, ImportSkip},
+        import::{ImportAction, ImportPlan, ImportResult, ImportSkip},
+        remove::{RemovePlan, RemoveResult},
+        rename::{RenamePlan, RenameResult},
     },
     plan::Plan,
+    transfer::from_card::CardImportPlan,
 };
 
 use super::{
-    Reader, Text, batch_report, bytes, cover_news, covers_summary, failure_lines, import_actions,
-    plan_lines, skipped_summary, staged_footer, suggestion_footer, table, unmapped_hint,
-    warning_lines,
+    Text, bytes, failure_lines, import_actions, plan_lines, skipped_summary, table, warning_lines,
 };
-use crate::ops::library::{
-    CoverImportReport, CoversStatusReport, Imported, ImportsRoms, InitReport, ListReport,
-    MetadataReport, RemoveReport, RenameReport, StandardizeReport,
-};
+use crate::ops::library::{CoversStatusReport, InitReport, ListReport};
 
 impl Text for identify::Report {
-    fn text(&self, _: Reader) -> String {
+    fn text(&self) -> String {
         let r = self;
         let mut out = String::new();
         for error in &r.errors {
@@ -58,7 +60,7 @@ impl Text for identify::Report {
 }
 
 /// What a DAT check found that is worth mentioning: new results only.
-fn identify_news(r: &identify::Report) -> Vec<(usize, &'static str)> {
+pub fn identify_news(r: &identify::Report) -> Vec<(usize, &'static str)> {
     [
         (r.matched, "identified"),
         (r.no_match, "not in any DAT"),
@@ -69,76 +71,14 @@ fn identify_news(r: &identify::Report) -> Vec<(usize, &'static str)> {
     .collect()
 }
 
-impl Text for MetadataReport {
-    /// The TUI's background check, for its log: one summary line, which is
-    /// what the status bar ends up showing. It names the first problem; when
-    /// there are more, all of them are listed above it.
-    fn text(&self, reader: Reader) -> String {
-        let r = self;
-        let mut out = String::new();
-        if r.problems().nth(1).is_some() {
-            for problem in r.problems() {
-                let _ = writeln!(out, "! {problem}");
-            }
-        }
-        if let Some(hint) = r.covers.as_ref().and_then(|c| unmapped_hint(c, reader)) {
-            let _ = writeln!(out, "{hint}");
-        }
-        let mut news = Vec::new();
-        if let Some(id) = &r.identify {
-            news.extend(
-                identify_news(id)
-                    .into_iter()
-                    .map(|(n, what)| format!("{n} ROM(s) {what}")),
-            );
-        }
-        if let Some(c) = &r.covers {
-            news.extend(
-                cover_news(c)
-                    .into_iter()
-                    .map(|(n, what)| format!("{n} cover(s) {what}")),
-            );
-        }
-        let checked = if r.covers.is_some() {
-            "DATs and covers checked"
-        } else {
-            "DATs checked"
-        };
-        // The status bar shows only this line, so it names the first problem.
-        let mut problems = r.problems();
-        let mark = match problems.next() {
-            Some(first) => {
-                let more = problems.count();
-                news.push(if more > 0 {
-                    format!("{first} (and {more} more problem(s))")
-                } else {
-                    first.to_string()
-                });
-                "!"
-            }
-            None => "✓",
-        };
-        let _ = if news.is_empty() {
-            writeln!(out, "{mark} {checked}, nothing new")
-        } else {
-            writeln!(out, "{mark} {checked}: {}", news.join(", "))
-        };
-        out
-    }
-}
-
 impl Text for InitReport {
-    fn text(&self, _: Reader) -> String {
-        let r = self;
-        format!(
-            "Created library at {}\nNext: pocketeer library import <folder> --platform <id> [--dat <file>]\n",
-            r.root.display()
-        )
+    fn text(&self) -> String {
+        format!("Created library at {}\n", self.root.display())
     }
 }
 
 impl Text for LibraryStatus {
-    fn text(&self, _: Reader) -> String {
+    fn text(&self) -> String {
         let s = self;
         let mut out = String::new();
         let _ = writeln!(out, "Library    {}", s.root.display());
@@ -174,22 +114,18 @@ impl Text for LibraryStatus {
     }
 }
 
-impl<P: ImportsRoms> Text for Imported<P> {
-    /// `library import` and `card import`: what each platform gets, what is left
-    /// out, then what applying did.
-    fn text(&self, reader: Reader) -> String {
-        let r = self;
+/// What each platform gets, and what is left out.
+impl Text for ImportPlan {
+    fn text(&self) -> String {
         let mut out = String::new();
-        let p = r.staged.plan.import();
-        let not_found = r.staged.plan.not_found();
         let _ = writeln!(
             out,
             "{}  →  library (copies; the source stays)",
-            p.dir.display()
+            self.dir.display()
         );
         let mut skipped = BTreeMap::new();
-        for platform in p.platforms() {
-            let actions = p.actions().iter().filter(|a| a.platform() == platform);
+        for platform in self.platforms() {
+            let actions = self.actions().iter().filter(|a| a.platform() == platform);
             // Platforms with nothing new show up only in the skipped count.
             if actions
                 .clone()
@@ -201,7 +137,7 @@ impl<P: ImportsRoms> Text for Imported<P> {
                 *skipped.entry(reason).or_default() += n;
             }
         }
-        let s = p.summary();
+        let s = self.summary();
         if s.add + s.skip > 0 {
             let _ = writeln!(
                 out,
@@ -213,61 +149,53 @@ impl<P: ImportsRoms> Text for Imported<P> {
                 skipped_summary(&skipped)
             );
         }
-        for n in not_found {
+        if !self.unknown.is_empty() {
+            let _ = writeln!(out, "Left out, type unknown ({}):", self.unknown.len());
+            plan_lines(&mut out, self.unknown.iter().map(|u| format!("  {u}")));
+        }
+        if self.changes() == 0 {
+            let _ = writeln!(out, "Nothing to import.");
+        }
+        out
+    }
+}
+
+/// A folder import, plus the card paths asked for that aren't there.
+impl Text for CardImportPlan {
+    fn text(&self) -> String {
+        let mut out = self.plan.text();
+        for n in &self.not_found {
             let _ = writeln!(out, "✗ {}: not an unmatched ROM on this card", n.display());
         }
-        if !p.unknown.is_empty() {
-            let _ = writeln!(
-                out,
-                "Left out, type unknown ({}){}:",
-                p.unknown.len(),
-                if reader == Reader::Tui {
-                    ""
-                } else {
-                    "; import them with --platform"
-                }
-            );
-            plan_lines(&mut out, p.unknown.iter().map(|u| format!("  {u}")));
-        }
-        if r.staged.result.is_none() && p.changes() > 0 {
-            suggestion_footer(&mut out, reader, p.actions().iter());
-        }
-        // Nothing is applied while a name is missing, so no footer then either.
-        let changes = if not_found.is_empty() { p.changes() } else { 0 };
-        staged_footer(
-            &mut out,
-            r.staged.mode,
-            reader,
-            r.staged.result.as_ref(),
-            changes,
-            "Nothing to import.",
-            |out, res| {
-                let _ = writeln!(
-                    out,
-                    "✓ added {} ROM(s), {}{}",
-                    res.added,
-                    bytes(res.bytes),
-                    if res.duplicates.is_empty() {
-                        String::new()
-                    } else {
-                        format!(
-                            "; {} already in the library (same bytes), dropped",
-                            res.duplicates.len()
-                        )
-                    }
-                );
-                failure_lines(out, &res.failed);
-                warning_lines(out, &res.warnings);
-                covers_summary(out, r.covers.as_ref(), reader);
-                warning_lines(out, &r.warnings);
-            },
+        out
+    }
+}
+
+impl Text for ImportResult {
+    fn text(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "✓ added {} ROM(s), {}{}",
+            self.added,
+            bytes(self.bytes),
+            if self.duplicates.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; {} already in the library (same bytes), dropped",
+                    self.duplicates.len()
+                )
+            }
         );
+        failure_lines(&mut out, &self.failed);
+        warning_lines(&mut out, &self.warnings);
         out
     }
 }
 
 impl Text for ListReport {
-    fn text(&self, _: Reader) -> String {
+    fn text(&self) -> String {
         let r = self;
         let mut out = String::new();
         if r.games.is_empty() {
@@ -300,47 +228,38 @@ impl Text for ListReport {
     }
 }
 
-impl Text for RenameReport {
-    fn text(&self, reader: Reader) -> String {
-        let r = self;
+impl Text for RenamePlan {
+    fn text(&self) -> String {
         let mut out = String::new();
-        let p = &r.plan;
         let _ = writeln!(
             out,
             "[{}] {}  →  {}",
-            p.rom.platform, p.rom.name, p.new_name
+            self.rom.platform, self.rom.name, self.new_name
         );
-        if p.new_game_name != p.rom.game {
-            let _ = writeln!(out, "  game   {}  →  {}", p.rom.game, p.new_game_name);
+        if self.new_game_name != self.rom.game {
+            let _ = writeln!(out, "  game   {}  →  {}", self.rom.game, self.new_game_name);
         }
-        let f = &p.library_file;
+        let f = &self.library_file;
         let _ = writeln!(
             out,
             "  library  {}  →  {}",
             f.from.display(),
             f.to.display()
         );
-        staged_footer(
-            &mut out,
-            r.mode,
-            reader,
-            r.result.as_ref(),
-            p.changes(),
-            "",
-            |out, res| {
-                let _ = writeln!(out, "✓ renamed {} library file(s)", res.library_renamed);
-            },
-        );
         out
     }
 }
 
-impl Text for RemoveReport {
-    fn text(&self, reader: Reader) -> String {
-        let r = self;
+impl Text for RenameResult {
+    fn text(&self) -> String {
+        format!("✓ renamed {} library file(s)\n", self.library_renamed)
+    }
+}
+
+impl Text for RemovePlan {
+    fn text(&self) -> String {
         let mut out = String::new();
-        let p = &r.plan;
-        for item in &p.items {
+        for item in &self.items {
             let _ = writeln!(
                 out,
                 "  - [{}] {}  {}{}",
@@ -357,59 +276,35 @@ impl Text for RemoveReport {
         let _ = writeln!(
             out,
             "{} ROM(s), {}  →  {}/  (card copies are managed separately)",
-            p.items.len(),
-            bytes(p.bytes),
-            p.trash.display()
+            self.items.len(),
+            bytes(self.bytes),
+            self.trash.display()
         );
-        staged_footer(
-            &mut out,
-            r.mode,
-            reader,
-            r.result.as_ref(),
-            p.changes(),
-            "Nothing to do.",
-            |out, res| {
-                let _ = writeln!(
-                    out,
-                    "✓ removed {} ROM(s), {} game(s){}",
-                    res.removed,
-                    res.games_removed,
-                    res.trash
-                        .as_ref()
-                        .map(|t| format!("; files in {}", t.display()))
-                        .unwrap_or_default()
-                );
-                failure_lines(out, &res.failed);
-            },
-        );
+        if self.items.is_empty() {
+            let _ = writeln!(out, "Nothing to do.");
+        }
         out
     }
 }
 
-impl Text for StandardizeReport {
-    fn text(&self, reader: Reader) -> String {
-        let r = self;
-        if r.items.is_empty() {
-            return "Every unverified game already has a standard name, or no standard name matches.\n"
-                .into();
-        }
-        batch_report(
-            r,
-            reader,
-            |out, p, _| {
-                let _ = writeln!(
-                    out,
-                    "  [{}] {}  →  {}",
-                    p.rom.platform, p.rom.name, p.new_name
-                );
-            },
-            |_| "renamed".into(),
-        )
+impl Text for RemoveResult {
+    fn text(&self) -> String {
+        let mut out = format!(
+            "✓ removed {} ROM(s), {} game(s){}\n",
+            self.removed,
+            self.games_removed,
+            self.trash
+                .as_ref()
+                .map(|t| format!("; files in {}", t.display()))
+                .unwrap_or_default()
+        );
+        failure_lines(&mut out, &self.failed);
+        out
     }
 }
 
 impl Text for FetchReport {
-    fn text(&self, reader: Reader) -> String {
+    fn text(&self) -> String {
         let r = self;
         let mut out = String::new();
         plan_lines(
@@ -452,15 +347,19 @@ impl Text for FetchReport {
                 counts.join(", ")
             )
         };
-        if let Some(hint) = unmapped_hint(r, reader) {
-            let _ = writeln!(out, "{hint}");
+        if !r.unsupported_platforms.is_empty() {
+            let _ = writeln!(
+                out,
+                "No libretro mapping for {}.",
+                r.unsupported_platforms.join(", ")
+            );
         }
         out
     }
 }
 
 impl Text for CoversStatusReport {
-    fn text(&self, _: Reader) -> String {
+    fn text(&self) -> String {
         let r = self;
         let mut out = String::new();
         if r.platforms.is_empty() {
@@ -475,11 +374,7 @@ impl Text for CoversStatusReport {
                     s.platform.clone(),
                     format!("{}/{}", s.covers, s.games),
                     s.covers_not_found.to_string(),
-                    if s.covers_mapped {
-                        "yes".into()
-                    } else {
-                        "no (--libretro-system)".into()
-                    },
+                    if s.covers_mapped { "yes" } else { "no" }.into(),
                 ]
             })
             .collect();
@@ -492,38 +387,30 @@ impl Text for CoversStatusReport {
     }
 }
 
-impl Text for CoverImportReport {
-    fn text(&self, reader: Reader) -> String {
-        let staged = self;
-        let plan = &staged.plan;
+impl Text for CoverImportPlan {
+    fn text(&self) -> String {
         let mut out = format!(
             "{} / {}\nCopy {} ({} × {}, {})\n  → {}\n",
-            plan.game.platform,
-            plan.game.name,
-            plan.source.display(),
-            plan.width,
-            plan.height,
-            bytes(plan.bytes as u64),
-            plan.destination.display()
+            self.game.platform,
+            self.game.name,
+            self.source.display(),
+            self.width,
+            self.height,
+            bytes(self.bytes as u64),
+            self.destination.display()
         );
-        if plan.replaces_cover() {
+        if self.replaces_cover() {
             out.push_str("Replaces the current cover after the new copy is saved.\n");
         }
         out.push_str("The source image is kept. Automatic downloads will keep this cover.\n");
-        staged_footer(
-            &mut out,
-            staged.mode,
-            reader,
-            staged.result.as_ref(),
-            1,
-            "",
-            |out, result| {
-                let _ = writeln!(out, "✓ Cover imported: {}", result.path.display());
-                for warning in &result.warnings {
-                    let _ = writeln!(out, "! {warning}");
-                }
-            },
-        );
+        out
+    }
+}
+
+impl Text for CoverImportResult {
+    fn text(&self) -> String {
+        let mut out = format!("✓ Cover imported: {}\n", self.path.display());
+        warning_lines(&mut out, &self.warnings);
         out
     }
 }

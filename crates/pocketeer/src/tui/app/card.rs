@@ -172,7 +172,7 @@ impl Cores {
             if plan.actions.is_empty() {
                 return Ok(Preview::Notice(format!("{id} has no folders on the card.")));
             }
-            Ok(pending::preview(Batch::planned([(id, Ok(plan))])))
+            Ok(pending::preview(Batch::plan([(id, Ok(plan))])))
         });
     }
 }
@@ -216,7 +216,7 @@ fn prepare(cx: &mut Cx, specs: Vec<String>) {
     };
     cx.session.plan("Preparing", move |ctx, progress| {
         let plans = cores_cmd::prepare(ctx, &inventory, &specs, PlanOptions::default(), progress)?;
-        Ok(pending::preview(Batch::planned(plans)))
+        Ok(pending::preview(Batch::plan(plans)))
     });
 }
 

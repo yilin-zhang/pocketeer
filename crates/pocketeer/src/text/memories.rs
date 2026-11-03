@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use super::{Label, Reader, Text, bytes, table, time_ago};
+use super::{Label, Text, bytes, table, time_ago};
 
 use pocketeer_core::transfer::memories::Place;
 
@@ -20,7 +20,7 @@ impl Label for Place {
 }
 
 impl Text for MemoriesReport {
-    fn text(&self, _: Reader) -> String {
+    fn text(&self) -> String {
         let r = self;
         let mut out = String::new();
         if r.memories.is_empty() {

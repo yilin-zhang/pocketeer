@@ -264,7 +264,7 @@ pub fn answer(cx: &mut Cx, step: Step, answer: Answer) {
                 return;
             }
             let named = chosen.into_iter().map(|p| (p.rom.name.clone(), Ok(p)));
-            cx.planned(Batch::planned(named));
+            cx.planned(Batch::plan(named));
         }
         _ => {}
     }

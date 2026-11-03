@@ -24,7 +24,10 @@ use pocketeer_core::{
     card::memories::Header,
     card::roms::{CardRom, Depth, Index},
     catalog::inventory::{Inventory, InventoryLoad},
-    library::{Game, Library, covers},
+    library::{
+        Game, Library,
+        covers::{self, FetchReport},
+    },
     plan::Event,
     transfer::{
         self, LocalMatch, Presence,
@@ -35,8 +38,12 @@ use pocketeer_core::{
 
 use super::pending::{Pending, Planner, Preview, text_lines};
 use crate::{
-    ops::{context::Context, library as library_cmd, memories as memories_cmd},
-    text::{self, Reader, Text},
+    ops::{
+        context::Context,
+        library::{self as library_cmd, MetadataReport},
+        memories as memories_cmd,
+    },
+    text::{self, library::identify_news},
 };
 
 /// Everything the screens show, loaded in one go.
@@ -290,7 +297,7 @@ fn run(ctx: &Context, job: Job, progress: &mut dyn FnMut(Event)) -> Msg {
         Job::Identify => {
             let report = library_cmd::refresh_metadata(ctx, None, true, progress);
             Msg::Applied(Outcome {
-                lines: text_lines(&report.text(Reader::Tui)),
+                lines: text_lines(&checked(&report)),
                 // Background work: problems go to the log, not a dialog.
                 failed: 0,
                 changed: report.changed(),
@@ -393,12 +400,80 @@ fn fetch_covers(
     let changed = report.summary.fetched > 0;
     let mut text = String::new();
     if !(quiet && !changed && report.summary.errors == 0) {
-        text::covers_summary(&mut text, Some(&report), Reader::Tui);
+        text::covers_summary(&mut text, Some(&report));
+        if let Some(hint) = unmapped(&report) {
+            text.push_str(&hint);
+        }
     }
     Msg::Applied(Outcome {
         lines: text_lines(&text),
         failed: 0,
         changed,
+    })
+}
+
+/// The background DAT and cover check, for the log: one summary line, which
+/// is what the status bar ends up showing. It names the first problem; when
+/// there are more, all of them are listed above it.
+fn checked(r: &MetadataReport) -> String {
+    let mut out = String::new();
+    if r.problems().nth(1).is_some() {
+        for problem in r.problems() {
+            out.push_str(&format!("! {problem}\n"));
+        }
+    }
+    if let Some(hint) = r.covers.as_ref().and_then(unmapped) {
+        out.push_str(&hint);
+    }
+    let mut news = Vec::new();
+    if let Some(id) = &r.identify {
+        news.extend(
+            identify_news(id)
+                .into_iter()
+                .map(|(n, what)| format!("{n} ROM(s) {what}")),
+        );
+    }
+    if let Some(c) = &r.covers {
+        news.extend(
+            text::cover_news(c)
+                .into_iter()
+                .map(|(n, what)| format!("{n} cover(s) {what}")),
+        );
+    }
+    let what = if r.covers.is_some() {
+        "DATs and covers checked"
+    } else {
+        "DATs checked"
+    };
+    let mut problems = r.problems();
+    let mark = match problems.next() {
+        Some(first) => {
+            let more = problems.count();
+            news.push(if more > 0 {
+                format!("{first} (and {more} more problem(s))")
+            } else {
+                first.to_string()
+            });
+            "!"
+        }
+        None => "✓",
+    };
+    if news.is_empty() {
+        out.push_str(&format!("{mark} {what}, nothing new\n"));
+    } else {
+        out.push_str(&format!("{mark} {what}: {}\n", news.join(", ")));
+    }
+    out
+}
+
+/// Platforms covers can't be fetched for until the user names their
+/// libretro system, and the key that does it.
+fn unmapped(c: &FetchReport) -> Option<String> {
+    (!c.unsupported_platforms.is_empty()).then(|| {
+        format!(
+            "No libretro mapping for {}; press f on one of its games and give the system name.\n",
+            c.unsupported_platforms.join(", ")
+        )
     })
 }
 

@@ -1,13 +1,8 @@
-//! Human-readable renderings, one file per `ops` module. Each `pub fn`
-//! returns the full text to print for one report; the TUI reuses the plan
-//! renderers for its confirm dialogs. This file holds what several domains
-//! share: tables, byte sizes, plan listings, the plan footer, and the few
-//! renderings for config and docs.
-//!
-//! Every report says how it reads through [`Text`]; the implementations sit
-//! in the file for its `ops` module. Text for [`Reader::Tui`] is shown in a
-//! dialog: it never mentions CLI flags or commands (the dialog's buttons say
-//! what happens next).
+//! How things read: plans, what applying them did, reports, and the word
+//! for each state ([`Label`]). The command line and the TUI show the same
+//! text; what to do next (a flag, a key) is each front end's own to add, so
+//! nothing here names a flag, a command or a key. One file per domain; this
+//! one holds what they share: tables, sizes, times, plan listings.
 
 use std::{collections::BTreeMap, fmt::Write};
 
@@ -25,13 +20,9 @@ use pocketeer_core::{
     plan::Failure,
 };
 
-use crate::{
-    cli::DocsReport,
-    ops::{
-        Batch, BatchState, Mode, Plan,
-        context::{ConfigPathReport, ConfigShowReport},
-    },
-};
+use pocketeer_core::plan::Plan;
+
+use crate::ops::{Batch, BatchState};
 
 pub mod card;
 pub mod cores;
@@ -57,51 +48,14 @@ fn plan_lines(out: &mut String, lines: impl IntoIterator<Item = String>) {
     }
 }
 
-/// Who reads a text: someone at the command line, or a TUI dialog.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Reader {
-    Cli,
-    Tui,
-}
-
 /// The word for a state, the same in every table and report that shows it.
 pub trait Label {
     fn label(&self) -> &'static str;
 }
 
-/// A report as people read it.
+/// A plan, a result or a report as people read it.
 pub trait Text {
-    fn text(&self, reader: Reader) -> String;
-}
-
-/// A dry run says so at the CLI; a TUI dialog's buttons say it instead.
-fn mode_footer(out: &mut String, mode: Mode, reader: Reader) {
-    if mode == Mode::DryRun && reader == Reader::Cli {
-        let _ = writeln!(out, "\nDry run: nothing was changed.");
-    }
-}
-
-/// How every plan report ends: what applying did (`done` writes the ✓/✗
-/// lines), else how to apply it, else `nothing` (the domain's own "nothing to
-/// do" line; empty to say nothing).
-fn staged_footer<R>(
-    out: &mut String,
-    mode: Mode,
-    reader: Reader,
-    result: Option<&R>,
-    changes: usize,
-    nothing: &str,
-    done: impl FnOnce(&mut String, &R),
-) {
-    match result {
-        Some(r) => done(out, r),
-        None if changes > 0 => mode_footer(out, mode, reader),
-        None => {
-            if !nothing.is_empty() {
-                let _ = writeln!(out, "{nothing}");
-            }
-        }
-    }
+    fn text(&self) -> String;
 }
 
 /// "; skipped: 2 up to date, 1 not in DAT", or nothing.
@@ -157,7 +111,7 @@ fn source(src: &Source) -> String {
 }
 
 /// Renders aligned columns. Trailing empty cells don't leave trailing spaces.
-fn table<const N: usize>(out: &mut String, header: [&str; N], rows: &[[String; N]]) {
+pub fn table<const N: usize>(out: &mut String, header: [&str; N], rows: &[[String; N]]) {
     let mut widths: [usize; N] = header.map(str::len);
     for row in rows {
         for (w, cell) in widths.iter_mut().zip(row) {
@@ -317,39 +271,10 @@ fn import_actions<'a>(
     skipped
 }
 
-/// Tells the user how to take the standard names an import plan suggests.
-fn suggestion_footer<'a>(
-    out: &mut String,
-    reader: Reader,
-    actions: impl Iterator<Item = &'a ImportAction>,
-) {
-    if reader == Reader::Tui {
-        // The TUI asked about the names in its own dialog already.
-        return;
-    }
-    let n = actions
-        .filter(|a| {
-            matches!(
-                a,
-                ImportAction::Add {
-                    suggested: Some(_),
-                    ..
-                }
-            )
-        })
-        .count();
-    if n > 0 {
-        let _ = writeln!(
-            out,
-            "{n} file(s) have a standard name (→ above); add --standard-names to import them under it."
-        );
-    }
-}
-
 /// What a cover fetch did this run, as counts with what happened ("3",
 /// "downloaded"); empty when it did nothing. Games already marked missing
 /// are not news.
-fn cover_news(c: &FetchReport) -> Vec<(usize, &'static str)> {
+pub fn cover_news(c: &FetchReport) -> Vec<(usize, &'static str)> {
     let missing = c
         .items
         .iter()
@@ -365,23 +290,8 @@ fn cover_news(c: &FetchReport) -> Vec<(usize, &'static str)> {
     .collect()
 }
 
-/// How to give a libretro system name for platforms without a mapping.
-fn unmapped_hint(c: &FetchReport, reader: Reader) -> Option<String> {
-    (!c.unsupported_platforms.is_empty()).then(|| {
-        format!(
-            "No libretro mapping for {}; {}.",
-            c.unsupported_platforms.join(", "),
-            if reader == Reader::Tui {
-                "press f on one of its games and give the system name"
-            } else {
-                "pass `covers fetch --platform <id> --libretro-system <name>`"
-            }
-        )
-    })
-}
-
-/// One line about the covers fetched after an import, plus the mapping hint.
-pub fn covers_summary(out: &mut String, covers: Option<&FetchReport>, reader: Reader) {
+/// One line about the covers fetched after an import.
+pub fn covers_summary(out: &mut String, covers: Option<&FetchReport>) {
     if let Some(c) = covers {
         let news = cover_news(c);
         let _ = writeln!(
@@ -396,9 +306,6 @@ pub fn covers_summary(out: &mut String, covers: Option<&FetchReport>, reader: Re
                     .join(", ")
             }
         );
-        if let Some(hint) = unmapped_hint(c, reader) {
-            let _ = writeln!(out, "{hint}");
-        }
     }
 }
 
@@ -410,88 +317,48 @@ fn failure_lines(out: &mut String, failures: &[Failure]) {
 }
 
 /// Lines that say an import's follow-up work (DAT check, covers) had trouble.
-fn warning_lines(out: &mut String, warnings: &[ErrorInfo]) {
+pub fn warning_lines(out: &mut String, warnings: &[ErrorInfo]) {
     for w in warnings {
         let _ = writeln!(out, "! {w}");
     }
 }
 
 // ---------------------------------------------------------------------------
-// Config and docs.
+// Batches.
 
-impl Text for ConfigPathReport {
-    fn text(&self, _: Reader) -> String {
-        let r = self;
-        format!(
-            "{}{}\n",
-            r.path.display(),
-            if r.exists { "" } else { "  (not created yet)" }
-        )
-    }
-}
-
-impl Text for ConfigShowReport {
-    fn text(&self, _: Reader) -> String {
-        let r = self;
+/// Each item: why it couldn't be planned, or its plan and how applying it
+/// went.
+impl<P: Plan + Text> Text for Batch<P>
+where
+    P::Output: Text,
+{
+    fn text(&self) -> String {
         let mut out = String::new();
-        let rows: Vec<[String; 2]> = r
-            .values
-            .iter()
-            .map(|e| {
-                [
-                    e.key.clone(),
-                    e.value.clone().unwrap_or_else(|| "(unset)".into()),
-                ]
-            })
-            .collect();
-        table(&mut out, ["KEY", "VALUE"], &rows);
-        let _ = writeln!(out, "\nConfig file: {}", r.path.display());
-        out
-    }
-}
-
-impl Text for DocsReport {
-    fn text(&self, _: Reader) -> String {
-        let r = self;
-        r.markdown.clone()
-    }
-}
-
-/// Each item's plan (`plan`), then how applying it went (`done` sums up
-/// the changes).
-fn batch_report<P: Plan>(
-    r: &Batch<P>,
-    reader: Reader,
-    plan: impl Fn(&mut String, &P, Reader),
-    done: impl Fn(&P::Output) -> String,
-) -> String {
-    let mut out = String::new();
-    for (i, item) in r.items.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        match &item.state {
-            BatchState::Unplanned { error } => {
-                let _ = writeln!(
-                    out,
-                    "{}: error [{}] {}",
-                    item.target, error.code, error.message
-                );
-                if let Some(remedy) = error.remedy {
-                    let _ = writeln!(out, "  hint: {}", crate::output::remedy_hint(remedy));
+        for (i, item) in self.items.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            match &item.state {
+                BatchState::Unplanned { error } => {
+                    let _ = writeln!(
+                        out,
+                        "{}: error [{}] {}",
+                        item.target, error.code, error.message
+                    );
+                }
+                BatchState::Planned { plan } => out.push_str(&plan.text()),
+                BatchState::Applied { plan, result } => {
+                    out.push_str(&plan.text());
+                    for line in result.text().lines() {
+                        let _ = writeln!(out, "  {line}");
+                    }
+                }
+                BatchState::Failed { plan, error } => {
+                    out.push_str(&plan.text());
+                    let _ = writeln!(out, "  ✗ failed [{}] {}", error.code, error.message);
                 }
             }
-            BatchState::Planned { plan: p } => plan(&mut out, p, reader),
-            BatchState::Applied { plan: p, result } => {
-                plan(&mut out, p, reader);
-                let _ = writeln!(out, "  ✓ done: {}", done(result));
-            }
-            BatchState::Failed { plan: p, error } => {
-                plan(&mut out, p, reader);
-                let _ = writeln!(out, "  ✗ failed [{}] {}", error.code, error.message);
-            }
         }
+        out
     }
-    mode_footer(&mut out, r.mode, reader);
-    out
 }

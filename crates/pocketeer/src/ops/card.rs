@@ -9,12 +9,11 @@ use pocketeer_core::{
         Status,
         bios::{self, BiosReport, PlacePlan},
         clean::{self, CleanPlan},
-        roms::{CardRom, Depth, Identity, Index},
+        roms::{CardRom, Depth, Index},
     },
     catalog::inventory::{Inventory, Platforms},
-    library::import::ImportPlan,
     net::{Policy, Source},
-    plan::{Event, Progress},
+    plan::Event,
     transfer::{
         self, Comparison,
         from_card::{self, CardImportPlan},
@@ -24,12 +23,10 @@ use pocketeer_core::{
 use serde::Serialize;
 
 use super::{
-    Mode, Staged,
     context::Context,
-    library::{ImportSettings, Imported, ImportsRoms, suggest_standard_names},
-    load_dat, stage,
+    library::{ImportSettings, suggest_standard_names},
+    load_dat,
 };
-use crate::output::Outcome;
 
 pub fn status(ctx: &Context) -> Result<Status> {
     pocketeer_core::card::status(&ctx.pocket()?)
@@ -77,29 +74,17 @@ pub fn bios_check(ctx: &Context, ids: &[String], present: bool) -> Result<BiosRe
     Ok(report)
 }
 
-pub type PlaceReport = Staged<PlacePlan>;
-
-pub fn bios_place(
-    ctx: &Context,
-    mode: Mode,
-    progress: &mut dyn FnMut(Event),
-) -> Result<PlaceReport> {
+/// Plans moving files dropped at the card root into the folders that want them.
+pub fn plan_place(ctx: &Context) -> Result<PlacePlan> {
     let pocket = ctx.pocket()?;
     let installed = pocketeer_core::card::cores::list_installed(&pocket)?;
     let report = bios::check(&pocket, &installed, None)?;
-    stage(ctx, mode, bios::plan_place(&pocket, &report)?, progress)
+    bios::plan_place(&pocket, &report)
 }
 
-pub type CleanReport = Staged<CleanPlan>;
-
-pub fn clean(
-    ctx: &Context,
-    system: bool,
-    mode: Mode,
-    progress: Progress<'_>,
-) -> Result<CleanReport> {
-    let plan = clean::plan(&ctx.pocket()?, system)?;
-    stage(ctx, mode, plan, progress)
+/// Plans removing macOS junk; `system` takes the volume's system folders too.
+pub fn plan_clean(ctx: &Context, system: bool) -> Result<CleanPlan> {
+    clean::plan(&ctx.pocket()?, system)
 }
 
 #[derive(Debug, Serialize)]
@@ -107,20 +92,6 @@ pub struct RomsReport {
     pub roms: Vec<CardRom>,
     pub comparison: Comparison,
     pub warnings: Vec<ErrorInfo>,
-}
-
-impl Outcome for RomsReport {
-    fn error(&self) -> Option<Error> {
-        let failed = self
-            .roms
-            .iter()
-            .filter(|r| matches!(r.identity, Identity::Error { .. }))
-            .count();
-        (failed > 0).then_some(Error::SomeFailed {
-            failed,
-            total: self.roms.len(),
-        })
-    }
 }
 
 /// Card ROMs with their library presence, after checking them at `depth`.
@@ -142,8 +113,6 @@ pub fn roms(ctx: &Context, depth: Depth, progress: &mut dyn FnMut(Event)) -> Res
     })
 }
 
-pub type CopyReport = Staged<to_card::CopyPlan>;
-
 pub fn plan_copy(
     ctx: &Context,
     platform: Option<&str>,
@@ -152,8 +121,6 @@ pub fn plan_copy(
 ) -> Result<to_card::CopyPlan> {
     to_card::plan(&ctx.library()?, &ctx.pocket()?, platform, roms, progress)
 }
-
-pub type RenameReport = Staged<card_rename::CardRenamePlan>;
 
 pub fn plan_rename(ctx: &Context, path: &Path, name: &str) -> Result<card_rename::CardRenamePlan> {
     card_rename::plan(&ctx.pocket()?, path, name)
@@ -171,9 +138,6 @@ pub struct ImportRequest {
     pub paths: Vec<PathBuf>,
     pub settings: ImportSettings,
 }
-
-/// `not_found` is in the plan: names asked for that aren't card-only ROMs.
-pub type ImportReport = Imported<CardImportPlan>;
 
 /// Plans copying card-only ROMs into the library, plus the names asked for
 /// that aren't orphans on the card.
@@ -214,28 +178,4 @@ pub fn plan_import(
     )?;
     suggest_standard_names(ctx, &lib, &mut plan.plan, req.settings.standard_names)?;
     Ok(plan)
-}
-
-impl ImportsRoms for CardImportPlan {
-    fn import(&self) -> &ImportPlan {
-        &self.plan
-    }
-
-    fn import_mut(&mut self) -> &mut ImportPlan {
-        &mut self.plan
-    }
-
-    fn not_found(&self) -> &[PathBuf] {
-        &self.not_found
-    }
-}
-
-pub fn import(
-    ctx: &Context,
-    req: &ImportRequest,
-    mode: Mode,
-    progress: &mut dyn FnMut(Event),
-) -> Result<ImportReport> {
-    let plan = plan_import(ctx, req, progress)?;
-    Imported::stage(ctx, mode, plan, req.settings.covers, progress)
 }

@@ -1,26 +1,19 @@
-//! Memories (save states): list what the card and the library have, back
-//! them up, put one back on the card, throw one away. A Memory is its
-//! `.sta` file plus any file of the same name beside it; they always move
-//! together. Backups use the same history as cartridge saves.
+//! Memories (save states): what the card and the library have, and plans to
+//! put one back on the card or throw one away. Backing them up is a saves
+//! backup with `Scope::Memories`.
 
 use std::path::Path;
 
 use pocketeer_core::{
     Result,
-    plan::Event,
     transfer::{
         memories::{self, MemoryEntry},
-        saves::{ConflictChoice, SavesPlan, Scope, TrashPlan, TrashTarget},
+        saves::{SavesPlan, TrashPlan, TrashTarget},
     },
 };
 use serde::Serialize;
 
-use super::{
-    Mode,
-    context::Context,
-    saves::{SyncReport, TrashReport},
-    stage,
-};
+use super::context::Context;
 
 #[derive(Debug, Serialize)]
 pub struct MemoriesReport {
@@ -38,36 +31,10 @@ pub fn list(ctx: &Context) -> Result<MemoriesReport> {
     })
 }
 
-/// `memories backup`: every new or changed Memory on the card.
-pub fn backup(
-    ctx: &Context,
-    conflicts: Option<ConflictChoice>,
-    mode: Mode,
-    progress: &mut dyn FnMut(Event),
-) -> Result<SyncReport> {
-    super::saves::backup(ctx, Scope::Memories, conflicts, mode, progress)
-}
-
-/// `memories restore`: put the library's copy back on the card. The card's
-/// copy, if different, is archived first.
-pub fn restore(
-    ctx: &Context,
-    rel: &Path,
-    mode: Mode,
-    progress: &mut dyn FnMut(Event),
-) -> Result<SyncReport> {
-    stage(ctx, mode, plan_restore(ctx, rel)?, progress)
-}
-
 /// Plans putting the library's copy of the Memory at `rel` (and the files
 /// beside it) back on the card.
 pub fn plan_restore(ctx: &Context, rel: &Path) -> Result<SavesPlan> {
     memories::plan_restore(&ctx.library()?, &ctx.pocket()?, rel)
-}
-
-/// `memories trash`: from the card (archived first) or from the library.
-pub fn trash(ctx: &Context, rel: &Path, target: TrashTarget, mode: Mode) -> Result<TrashReport> {
-    stage(ctx, mode, plan_trash(ctx, rel, target)?, &mut |_| {})
 }
 
 /// Plans throwing away the Memory at `rel` with the files beside it.

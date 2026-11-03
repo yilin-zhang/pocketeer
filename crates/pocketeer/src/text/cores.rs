@@ -1,18 +1,18 @@
-//! Text for `ops::cores`.
+//! Text for cores: the installed list, the inventory, install and remove plans.
 
 use std::fmt::Write;
 
 use pocketeer_core::card::{
     cores::{CoreInfo, CoreListReport},
-    install::{InstallPlan, UninstallPlan},
+    install::{Changes, InstallPlan, Prepared, UninstallPlan},
 };
 use pocketeer_core::catalog::inventory::InventoryStatus;
 
-use super::{Reader, Text, actions, batch_report, bytes, source, table};
-use crate::ops::cores::{InstallReport, RemoveReport, SearchReport};
+use super::{Text, actions, bytes, source, table};
+use crate::ops::cores::SearchReport;
 
 impl Text for CoreListReport {
-    fn text(&self, _: Reader) -> String {
+    fn text(&self) -> String {
         let report = self;
         let mut out = String::new();
         if report.cores.is_empty() && report.broken.is_empty() {
@@ -60,7 +60,7 @@ impl Text for CoreListReport {
 }
 
 impl Text for SearchReport {
-    fn text(&self, _: Reader) -> String {
+    fn text(&self) -> String {
         let report = self;
         let mut out = String::new();
         if report.hits.is_empty() {
@@ -94,7 +94,7 @@ impl Text for SearchReport {
 }
 
 impl Text for CoreInfo {
-    fn text(&self, _: Reader) -> String {
+    fn text(&self) -> String {
         let info = self;
         let mut out = String::new();
         let _ = writeln!(out, "{}", info.core.id);
@@ -171,36 +171,53 @@ impl Text for CoreInfo {
     }
 }
 
-impl Text for InstallReport {
-    fn text(&self, reader: Reader) -> String {
-        let r = self;
-        batch_report(
-            r,
-            reader,
-            |out, p, reader| install_plan(out, &p.plan, reader),
-            |a| {
-                let mut parts = vec![format!("{} file(s) written", a.installed)];
-                if a.removed > 0 {
-                    parts.push(format!("{} removed", a.removed));
-                }
-                if a.moved_files > 0 {
-                    parts.push(format!("{} moved", a.moved_files));
-                }
-                parts.join(", ")
-            },
-        )
+impl Text for Prepared {
+    fn text(&self) -> String {
+        let mut out = String::new();
+        install_plan(&mut out, &self.plan);
+        out
     }
 }
 
-impl Text for RemoveReport {
-    fn text(&self, reader: Reader) -> String {
-        let r = self;
-        batch_report(
-            r,
-            reader,
-            |out, plan, _| remove_plan(out, plan),
-            |a| format!("{} item(s) removed", a.removed),
-        )
+impl Text for UninstallPlan {
+    fn text(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "{}: remove {}{}",
+            self.core_id,
+            self.installed_version,
+            if self.purge {
+                " (with assets and saves)"
+            } else {
+                ""
+            }
+        );
+        if self.actions.is_empty() {
+            let _ = writeln!(out, "  nothing to remove");
+        }
+        actions(&mut out, &self.actions);
+        out
+    }
+}
+
+/// What applying moved, wrote or removed on the card.
+impl Text for Changes {
+    fn text(&self) -> String {
+        let parts: Vec<String> = [
+            (self.installed, "file(s) written"),
+            (self.removed, "removed"),
+            (self.moved_files, "moved"),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| format!("{n} {what}"))
+        .collect();
+        if parts.is_empty() {
+            "✓ done: nothing changed\n".into()
+        } else {
+            format!("✓ done: {}\n", parts.join(", "))
+        }
     }
 }
 
@@ -211,14 +228,11 @@ fn inventory_footer(out: &mut String, status: &InventoryStatus) {
         }
         InventoryStatus::Unavailable { error } => {
             let _ = writeln!(out, "\nwarning: inventory unavailable: {}", error.message);
-            if let Some(remedy) = error.remedy {
-                let _ = writeln!(out, "hint: {}", crate::output::remedy_hint(remedy));
-            }
         }
     }
 }
 
-fn install_plan(out: &mut String, plan: &InstallPlan, reader: Reader) {
+fn install_plan(out: &mut String, plan: &InstallPlan) {
     let transition = match &plan.installed_version {
         Some(cur) if plan.changes() == 0 => format!("{cur} (already installed)"),
         Some(cur) => format!("{cur} → {}", plan.version),
@@ -226,15 +240,7 @@ fn install_plan(out: &mut String, plan: &InstallPlan, reader: Reader) {
     };
     let _ = writeln!(out, "{}: {transition}", plan.core_id);
     if plan.changes() == 0 {
-        let _ = writeln!(
-            out,
-            "  nothing to do{}",
-            if reader == Reader::Tui {
-                ""
-            } else {
-                " (use --force to reinstall)"
-            }
-        );
+        let _ = writeln!(out, "  nothing to do");
         return;
     }
     let s = plan.actions.summary();
@@ -264,54 +270,4 @@ fn install_plan(out: &mut String, plan: &InstallPlan, reader: Reader) {
         );
     }
     actions(out, &plan.actions);
-}
-
-fn remove_plan(out: &mut String, plan: &UninstallPlan) {
-    let _ = writeln!(
-        out,
-        "{}: remove {}{}",
-        plan.core_id,
-        plan.installed_version,
-        if plan.purge {
-            " (with assets and saves)"
-        } else {
-            ""
-        }
-    );
-    if plan.actions.is_empty() {
-        let _ = writeln!(out, "  nothing to remove");
-    }
-    actions(out, &plan.actions);
-}
-
-#[cfg(test)]
-mod tests {
-    use pocketeer_core::card::install::{InstallPlan, zipfile::ZipSource};
-
-    use super::*;
-
-    fn unchanged_plan() -> InstallPlan {
-        InstallPlan {
-            core_id: "a.B".into(),
-            version: "1.0".into(),
-            installed_version: Some("1.0".into()),
-            source: ZipSource::Url { url: String::new() },
-            requires_license: false,
-            also_installs: vec![],
-            replaces: vec![],
-            actions: Vec::new().into(),
-        }
-    }
-
-    #[test]
-    fn tui_text_names_no_cli_flags() {
-        let plan = unchanged_plan();
-        let mut cli = String::new();
-        install_plan(&mut cli, &plan, Reader::Cli);
-        assert!(cli.contains("--force"), "{cli}");
-        let mut tui = String::new();
-        install_plan(&mut tui, &plan, Reader::Tui);
-        assert!(!tui.contains("--"), "{tui}");
-        assert!(tui.contains("nothing to do"), "{tui}");
-    }
 }

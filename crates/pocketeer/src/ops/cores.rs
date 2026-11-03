@@ -11,7 +11,7 @@ use pocketeer_core::{
 };
 use serde::Serialize;
 
-use super::{Batch, Mode, context::Context};
+use super::{Batch, context::Context};
 
 pub fn list(ctx: &Context, outdated: bool) -> Result<CoreListReport> {
     let pocket = ctx.pocket()?;
@@ -71,8 +71,6 @@ pub struct InstallRequest {
     pub keep_platforms: bool,
 }
 
-pub type InstallReport = Batch<Prepared>;
-
 /// Resolves `specs` (`id` or `id@version`) against the inventory and
 /// downloads what each install needs. One entry per spec, failures included.
 pub fn prepare(
@@ -88,12 +86,13 @@ pub fn prepare(
     Ok(Installer::new(&pocket, &net).prepare_specs(inventory, &installed, specs, &opts, progress))
 }
 
-pub fn install(
+/// Plans `cores install`: each spec resolved and downloaded, or the zip
+/// given with `--from`.
+pub fn plan_install(
     ctx: &Context,
     req: &InstallRequest,
-    mode: Mode,
     progress: &mut dyn FnMut(Event),
-) -> Result<InstallReport> {
+) -> Result<Batch<Prepared>> {
     let pocket = ctx.pocket()?;
     let opts = PlanOptions {
         force: req.force,
@@ -111,16 +110,16 @@ pub fn install(
         }
         None => prepare(ctx, &ctx.inventory()?, &req.specs, opts, progress)?,
     };
-    Ok(Batch::stage(ctx, mode, prepared, progress))
+    Ok(Batch::plan(prepared))
 }
 
-pub fn update(
+/// Plans `cores update` for `targets`.
+pub fn plan_update(
     ctx: &Context,
     targets: &Targets,
     keep_platforms: bool,
-    mode: Mode,
     progress: &mut dyn FnMut(Event),
-) -> Result<InstallReport> {
+) -> Result<Batch<Prepared>> {
     let pocket = ctx.pocket()?;
     let net = ctx.net()?;
     let installed = cores::list_installed(&pocket)?;
@@ -128,32 +127,23 @@ pub fn update(
         keep_platforms,
         ..Default::default()
     };
-    let prepared = Installer::new(&pocket, &net).prepare_updates(
+    Ok(Batch::plan(Installer::new(&pocket, &net).prepare_updates(
         &ctx.inventory()?,
         &installed,
         targets,
         &opts,
         progress,
-    );
-    Ok(Batch::stage(ctx, mode, prepared, progress))
+    )))
 }
 
-pub type RemoveReport = Batch<UninstallPlan>;
-
-pub fn remove(
-    ctx: &Context,
-    ids: &[String],
-    purge: bool,
-    mode: Mode,
-    progress: &mut dyn FnMut(Event),
-) -> Result<RemoveReport> {
+/// Plans removing each of `ids`; `purge` takes its assets and saves too.
+pub fn plan_remove(ctx: &Context, ids: &[String], purge: bool) -> Result<Batch<UninstallPlan>> {
     let pocket = ctx.pocket()?;
     let installed = cores::list_installed(&pocket)?;
-    let plans = ids.iter().map(|id| {
+    Ok(Batch::plan(ids.iter().map(|id| {
         let plan = install::plan_remove(&pocket, &installed, id, purge);
         // Named as installed, whatever case was typed.
         let target = plan.as_ref().map_or(id.clone(), |p| p.core_id.clone());
         (target, plan)
-    });
-    Ok(Batch::stage(ctx, mode, plans, progress))
+    })))
 }

@@ -4,11 +4,11 @@
 use std::path::{Path, PathBuf};
 
 use pocketeer_core::{
-    Error, ErrorInfo, Result,
+    ErrorInfo, Result,
     library::{
         self, Game, Library, PlatformStats,
-        covers::{self, FetchOptions, FetchReport},
-        import::{self, ImportAction, ImportOptions, ImportPlan, ImportResult},
+        covers::{self, FetchOptions, FetchReport, import::CoverImportPlan},
+        import::{self, ImportOptions, ImportPlan},
         remove::{self, RemovePlan},
         rename::{self, RenamePlan},
     },
@@ -16,8 +16,7 @@ use pocketeer_core::{
 };
 use serde::Serialize;
 
-use super::{Batch, Mode, Plan, Staged, context::Context, load_dat, stage, stage_if};
-use crate::output::Outcome;
+use super::{context::Context, load_dat};
 
 #[derive(Debug, Serialize)]
 pub struct InitReport {
@@ -38,90 +37,9 @@ pub fn status(ctx: &Context) -> Result<library::Status> {
     ctx.library()?.status()
 }
 
-/// What an import did: the plan (and its result), then the identification
-/// and cover fetch that follow when games were added. The same for a folder
-/// import and a card import.
-/// A plan that copies ROMs into the library: from a folder on this
-/// computer ([`ImportPlan`]) or from the card (`CardImportPlan`).
-pub trait ImportsRoms: Plan<Output = ImportResult> {
-    fn import(&self) -> &ImportPlan;
-    fn import_mut(&mut self) -> &mut ImportPlan;
-    /// Card paths asked for that aren't there; nothing runs while any are.
-    fn not_found(&self) -> &[PathBuf] {
-        &[]
-    }
-}
-
-impl ImportsRoms for ImportPlan {
-    fn import(&self) -> &ImportPlan {
-        self
-    }
-
-    fn import_mut(&mut self) -> &mut ImportPlan {
-        self
-    }
-}
-
-#[derive(Serialize)]
-pub struct Imported<P: Plan> {
-    #[serde(flatten)]
-    pub staged: Staged<P>,
-    /// Covers fetched for the new games afterwards (online only).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub covers: Option<FetchReport>,
-    /// Problems identifying or fetching covers for the new games; the
-    /// import itself succeeded.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<ErrorInfo>,
-}
-
-impl<P: ImportsRoms> Imported<P> {
-    /// Stages `plan`, then identifies and fetches covers for what it added.
-    pub fn stage(
-        ctx: &Context,
-        mode: Mode,
-        plan: P,
-        covers: bool,
-        progress: Progress<'_>,
-    ) -> Result<Self> {
-        let allowed = plan.not_found().is_empty();
-        // Only the platforms that get games need identifying afterwards.
-        let platforms: Vec<String> = plan
-            .import()
-            .actions()
-            .iter()
-            .filter(|a| matches!(a, ImportAction::Add { .. }))
-            .map(|a| a.platform().to_owned())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let staged = stage_if(ctx, mode, allowed, plan, progress)?;
-        let added = staged.result.as_ref().map_or(0, |r| r.added);
-        // New games get identified, and their covers fetched when asked.
-        let metadata = if added > 0 {
-            refresh_metadata(ctx, Some(&platforms), covers, progress)
-        } else {
-            MetadataReport::default()
-        };
-        Ok(Imported {
-            staged,
-            warnings: metadata.problems().cloned().collect(),
-            covers: metadata.covers,
-        })
-    }
-}
-
-impl<P: Plan> Outcome for Imported<P> {
-    fn error(&self) -> Option<Error> {
-        self.staged.error()
-    }
-}
-
-pub type ImportReport = Imported<ImportPlan>;
-
 /// How an import treats its files, wherever they come from (a folder or
 /// the card).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ImportSettings {
     /// A DAT to verify and name the files with.
     pub dat: Option<PathBuf>,
@@ -129,19 +47,6 @@ pub struct ImportSettings {
     pub dat_only: bool,
     /// Import files under the standard name they match (needs the network).
     pub standard_names: bool,
-    /// Fetch covers for the new games afterwards (when online).
-    pub covers: bool,
-}
-
-impl Default for ImportSettings {
-    fn default() -> Self {
-        ImportSettings {
-            dat: None,
-            dat_only: false,
-            standard_names: false,
-            covers: true,
-        }
-    }
 }
 
 /// What `library import` was asked to do.
@@ -294,16 +199,6 @@ pub fn plan_import(
     Ok(plan)
 }
 
-pub fn import(
-    ctx: &Context,
-    req: &ImportRequest,
-    mode: Mode,
-    progress: Progress<'_>,
-) -> Result<ImportReport> {
-    let plan = plan_import(ctx, req, progress)?;
-    Imported::stage(ctx, mode, plan, req.settings.covers, progress)
-}
-
 #[derive(Debug, Serialize)]
 pub struct ListReport {
     pub games: Vec<Game>,
@@ -325,8 +220,6 @@ pub fn list(ctx: &Context, platform: Option<&str>, query: Option<&str>) -> Resul
     })
 }
 
-pub type RenameReport = Staged<RenamePlan>;
-
 /// Rename a managed ROM locally.
 pub fn plan_rename(
     ctx: &Context,
@@ -337,72 +230,25 @@ pub fn plan_rename(
     rename::plan(&ctx.library()?, platform, spec, new_name)
 }
 
-pub fn rename(
-    ctx: &Context,
-    platform: Option<&str>,
-    spec: &str,
-    new_name: &str,
-    mode: Mode,
-) -> Result<RenameReport> {
-    let plan = plan_rename(ctx, platform, spec, new_name)?;
-    stage(ctx, mode, plan, &mut |_| {})
-}
-
-pub type RemoveReport = Staged<RemovePlan>;
-
 pub fn plan_remove(ctx: &Context, platform: Option<&str>, specs: &[String]) -> Result<RemovePlan> {
     remove::plan(&ctx.library()?, platform, specs)
 }
 
-pub fn remove(
-    ctx: &Context,
-    platform: Option<&str>,
-    specs: &[String],
-    mode: Mode,
-) -> Result<RemoveReport> {
-    let plan = plan_remove(ctx, platform, specs)?;
-    stage(ctx, mode, plan, &mut |_| {})
-}
-
-/// Every unverified game that matches a standard name, as a rename plan
-/// for the local library.
+/// A rename for every unverified game that matches a standard name.
 pub fn plan_standardize(ctx: &Context, platform: Option<&str>) -> Result<Vec<RenamePlan>> {
     library::rename::standardize_plan(&ctx.library()?, platform, |p| names_for(ctx, p))
 }
 
-/// One rename per game that matches a standard name, each on its own.
-pub type StandardizeReport = Batch<RenamePlan>;
-
-pub fn standardize(ctx: &Context, platform: Option<&str>, mode: Mode) -> Result<StandardizeReport> {
-    let renames = plan_standardize(ctx, platform)?
-        .into_iter()
-        .map(|plan| (plan.rom.name.clone(), Ok(plan)));
-    Ok(Batch::stage(ctx, mode, renames, &mut |_| {}))
-}
-
-pub type CoverImportReport = Staged<covers::import::CoverImportPlan>;
-
-/// Copies a local image in as the cover of the game `spec` names.
-pub fn import_cover(
+/// Plans copying a local image in as the cover of the game `spec` names.
+pub fn plan_import_cover(
     ctx: &Context,
     platform: Option<&str>,
     spec: &str,
     image: &Path,
-    mode: Mode,
-) -> Result<CoverImportReport> {
+) -> Result<CoverImportPlan> {
     let lib = ctx.library()?;
     let hits = library::resolve_game_roms(&lib, platform, spec)?;
-    let plan = covers::import::plan(&lib, hits[0].0.id, image)?;
-    stage(ctx, mode, plan, &mut |_| {})
-}
-
-impl Outcome for library::identify::Report {
-    fn error(&self) -> Option<Error> {
-        super::verdict(
-            self.matched + self.no_match + self.ambiguous + self.unchanged,
-            self.errors.len(),
-        )
-    }
+    covers::import::plan(&lib, hits[0].0.id, image)
 }
 
 pub fn identify(
