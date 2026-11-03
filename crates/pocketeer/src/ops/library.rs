@@ -97,8 +97,12 @@ impl<P: ImportsRoms> Imported<P> {
             .collect();
         let staged = stage_if(ctx, mode, allowed, plan, progress)?;
         let added = staged.result.as_ref().map_or(0, |r| r.added);
-        let metadata =
-            metadata_after_import(ctx, &platforms, (added, covers), progress).unwrap_or_default();
+        // New games get identified, and their covers fetched when asked.
+        let metadata = if added > 0 {
+            refresh_metadata(ctx, Some(&platforms), covers, progress)
+        } else {
+            MetadataReport::default()
+        };
         Ok(Imported {
             staged,
             warnings: metadata.problems().cloned().collect(),
@@ -211,17 +215,6 @@ pub fn refresh_metadata(
         }
     }
     report
-}
-
-/// After an import that added games: identify them and fetch their covers.
-/// Nothing happens when the import added none.
-pub fn metadata_after_import(
-    ctx: &Context,
-    platforms: &[String],
-    (added, covers): (usize, bool),
-    progress: &mut dyn FnMut(Event),
-) -> Option<MetadataReport> {
-    (added > 0).then(|| refresh_metadata(ctx, Some(platforms), covers, progress))
 }
 
 /// Standard-name list for a platform (online only; `None` means no suggestions).
