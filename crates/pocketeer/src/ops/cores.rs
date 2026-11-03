@@ -3,9 +3,9 @@
 use std::path::PathBuf;
 
 use pocketeer_core::{
-    Error, Result,
+    Result,
     card::cores::{self, CoreInfo, CoreListReport, CoreView, SearchFilter},
-    card::install::{self, Installer, PlanOptions, Prepared, UninstallPlan},
+    card::install::{self, Installer, PlanOptions, Prepared, Targets, UninstallPlan},
     catalog::inventory::{Inventory, InventoryStatus},
     plan::Event,
 };
@@ -84,17 +84,8 @@ pub fn prepare(
 ) -> Result<Vec<(String, Result<Prepared>)>> {
     let pocket = ctx.pocket()?;
     let net = ctx.net()?;
-    let installer = Installer::new(&pocket, &net);
     let installed = cores::list_installed(&pocket)?;
-    let mut out = Vec::new();
-    for spec in specs {
-        progress(Event::Status(format!("Resolving {spec}")));
-        let result = install::resolve(inventory, spec).and_then(|(core, release)| {
-            installer.prepare_release(core, release, &installed, opts.clone(), progress)
-        });
-        out.push((spec.clone(), result));
-    }
-    Ok(out)
+    Ok(Installer::new(&pocket, &net).prepare_specs(inventory, &installed, specs, &opts, progress))
 }
 
 pub fn install(
@@ -125,52 +116,25 @@ pub fn install(
 
 pub fn update(
     ctx: &Context,
-    ids: &[String],
-    all: bool,
+    targets: &Targets,
     keep_platforms: bool,
     mode: Mode,
     progress: &mut dyn FnMut(Event),
 ) -> Result<InstallReport> {
     let pocket = ctx.pocket()?;
-    let inventory = ctx.inventory()?;
+    let net = ctx.net()?;
     let installed = cores::list_installed(&pocket)?;
-
-    // Which cores: explicit ids (must be installed), or everything outdated.
-    let mut prepared = Vec::new();
-    let targets: Vec<String> = if all {
-        installed
-            .cores
-            .iter()
-            .filter(|c| {
-                inventory
-                    .get(&c.id)
-                    .and_then(|e| e.latest())
-                    .is_some_and(|l| {
-                        pocketeer_core::catalog::inventory::update_available(
-                            &c.version,
-                            &l.core.metadata.version,
-                        )
-                    })
-            })
-            .map(|c| c.id.clone())
-            .collect()
-    } else {
-        let mut targets = Vec::new();
-        for id in ids {
-            match installed.get_ci(id) {
-                Some(c) => targets.push(c.id.clone()),
-                None => {
-                    prepared.push((id.clone(), Err(Error::CoreNotInstalled { id: id.clone() })))
-                }
-            }
-        }
-        targets
-    };
     let opts = PlanOptions {
         keep_platforms,
         ..Default::default()
     };
-    prepared.extend(prepare(ctx, &inventory, &targets, opts, progress)?);
+    let prepared = Installer::new(&pocket, &net).prepare_updates(
+        &ctx.inventory()?,
+        &installed,
+        targets,
+        &opts,
+        progress,
+    );
     Ok(Batch::stage(ctx, mode, prepared, progress))
 }
 

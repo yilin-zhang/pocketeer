@@ -11,7 +11,7 @@ use std::{io::IsTerminal, process::ExitCode};
 
 use clap::{CommandFactory, Parser};
 use pocketeer_core::{
-    card::roms::Depth,
+    card::{install::Targets, roms::Depth},
     plan::Event,
     transfer::saves::{Scope, TrashTarget},
 };
@@ -119,8 +119,11 @@ fn run_cores(
             apply,
         } => out.emit(cores::update(
             ctx,
-            &ids,
-            all,
+            &if all {
+                Targets::Outdated
+            } else {
+                Targets::Ids(ids)
+            },
             keep_platforms,
             apply.into(),
             progress,

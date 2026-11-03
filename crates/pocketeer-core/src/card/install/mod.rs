@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::{
     Error, Pocket, Result, card,
     card::cores::CoreList,
-    catalog::inventory::{Inventory, InventoryCore, Release},
+    catalog::inventory::{Inventory, InventoryCore, Release, update_available},
     net::Net,
     plan::{Checked, Event, Pinned, Plan, Progress, Resources},
 };
@@ -99,6 +99,15 @@ pub fn resolve<'a>(
     Ok((core, release))
 }
 
+/// Which installed cores an update is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Targets {
+    /// Every core with a newer release in the inventory.
+    Outdated,
+    /// These cores (they must be installed).
+    Ids(Vec<String>),
+}
+
 /// Plans installs on one card, downloading releases through `net`.
 pub struct Installer<'a> {
     pocket: &'a Pocket,
@@ -136,6 +145,66 @@ impl<'a> Installer<'a> {
             zip,
             pinned: Pinned::card(self.pocket)?,
         })
+    }
+
+    /// Resolves each of `specs` (`id` or `id@version`) against the inventory
+    /// and downloads what it needs. One entry per spec, failures included.
+    pub fn prepare_specs(
+        &self,
+        inventory: &Inventory,
+        installed: &CoreList,
+        specs: &[String],
+        opts: &PlanOptions,
+        progress: Progress<'_>,
+    ) -> Vec<(String, Result<Prepared>)> {
+        specs
+            .iter()
+            .map(|spec| {
+                progress(Event::Status(format!("Resolving {spec}")));
+                let prepared = resolve(inventory, spec).and_then(|(core, release)| {
+                    self.prepare_release(core, release, installed, opts.clone(), progress)
+                });
+                (spec.clone(), prepared)
+            })
+            .collect()
+    }
+
+    /// Prepares the latest release of each installed core `targets` names.
+    /// A named core that isn't installed is an entry with its error.
+    pub fn prepare_updates(
+        &self,
+        inventory: &Inventory,
+        installed: &CoreList,
+        targets: &Targets,
+        opts: &PlanOptions,
+        progress: Progress<'_>,
+    ) -> Vec<(String, Result<Prepared>)> {
+        let mut out = Vec::new();
+        let ids: Vec<String> = match targets {
+            Targets::Outdated => installed
+                .cores
+                .iter()
+                .filter(|c| {
+                    inventory
+                        .get(&c.id)
+                        .and_then(|e| e.latest())
+                        .is_some_and(|l| update_available(&c.version, &l.core.metadata.version))
+                })
+                .map(|c| c.id.clone())
+                .collect(),
+            Targets::Ids(ids) => ids
+                .iter()
+                .filter_map(|id| match installed.get_ci(id) {
+                    Some(c) => Some(c.id.clone()),
+                    None => {
+                        out.push((id.clone(), Err(Error::CoreNotInstalled { id: id.clone() })));
+                        None
+                    }
+                })
+                .collect(),
+        };
+        out.extend(self.prepare_specs(inventory, installed, &ids, opts, progress));
+        out
     }
 
     /// Plans an install from a zip on disk.
