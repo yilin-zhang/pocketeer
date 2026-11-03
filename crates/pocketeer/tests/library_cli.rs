@@ -225,3 +225,30 @@ fn rename_and_remove_without_a_card() {
     assert_eq!(code, 1);
     assert_eq!(v["error"]["code"], "ROM_NOT_FOUND");
 }
+
+/// A next step that names a flag is said after the report, for people only:
+/// the JSON carries the facts it rests on, never the sentence.
+#[test]
+fn flag_hints_follow_the_text_and_stay_out_of_json() {
+    let env = Harness::new();
+    env.write_src("mystery.xyz", "what is this");
+    assert_eq!(env.json(&["library", "init"]).1, 0);
+    let src = env.src.to_str().unwrap();
+
+    let out = env.raw(&["library", "import", src, "--dry-run"]);
+    let text = String::from_utf8(out.stdout).unwrap();
+    let (report, hint) = text
+        .split_once("\n\n")
+        .expect("a hint block after the report");
+    assert!(report.contains("Left out, type unknown (1):"), "{text}");
+    assert!(!report.contains("--platform"), "{text}");
+    assert_eq!(
+        hint.trim(),
+        "Give the files of unknown type a platform with --platform <id>."
+    );
+
+    let (v, code) = env.json(&["library", "import", src, "--dry-run"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["data"]["unknown"].as_array().unwrap().len(), 1);
+    assert!(!v.to_string().contains("--platform"), "{v}");
+}
