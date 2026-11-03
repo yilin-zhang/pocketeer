@@ -1,6 +1,10 @@
 //! Terminal UI. One worker thread runs core operations; the UI thread draws
 //! and handles keys. They talk over channels (`worker.rs`); what the worker
 //! plans and applies on request is `pending.rs`.
+//!
+//! Plans are made through `ops`, like the CLI's, so both front ends plan
+//! the same thing the same way; reading what the screens show (the card and
+//! library snapshot) may go to the core directly.
 
 mod app;
 mod pending;

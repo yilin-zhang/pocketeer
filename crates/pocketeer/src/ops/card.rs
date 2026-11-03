@@ -9,7 +9,7 @@ use pocketeer_core::{
         Status,
         bios::{self, BiosReport, PlacePlan},
         clean::{self, CleanPlan},
-        roms::{CardRom, Depth, Index},
+        roms::{self, CardRom, Depth, Index},
     },
     catalog::inventory::{Inventory, Platforms},
     net::{Policy, Source},
@@ -80,6 +80,11 @@ pub fn plan_place(ctx: &Context) -> Result<PlacePlan> {
     let installed = pocketeer_core::card::cores::list_installed(&pocket)?;
     let report = bios::check(&pocket, &installed, None)?;
     bios::plan_place(&pocket, &report)
+}
+
+/// Plans deleting a ROM only the card has.
+pub fn plan_delete(ctx: &Context, path: &Path) -> Result<roms::DeletePlan> {
+    roms::plan_delete(&ctx.pocket()?, path)
 }
 
 /// Plans removing macOS junk; `system` takes the volume's system folders too.

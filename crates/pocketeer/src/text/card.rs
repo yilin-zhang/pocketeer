@@ -64,6 +64,23 @@ impl Text for Status {
     }
 }
 
+impl Label for FileStatus {
+    fn label(&self) -> &'static str {
+        match self {
+            FileStatus::Present => "present",
+            FileStatus::Missing => "missing",
+            FileStatus::WrongHash { .. } => "wrong md5",
+            FileStatus::Unreadable { .. } => "unreadable",
+            FileStatus::AtRoot {
+                found: RootFile::File { .. },
+            } => "at card root",
+            FileStatus::AtRoot {
+                found: RootFile::Zip { .. },
+            } => "zipped at root",
+        }
+    }
+}
+
 /// What limits what is known of a core's files.
 pub fn note(n: &Note) -> String {
     match n {
@@ -85,10 +102,13 @@ impl Text for BiosReport {
                 let req = if f.required { "required" } else { "optional" };
                 let line = match &f.status {
                     FileStatus::Present => format!("  ✓ {}", f.path.display()),
-                    FileStatus::Missing => format!("  ✗ {}  ({req}, missing)", f.path.display()),
+                    FileStatus::Missing => {
+                        format!("  ✗ {}  ({req}, {})", f.path.display(), f.status.label())
+                    }
                     FileStatus::WrongHash { actual_md5 } => format!(
-                        "  ! {}  (wrong md5 {}, expected {})",
+                        "  ! {}  ({} {}, expected {})",
                         f.path.display(),
+                        f.status.label(),
                         &actual_md5[..8.min(actual_md5.len())],
                         f.expected_md5
                             .as_deref()
@@ -96,13 +116,19 @@ impl Text for BiosReport {
                             .unwrap_or("?")
                     ),
                     FileStatus::Unreadable { error } => {
-                        format!("  ! {}  (unreadable: {})", f.path.display(), error.message)
+                        format!(
+                            "  ! {}  ({}: {})",
+                            f.path.display(),
+                            f.status.label(),
+                            error.message
+                        )
                     }
                     FileStatus::AtRoot {
                         found: RootFile::File { path: root_file },
                     } => format!(
-                        "  ↑ {}  ({req}, found at root: {} → `pocketeer bios place`)",
+                        "  ↑ {}  ({req}, {}: {})",
                         f.path.display(),
+                        f.status.label(),
                         root_file.display()
                     ),
                     FileStatus::AtRoot {

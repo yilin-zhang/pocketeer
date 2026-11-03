@@ -3,6 +3,7 @@
 //! and Card (status, junk and the recent log).
 
 use super::*;
+use crate::text::Label;
 
 pub(super) fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
     if !card_tab(frame, app, area) {
@@ -163,16 +164,18 @@ pub(super) fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn status_cell(f: &FileStatus) -> (String, Style) {
     match f {
-        FileStatus::Present => ("present".into(), Palette::Good.style()),
-        FileStatus::Missing => ("missing".into(), Palette::Bad.style()),
-        FileStatus::WrongHash { .. } => ("wrong md5".into(), Palette::Warn.style()),
-        FileStatus::Unreadable { .. } => ("unreadable".into(), Palette::Warn.style()),
+        FileStatus::Present => (f.label().into(), Palette::Good.style()),
+        FileStatus::Missing => (f.label().into(), Palette::Bad.style()),
+        FileStatus::WrongHash { .. } | FileStatus::Unreadable { .. } => {
+            (f.label().into(), Palette::Warn.style())
+        }
+        // `p` places it; a key is listed where it acts.
         FileStatus::AtRoot {
             found: RootFile::File { .. },
-        } => ("at card root → p".into(), Palette::Ink.style()),
+        } => (format!("{} → p", f.label()), Palette::Ink.style()),
         FileStatus::AtRoot {
             found: RootFile::Zip { .. },
-        } => ("zipped at root".into(), Palette::Ink.style()),
+        } => (f.label().into(), Palette::Ink.style()),
     }
 }
 

@@ -251,6 +251,11 @@ pub fn plan_import_cover(
     covers::import::plan(&lib, hits[0].0.id, image)
 }
 
+/// Plans copying a local image in as the cover of game `game_id`.
+pub fn plan_cover(ctx: &Context, game_id: i64, image: &Path) -> Result<CoverImportPlan> {
+    covers::import::plan(&ctx.library()?, game_id, image)
+}
+
 pub fn identify(
     ctx: &Context,
     platforms: Option<&[String]>,

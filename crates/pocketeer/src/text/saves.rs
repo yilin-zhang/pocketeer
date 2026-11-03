@@ -11,28 +11,32 @@ use pocketeer_core::{
     },
 };
 
-use super::{Text, bytes, failure_lines, plan_lines, table, time_ago};
+use super::{Label, Text, bytes, failure_lines, plan_lines, table, time_ago};
 use crate::ops::saves::{ListReport, VersionsReport};
 
-fn pull_reason(reason: PullReason) -> &'static str {
-    match reason {
-        PullReason::OnlyOnCard => "new on AP",
-        PullReason::CardNewer => "AP is newer",
-        PullReason::UserChoice => "explicit choice",
+impl Label for PullReason {
+    fn label(&self) -> &'static str {
+        match self {
+            PullReason::OnlyOnCard => "new on AP",
+            PullReason::CardNewer => "AP is newer",
+            PullReason::UserChoice => "explicit choice",
+        }
     }
 }
 
-fn conflict_reason(reason: ConflictReason) -> &'static str {
-    match reason {
-        ConflictReason::ComputerNewer => "computer is newer",
-        ConflictReason::DifferentContent => "similar timestamps, different bytes",
+impl Label for ConflictReason {
+    fn label(&self) -> &'static str {
+        match self {
+            ConflictReason::ComputerNewer => "computer is newer",
+            ConflictReason::DifferentContent => "similar timestamps, different bytes",
+        }
     }
 }
 
 /// One line of a backup plan; `shown` is how the save is named.
 fn action_line(action: &SaveAction, shown: &str) -> Option<String> {
     Some(match action {
-        SaveAction::Pull { reason, .. } => format!("← backup {shown} ({})", pull_reason(*reason)),
+        SaveAction::Pull { reason, .. } => format!("← backup {shown} ({})", reason.label()),
         SaveAction::Push { source, .. } => {
             format!("→ restore AP {shown} from {}", source.display())
         }
@@ -43,7 +47,7 @@ fn action_line(action: &SaveAction, shown: &str) -> Option<String> {
             ..
         } => format!(
             "? {shown}: {}; AP {}, computer {} — unchanged until chosen",
-            conflict_reason(*reason),
+            reason.label(),
             time_ago(card.mtime),
             time_ago(computer.mtime)
         ),

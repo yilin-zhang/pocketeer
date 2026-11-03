@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 use pocketeer_core::{
     Error, Result,
-    card::roms::{Depth, Identity},
+    card::{
+        bios::{FileStatus, RootFile},
+        roms::{Depth, Identity},
+    },
     plan::Progress,
 };
 
@@ -105,7 +108,19 @@ pub fn clean(ctx: &Context, system: bool, mode: Mode, progress: Progress<'_>) ->
 pub fn bios(ctx: &Context, cmd: BiosCommand, progress: Progress<'_>) -> Result<Outcome> {
     match cmd {
         BiosCommand::Check { ids, present } => {
-            Ok(Outcome::report(&ops::bios_check(ctx, &ids, present)?))
+            let report = ops::bios_check(ctx, &ids, present)?;
+            let at_root = report.all_files().any(|f| {
+                matches!(
+                    f.status,
+                    FileStatus::AtRoot {
+                        found: RootFile::File { .. }
+                    }
+                )
+            });
+            Ok(Outcome::report(&report).hint(
+                at_root,
+                "Move the files found at the card root into place with `pocketeer bios place`.",
+            ))
         }
         BiosCommand::Place { apply } => {
             Ok(stage(ctx, apply.into(), ops::plan_place(ctx)?, progress)?.outcome())

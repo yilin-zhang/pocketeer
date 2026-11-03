@@ -244,7 +244,7 @@ pub fn restore(cx: &mut Cx, line: &SaveLine, games: SaveGames) {
     }
     let rel = line.rel().to_path_buf();
     cx.session.plan("Planning restore", move |ctx, _| {
-        let plan = saves::plan_restore(&ctx.library()?, &ctx.pocket()?, &rel, version)?;
+        let plan = saves_cmd::plan_restore(ctx, &rel, version)?;
         Ok(pending::preview(SaveSync { plan, games }))
     });
 }

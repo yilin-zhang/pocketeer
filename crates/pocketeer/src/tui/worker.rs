@@ -208,18 +208,18 @@ pub enum Msg {
     Planned(Result<Preview>),
     Progress(Event),
     /// A main-worker job finished.
-    Applied(Outcome),
+    Applied(Finished),
     /// Progress of the side worker (covers); doesn't block anything.
     SideProgress(Event),
     Fingerprint(u64),
     LibraryRefreshed(Result<Box<LibraryView>>),
     Saves(Result<Box<SavesView>>),
     /// A side-worker job finished.
-    SideDone(Outcome),
+    SideDone(Finished),
 }
 
 /// What a finished job has to say.
-pub struct Outcome {
+pub struct Finished {
     /// For the log; the last line is what the status bar shows.
     pub lines: Vec<String>,
     /// Items that failed; non-zero opens a dialog with `lines`.
@@ -296,7 +296,7 @@ fn run(ctx: &Context, job: Job, progress: &mut dyn FnMut(Event)) -> Msg {
     match job {
         Job::Identify => {
             let report = library_cmd::refresh_metadata(ctx, None, true, progress);
-            Msg::Applied(Outcome {
+            Msg::Applied(Finished {
                 lines: text_lines(&checked(&report)),
                 // Background work: problems go to the log, not a dialog.
                 failed: 0,
@@ -369,7 +369,7 @@ fn saves_view(ctx: &Context, copies: &BTreeMap<i64, Vec<PathBuf>>) -> Result<Sav
 /// A job that changed the card or the library (or tried to): its text,
 /// and how many items failed.
 pub(super) fn applied(text: String, failed: usize) -> Msg {
-    Msg::Applied(Outcome {
+    Msg::Applied(Finished {
         lines: text_lines(&text),
         failed,
         changed: true,
@@ -405,7 +405,7 @@ fn fetch_covers(
             text.push_str(&hint);
         }
     }
-    Msg::Applied(Outcome {
+    Msg::Applied(Finished {
         lines: text_lines(&text),
         failed: 0,
         changed,

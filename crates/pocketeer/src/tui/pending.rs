@@ -32,7 +32,7 @@ use pocketeer_core::{
 use super::worker::{Msg, applied, failed};
 use crate::{
     ops::{Batch, context::Context},
-    text::{self, Text},
+    text::{self, Label, Text},
 };
 
 /// Planning work for the worker: the plan, and the dialog it opens.
@@ -338,12 +338,12 @@ impl SaveSync {
         for a in self.plan.actions() {
             let what = match a {
                 SaveAction::Pull {
-                    reason: PullReason::OnlyOnCard,
+                    reason: reason @ (PullReason::OnlyOnCard | PullReason::CardNewer),
                     ..
-                } => "← back up, new on AP",
-                SaveAction::Pull { .. } => "← back up, AP is newer",
-                SaveAction::Push { .. } => "→ put back on AP",
-                SaveAction::Conflict { .. } => "? changed on both sides, left as is",
+                } => format!("← back up, {}", reason.label()),
+                SaveAction::Pull { .. } => "← back up".into(),
+                SaveAction::Push { .. } => "→ put back on AP".into(),
+                SaveAction::Conflict { .. } => "? changed on both sides, left as is".into(),
                 SaveAction::Skip { .. } => continue,
             };
             let rel = a.path();

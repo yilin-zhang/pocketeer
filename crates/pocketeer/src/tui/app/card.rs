@@ -4,9 +4,9 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use pocketeer_core::card::{
-    bios, clean,
+    bios,
     cores::{self, CoreView, SearchFilter},
-    install::{self, PlanOptions},
+    install::PlanOptions,
 };
 
 use super::{
@@ -15,7 +15,7 @@ use super::{
     session::Session,
 };
 use crate::{
-    ops::{Batch, cores as cores_cmd},
+    ops::{Batch, card as card_cmd, cores as cores_cmd},
     tui::{
         pending::{self, Preview},
         worker::CardSnapshot,
@@ -162,17 +162,12 @@ impl Cores {
             return;
         }
         let id = row.id.clone();
-        let installed = cx
-            .session
-            .card()
-            .map(CardSnapshot::installed)
-            .unwrap_or_default();
         cx.session.plan("Planning removal", move |ctx, _| {
-            let plan = install::plan_remove(&ctx.pocket()?, &installed, &id, false)?;
-            if plan.actions.is_empty() {
+            let batch = cores_cmd::plan_remove(ctx, std::slice::from_ref(&id), false)?;
+            if batch.changes() == 0 {
                 return Ok(Preview::Notice(format!("{id} has no folders on the card.")));
             }
-            Ok(pending::preview(Batch::plan([(id, Ok(plan))])))
+            Ok(pending::preview(batch))
         });
     }
 }
@@ -302,11 +297,8 @@ fn place(cx: &mut Cx) {
     if cx.session.require_card().is_none() {
         return;
     }
-    let Some(report) = cx.session.card().map(|s| s.bios.clone()) else {
-        return;
-    };
     cx.session.plan("Planning", move |ctx, _| {
-        Ok(pending::preview(bios::plan_place(&ctx.pocket()?, &report)?))
+        Ok(pending::preview(card_cmd::plan_place(ctx)?))
     });
 }
 
@@ -317,7 +309,7 @@ fn place(cx: &mut Cx) {
 pub fn card_key(key: KeyEvent, cx: &mut Cx) {
     if key.code == KeyCode::Char('x') && cx.session.require_card().is_some() {
         cx.session.plan("Scanning for junk", |ctx, _| {
-            Ok(pending::preview(clean::plan(&ctx.pocket()?, false)?))
+            Ok(pending::preview(card_cmd::plan_clean(ctx, false)?))
         });
     }
 }

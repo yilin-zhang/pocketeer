@@ -5,13 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent};
-use pocketeer_core::{
-    card::roms::{self, CardRom},
-    catalog,
-    library::{Library, covers},
-    names,
-    transfer::Presence,
-};
+use pocketeer_core::{card::roms::CardRom, catalog, names, transfer::Presence};
 use ratatui::layout::Size;
 use ratatui_image::picker::Picker;
 
@@ -423,10 +417,7 @@ impl Games {
     fn remove(&self, cx: &mut Cx) {
         if let Some(o) = self.selected_card_rom(cx.session).cloned() {
             cx.session.plan("Planning", move |ctx, _| {
-                Ok(pending::preview(roms::plan_delete(
-                    &ctx.pocket()?,
-                    &o.rel_path,
-                )?))
+                Ok(pending::preview(card_cmd::plan_delete(ctx, &o.rel_path)?))
             });
             return;
         }
@@ -504,15 +495,10 @@ fn init_library(cx: &mut Cx) {
         cx.session.notice("There already is a library here.");
         return;
     }
-    let Ok(path) = cx.session.ctx().library_path() else {
-        cx.session
-            .notice("Can't determine a home directory for the library.");
-        return;
-    };
-    match Library::init(&path) {
-        Ok(_) => {
+    match library_ops::init(&cx.session.ctx()) {
+        Ok(created) => {
             cx.session
-                .notice(format!("✓ created library at {}", path.display()));
+                .notice(format!("✓ created library at {}", created.root.display()));
             cx.session.reload();
         }
         Err(e) => cx.dialog.error("Can't create the library", &e),
@@ -539,8 +525,9 @@ pub fn answer(cx: &mut Cx, step: CoverStep, answer: Answer) {
         CoverStep::Image { game_id } => {
             let source = PathBuf::from(expand_home(value));
             cx.session.plan("Checking cover image", move |ctx, _| {
-                let plan = covers::import::plan(&ctx.library()?, game_id, &source)?;
-                Ok(pending::preview(plan))
+                Ok(pending::preview(library_ops::plan_cover(
+                    ctx, game_id, &source,
+                )?))
             })
         }
         CoverStep::System { platform } => cx
