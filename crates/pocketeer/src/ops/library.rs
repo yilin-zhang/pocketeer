@@ -243,11 +243,11 @@ pub fn suggest_standard_names(
     let mut suggested = 0;
     for platform in platforms {
         if let Some(names) = names_for(ctx, &platform) {
-            suggested += import::suggest_names(plan, &platform, &names);
+            suggested += plan.suggest_names(&platform, &names);
         }
     }
     if suggested > 0 && take {
-        import::apply_suggestions(lib, plan, |_, _| true)?;
+        plan.take_suggestions(lib, |_, _| true)?;
     }
     Ok(())
 }

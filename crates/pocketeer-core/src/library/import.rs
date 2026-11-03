@@ -158,6 +158,78 @@ impl ImportPlan {
         self.actions.iter().map(ImportAction::platform).collect()
     }
 
+    /// Fills `suggested` on every unverified add whose name matches a standard
+    /// name in `standard` (see [`crate::catalog::libretro::suggest`]). Returns how many.
+    /// Only `platform`'s files: the names are per platform.
+    pub fn suggest_names(&mut self, platform: &str, standard: &[String]) -> usize {
+        let mut n = 0;
+        for a in &mut self.actions {
+            if let ImportAction::Add {
+                platform: p,
+                rom,
+                verified: false,
+                suggested,
+                ..
+            } = a
+                && p == platform
+                && let Some(s) = crate::catalog::libretro::suggest(rom, standard)
+            {
+                *suggested = Some(format!("{s}{}", crate::fsutil::names::extension(rom)));
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Renames planned adds to their suggestion where `accept(platform, current name)`
+    /// says so: ROM name, game name and managed destination move together. A
+    /// suggestion that would collide with another planned or library name is left
+    /// alone.
+    pub fn take_suggestions(
+        &mut self,
+        lib: &Library,
+        accept: impl Fn(&str, &str) -> bool,
+    ) -> Result<usize> {
+        let planned: Vec<(String, String)> = self
+            .actions
+            .iter()
+            .filter_map(|a| match a {
+                ImportAction::Add { platform, rom, .. } => Some((platform.clone(), rom.clone())),
+                _ => None,
+            })
+            .collect();
+        let mut n = 0;
+        for a in &mut self.actions {
+            let ImportAction::Add {
+                platform,
+                rom,
+                game,
+                dest,
+                suggested: Some(new),
+                ..
+            } = a
+            else {
+                continue;
+            };
+            if !accept(platform, rom) || planned.contains(&(platform.clone(), new.clone())) {
+                continue;
+            }
+            if db::find_rom_by_name(lib.conn(), platform, new)?.is_some() {
+                continue;
+            }
+            *game = fallback_game_name(new);
+            *dest = Library::rom_rel_path(platform, new);
+            *rom = new.clone();
+            n += 1;
+        }
+        for a in &mut self.actions {
+            if let ImportAction::Add { suggested, .. } = a {
+                *suggested = None;
+            }
+        }
+        Ok(n)
+    }
+
     /// Every (platform, current name, suggested standard name) among the
     /// planned adds.
     pub fn suggestions(&self) -> impl Iterator<Item = (&str, &str, &str)> {
@@ -348,78 +420,6 @@ pub fn plan_import(
     }
     cache.save_best_effort();
     Ok(plan)
-}
-
-/// Fills `suggested` on every unverified add whose name matches a standard
-/// name in `standard` (see [`crate::catalog::libretro::suggest`]). Returns how many.
-/// Only `platform`'s files: the names are per platform.
-pub fn suggest_names(plan: &mut ImportPlan, platform: &str, standard: &[String]) -> usize {
-    let mut n = 0;
-    for a in &mut plan.actions {
-        if let ImportAction::Add {
-            platform: p,
-            rom,
-            verified: false,
-            suggested,
-            ..
-        } = a
-            && p == platform
-            && let Some(s) = crate::catalog::libretro::suggest(rom, standard)
-        {
-            *suggested = Some(format!("{s}{}", crate::fsutil::names::extension(rom)));
-            n += 1;
-        }
-    }
-    n
-}
-
-/// Renames planned adds to their suggestion where `accept(platform, current name)`
-/// says so: ROM name, game name and managed destination move together. A
-/// suggestion that would collide with another planned or library name is left
-/// alone.
-pub fn apply_suggestions(
-    lib: &Library,
-    plan: &mut ImportPlan,
-    accept: impl Fn(&str, &str) -> bool,
-) -> Result<usize> {
-    let planned: Vec<(String, String)> = plan
-        .actions
-        .iter()
-        .filter_map(|a| match a {
-            ImportAction::Add { platform, rom, .. } => Some((platform.clone(), rom.clone())),
-            _ => None,
-        })
-        .collect();
-    let mut n = 0;
-    for a in &mut plan.actions {
-        let ImportAction::Add {
-            platform,
-            rom,
-            game,
-            dest,
-            suggested: Some(new),
-            ..
-        } = a
-        else {
-            continue;
-        };
-        if !accept(platform, rom) || planned.contains(&(platform.clone(), new.clone())) {
-            continue;
-        }
-        if db::find_rom_by_name(lib.conn(), platform, new)?.is_some() {
-            continue;
-        }
-        *game = fallback_game_name(new);
-        *dest = Library::rom_rel_path(platform, new);
-        *rom = new.clone();
-        n += 1;
-    }
-    for a in &mut plan.actions {
-        if let ImportAction::Add { suggested, .. } = a {
-            *suggested = None;
-        }
-    }
-    Ok(n)
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]

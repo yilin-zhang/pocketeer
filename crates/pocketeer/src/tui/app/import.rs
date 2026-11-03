@@ -4,8 +4,6 @@
 
 use std::{collections::HashSet, path::PathBuf};
 
-use pocketeer_core::library::import::apply_suggestions;
-
 use super::{
     Cx,
     dialog::{Answer, Step as DialogStep},
@@ -100,7 +98,7 @@ pub fn answer(cx: &mut Cx, step: Step, answer: Answer) {
             let mut import = import;
             cx.session.plan("Applying standard names", move |ctx, _| {
                 let lib = ctx.library()?;
-                apply_suggestions(&lib, import.plan_mut(), |platform, name| {
+                import.plan_mut().take_suggestions(&lib, |platform, name| {
                     accepted.contains(&(platform.to_string(), name.to_string()))
                 })?;
                 Ok(pending::preview(*import))
