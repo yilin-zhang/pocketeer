@@ -1,0 +1,19 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"cores\", \"search\", \"gba\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "hits": [],
+      "inventory": {
+        "age_secs": 0,
+        "source": "cache",
+        "status": "loaded"
+      }
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

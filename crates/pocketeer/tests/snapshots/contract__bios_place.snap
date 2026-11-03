@@ -1,0 +1,24 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"bios\", \"place\", \"--dry-run\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "actions": [],
+      "mode": "dry_run",
+      "summary": {
+        "bytes": 0,
+        "install": 0,
+        "move_tree": 0,
+        "overwrite": 0,
+        "remove": 0,
+        "skip": 0
+      },
+      "zipped": []
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

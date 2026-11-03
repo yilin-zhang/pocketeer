@@ -1,0 +1,26 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"memories\", \"trash\", sta, \"--dry-run\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "files": [
+        {
+          "archive_first": false,
+          "path": "saves/Memories/Save States/cart_1.sta",
+          "save": "Memories/Save States/cart_1.sta",
+          "size": 600
+        }
+      ],
+      "mode": "dry_run",
+      "target": {
+        "copy": "library"
+      },
+      "trash": ".trash/[stamp]"
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

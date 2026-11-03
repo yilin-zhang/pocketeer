@@ -1,0 +1,29 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"clean\", \"--dry-run\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "bytes": 8,
+      "entries": [
+        {
+          "bytes": 4,
+          "kind": "ds_store",
+          "path": "Cores/.DS_Store"
+        },
+        {
+          "bytes": 4,
+          "kind": "apple_double",
+          "path": "Cores/._agg23.Arduboy"
+        }
+      ],
+      "include_system": false,
+      "mode": "dry_run",
+      "system_dirs_present": []
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

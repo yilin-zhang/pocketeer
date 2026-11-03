@@ -1,0 +1,45 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"covers\", \"import\", \"Hello World (USA).fkh\", &cover, \"--dry-run\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "bytes": 73,
+      "destination": "covers/imported/1/9921db1fd69509a42dd0d64b1ddd81784a4c6450.png",
+      "game": {
+        "id": 1,
+        "name": "Hello World (USA)",
+        "platform": "fkh",
+        "roms": [
+          {
+            "crc32": "0d4a1185",
+            "dat": {
+              "checked_at": null,
+              "error": null,
+              "game_name": "Hello World (USA)",
+              "revision": null,
+              "rom_name": "Hello World (USA).fkh",
+              "source": "manual",
+              "status": "matched"
+            },
+            "game_id": 1,
+            "id": 1,
+            "name": "Hello World (USA).fkh",
+            "rel_path": "roms/fkh/Hello World (USA).fkh",
+            "sha1": "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed",
+            "size": 11
+          }
+        ]
+      },
+      "height": 2,
+      "mode": "dry_run",
+      "previous": null,
+      "source": "/Users/yilinzhang/Documents/coding/pocketeer/crates/pocketeer/../../tests/fixtures/covers/3x2.png",
+      "width": 3
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

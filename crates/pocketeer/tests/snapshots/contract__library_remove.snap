@@ -1,0 +1,28 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"library\", \"remove\", \"Hello World (USA).fkh\", \"--dry-run\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "bytes": 11,
+      "items": [
+        {
+          "file": "roms/fkh/Hello World (USA).fkh",
+          "game": "Hello World (USA)",
+          "game_id": 1,
+          "last_of_game": true,
+          "name": "Hello World (USA).fkh",
+          "platform": "fkh",
+          "rom_id": 1,
+          "size": 11
+        }
+      ],
+      "mode": "dry_run",
+      "trash": ".trash/[stamp]"
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

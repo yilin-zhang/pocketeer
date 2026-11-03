@@ -1,0 +1,42 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"cores\", \"remove\", \"agg23.Arduboy\", \"--dry-run\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "items": [
+        {
+          "plan": {
+            "actions": [
+              {
+                "action": "remove",
+                "path": "Cores/agg23.Arduboy",
+                "reason": {
+                  "kind": "uninstall"
+                }
+              }
+            ],
+            "core_id": "agg23.Arduboy",
+            "installed_version": "0.9.0",
+            "purge": false,
+            "summary": {
+              "bytes": 0,
+              "install": 0,
+              "move_tree": 0,
+              "overwrite": 0,
+              "remove": 1,
+              "skip": 0
+            }
+          },
+          "state": "planned",
+          "target": "agg23.Arduboy"
+        }
+      ],
+      "mode": "dry_run"
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

@@ -1,0 +1,25 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"memories\", \"list\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "card": true,
+      "memories": [
+        {
+          "companions": [],
+          "made_with": "cartridge",
+          "mtime": 0,
+          "place": "backed_up",
+          "rel_path": "Memories/Save States/cart_1.sta",
+          "size": 600,
+          "title": "KIRB"
+        }
+      ]
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

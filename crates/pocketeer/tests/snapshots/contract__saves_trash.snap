@@ -1,0 +1,26 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"saves\", \"trash\", sav, \"--dry-run\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "files": [
+        {
+          "archive_first": false,
+          "path": "saves/Saves/fkh/common/Hello World (USA).sav",
+          "save": "Saves/fkh/common/Hello World (USA).sav",
+          "size": 7
+        }
+      ],
+      "mode": "dry_run",
+      "target": {
+        "copy": "library"
+      },
+      "trash": ".trash/[stamp]"
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

@@ -1,0 +1,25 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"library\", \"rename\", \"Hello World (USA).fkh\", \"Hello\", \"--dry-run\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "game": "Hello World (USA)",
+      "game_id": 1,
+      "library_file": {
+        "from": "roms/fkh/Hello World (USA).fkh",
+        "to": "roms/fkh/Hello.fkh"
+      },
+      "mode": "dry_run",
+      "name": "Hello World (USA).fkh",
+      "new_game_name": "Hello",
+      "new_name": "Hello.fkh",
+      "platform": "fkh",
+      "rom_id": 1
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

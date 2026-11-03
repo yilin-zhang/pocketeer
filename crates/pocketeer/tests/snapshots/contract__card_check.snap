@@ -1,0 +1,66 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"card\", \"check\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "comparison": {
+        "card": [
+          "both",
+          "card"
+        ],
+        "local": {
+          "1": {
+            "copies": [
+              {
+                "identity": {
+                  "identity": "sampled",
+                  "sha1": "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed"
+                },
+                "name": "Hello World (USA).fkh",
+                "name_mismatch": false,
+                "path": "Assets/fkh/common/Hello World (USA).fkh"
+              }
+            ],
+            "name": "Hello World (USA).fkh",
+            "platform": "fkh",
+            "presence": "both",
+            "rom_id": 1
+          },
+          "2": {
+            "copies": [],
+            "name": "Unknown.xyz",
+            "platform": "fkh",
+            "presence": "local",
+            "rom_id": 2
+          }
+        }
+      },
+      "roms": [
+        {
+          "identity": "sampled",
+          "name": "Hello World (USA).fkh",
+          "owner": "common",
+          "path": "Assets/fkh/common/Hello World (USA).fkh",
+          "platform": "fkh",
+          "sha1": "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed",
+          "size": 11
+        },
+        {
+          "identity": "full",
+          "name": "Card Only.gb",
+          "owner": "common",
+          "path": "Assets/gb/common/Card Only.gb",
+          "platform": "gb",
+          "sha1": "2e70b45373d062b2dec874e6504248fcc7ee7e50",
+          "size": 9
+        }
+      ],
+      "warnings": []
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

@@ -1,0 +1,67 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"library\", \"list\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "bytes": 23,
+      "games": [
+        {
+          "id": 1,
+          "name": "Hello World (USA)",
+          "platform": "fkh",
+          "roms": [
+            {
+              "crc32": "0d4a1185",
+              "dat": {
+                "checked_at": null,
+                "error": null,
+                "game_name": "Hello World (USA)",
+                "revision": null,
+                "rom_name": "Hello World (USA).fkh",
+                "source": "manual",
+                "status": "matched"
+              },
+              "game_id": 1,
+              "id": 1,
+              "name": "Hello World (USA).fkh",
+              "rel_path": "roms/fkh/Hello World (USA).fkh",
+              "sha1": "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed",
+              "size": 11
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "name": "Unknown",
+          "platform": "fkh",
+          "roms": [
+            {
+              "crc32": "26ff42ce",
+              "dat": {
+                "checked_at": 0,
+                "error": null,
+                "game_name": null,
+                "revision": null,
+                "rom_name": null,
+                "source": null,
+                "status": "unsupported"
+              },
+              "game_id": 2,
+              "id": 2,
+              "name": "Unknown.xyz",
+              "rel_path": "roms/fkh/Unknown.xyz",
+              "sha1": "7eb505e753b2ed2fd0469528ac7353defe38533c",
+              "size": 12
+            }
+          ]
+        }
+      ],
+      "roms": 2
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

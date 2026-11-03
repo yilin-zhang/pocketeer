@@ -1,0 +1,36 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"cores\", \"update\", \"--all\", \"--dry-run\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "items": [
+        {
+          "error": {
+            "code": "OFFLINE_NO_CACHE",
+            "details": {
+              "what": "download of https://github.com/spiritualized1997/openFPGA-GBA/releases/download/v1.3.0/spiritualized.GBA_1.3.0.zip"
+            },
+            "hint": "Run once without --offline to populate the cache",
+            "message": "download of https://github.com/spiritualized1997/openFPGA-GBA/releases/download/v1.3.0/spiritualized.GBA_1.3.0.zip is not available offline and nothing is cached"
+          },
+          "state": "unplanned",
+          "target": "spiritualized.GBA"
+        }
+      ],
+      "mode": "dry_run"
+    },
+    "error": {
+      "code": "SOME_FAILED",
+      "details": {
+        "failed": 1,
+        "total": 1
+      },
+      "message": "1 of 1 operation(s) failed"
+    },
+    "ok": false,
+    "schema_version": 1
+  },
+  "exit": 1
+}

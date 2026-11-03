@@ -1,0 +1,29 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"library\", \"status\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "bytes": 23,
+      "games": 2,
+      "platforms": [
+        {
+          "bytes": 23,
+          "covers": 0,
+          "covers_mapped": false,
+          "covers_not_found": 0,
+          "games": 2,
+          "platform": "fkh",
+          "roms": 2,
+          "verified": 1
+        }
+      ],
+      "roms": 2,
+      "root": "[tmp]/lib"
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

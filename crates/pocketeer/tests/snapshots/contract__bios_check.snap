@@ -1,0 +1,49 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"bios\", \"check\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "cores": [
+        {
+          "core_id": "agg23.Arduboy",
+          "files": [
+            {
+              "core_id": "agg23.Arduboy",
+              "path": "Assets/arduboy/common/games/game1.hex",
+              "required": true,
+              "slot": "HEX",
+              "status": "missing"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "core_id": "spiritualized.GBA",
+          "files": [
+            {
+              "core_id": "spiritualized.GBA",
+              "expected_md5": "600fe3d2f68c966cbcd93cdd96390822",
+              "path": "Assets/gba/common/gba_bios.bin",
+              "required": true,
+              "slot": "BIOS",
+              "status": "missing"
+            }
+          ],
+          "notes": []
+        }
+      ],
+      "summary": {
+        "missing": 2,
+        "placeable": 0,
+        "present": 0,
+        "wrong_hash": 0,
+        "zipped_at_root": 0
+      }
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

@@ -1,0 +1,15 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"library\", \"standardize\", \"--dry-run\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "items": [],
+      "mode": "dry_run"
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

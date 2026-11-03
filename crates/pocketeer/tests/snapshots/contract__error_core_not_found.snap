@@ -1,0 +1,19 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"cores\", \"info\", \"nobody.Nothing\"])"
+---
+{
+  "envelope": {
+    "error": {
+      "code": "CORE_NOT_FOUND",
+      "details": {
+        "id": "nobody.Nothing"
+      },
+      "hint": "Use `pocketeer cores search <query>` to find the exact id",
+      "message": "core nobody.Nothing is not installed and not in the inventory"
+    },
+    "ok": false,
+    "schema_version": 1
+  },
+  "exit": 1
+}

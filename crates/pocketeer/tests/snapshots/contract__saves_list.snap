@@ -1,0 +1,28 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"saves\", \"list\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "bytes": 607,
+      "saves": [
+        {
+          "mtime": 0,
+          "rel_path": "Memories/Save States/cart_1.sta",
+          "size": 600,
+          "versions": 0
+        },
+        {
+          "mtime": 0,
+          "rel_path": "Saves/fkh/common/Hello World (USA).sav",
+          "size": 7,
+          "versions": 0
+        }
+      ]
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

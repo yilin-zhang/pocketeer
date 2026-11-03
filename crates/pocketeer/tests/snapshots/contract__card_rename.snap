@@ -1,0 +1,27 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"card\", \"rename\", rom, \"Hello\", \"--dry-run\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "mode": "dry_run",
+      "rom": {
+        "from": "Assets/fkh/common/Hello World (USA).fkh",
+        "to": "Assets/fkh/common/Hello.fkh"
+      },
+      "saves": [
+        {
+          "from": "Saves/fkh/common/Hello World (USA).sav",
+          "to": "Saves/fkh/common/Hello.sav"
+        }
+      ],
+      "warnings": [
+        "Memories stay unchanged; loading an existing save state may require the old ROM name."
+      ]
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

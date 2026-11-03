@@ -1,0 +1,46 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"library\", \"import\", &src, \"--dry-run\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "actions": [
+        {
+          "action": "skip",
+          "platform": "fkh",
+          "reason": {
+            "kind": "already_in_library",
+            "rom": "Hello World (USA).fkh"
+          },
+          "source": "Hello World (USA).fkh"
+        },
+        {
+          "action": "add",
+          "dest": "roms/fkh/Quick Fox.fkh",
+          "game": "Quick Fox",
+          "platform": "fkh",
+          "rom": "Quick Fox.fkh",
+          "size": 19,
+          "source": "[tmp]/src/Quick Fox.fkh",
+          "verified": false
+        }
+      ],
+      "dir": "[tmp]/src",
+      "mode": "dry_run",
+      "summary": {
+        "add": 1,
+        "bytes": 19,
+        "skip": 1,
+        "unverified": 1,
+        "verified": 0
+      },
+      "unknown": [
+        "Unknown.xyz"
+      ]
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

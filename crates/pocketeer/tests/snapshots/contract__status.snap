@@ -1,0 +1,28 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"status\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "broken_cores": 2,
+      "disk": {
+        "available_bytes": 0,
+        "total_bytes": 0
+      },
+      "firmware": {
+        "build_date": "20240501_120000",
+        "byte": 34,
+        "name": "2.2",
+        "version": "2.2"
+      },
+      "installed_cores": 2,
+      "product": "Analogue Pocket",
+      "root": "[tmp]/sd",
+      "warnings": []
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}

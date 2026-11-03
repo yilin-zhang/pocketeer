@@ -1,0 +1,19 @@
+---
+source: crates/pocketeer/tests/contract.rs
+expression: "s.run(& [\"library\", \"identify\"])"
+---
+{
+  "envelope": {
+    "data": {
+      "ambiguous": 0,
+      "errors": [],
+      "matched": 0,
+      "no_match": 0,
+      "unchanged": 1,
+      "unsupported": 1
+    },
+    "ok": true,
+    "schema_version": 1
+  },
+  "exit": 0
+}
