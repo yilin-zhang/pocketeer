@@ -24,7 +24,7 @@ use crate::{
         hash::{HashCache, Hashes, copy_and_hash},
         scan::{Candidate, hash_candidate},
     },
-    plan::{Applied, Event, Failure, Plan, Progress},
+    plan::{Applied, Checked, Event, Failure, Pinned, Plan, Progress, Resources},
 };
 
 use super::{
@@ -120,12 +120,27 @@ pub struct ImportPlan {
     #[serde(skip)]
     platform_names: BTreeMap<String, String>,
     #[serde(skip)]
-    library: super::LibraryIdentity,
+    pinned: Pinned,
 }
 
 impl Plan for ImportPlan {
+    type Output = ImportResult;
+
     fn changes(&self) -> usize {
         self.summary.add
+    }
+
+    fn pinned(&self) -> &Pinned {
+        &self.pinned
+    }
+
+    fn execute(
+        &mut self,
+        res: &mut Resources,
+        progress: Progress<'_>,
+        _: Checked,
+    ) -> Result<ImportResult> {
+        copy_in(res.library()?, self, progress)
     }
 }
 
@@ -233,7 +248,7 @@ pub fn plan_import(
             .filter(|(id, _)| groups.contains_key(*id))
             .map(|(id, name)| (id.clone(), name.clone()))
             .collect(),
-        library: lib.identity()?,
+        pinned: Pinned::library(lib)?,
     };
     let mut done = 0;
     for (platform, files) in groups {
@@ -448,12 +463,13 @@ enum Indexed {
     Duplicate(String),
 }
 
-pub fn apply_import(
+/// Copies the planned files in. The caller has checked the plan's pins; a
+/// card import runs this too, for the files it takes off the card.
+pub(crate) fn copy_in(
     lib: &mut Library,
     plan: &ImportPlan,
     progress: Progress<'_>,
 ) -> Result<ImportResult> {
-    lib.check(&plan.library)?;
     let root = lib.root().to_path_buf();
     let total = plan.changes();
     progress(Event::Status(format!("Importing {total} file(s)")));
@@ -642,12 +658,12 @@ mod tests {
     #[test]
     fn copy_import_with_dat_then_dedupes() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut lib = Library::init(&tmp.path().join("lib")).unwrap();
+        let lib = Library::init(&tmp.path().join("lib")).unwrap();
         let src = library_dir();
         let dat = dat();
         let o = opts(false);
         let mut cache = HashCache::in_memory();
-        let plan = plan_folder(
+        let mut plan = plan_folder(
             &lib,
             src.path(),
             Some("fkh"),
@@ -670,7 +686,7 @@ mod tests {
         assert_eq!(plan.summary.verified, 3);
         assert_eq!(plan.summary.unverified, 1);
 
-        let r = apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
+        let r = crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
         assert_eq!(r.added, 4);
         assert!(r.failed.is_empty());
         assert_eq!(
@@ -725,11 +741,11 @@ mod tests {
     #[test]
     fn dat_only_copies_verified_roms() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut lib = Library::init(&tmp.path().join("lib")).unwrap();
+        let lib = Library::init(&tmp.path().join("lib")).unwrap();
         let src = library_dir();
         let dat = dat();
         let o = opts(true);
-        let plan = plan_folder(
+        let mut plan = plan_folder(
             &lib,
             src.path(),
             Some("fkh"),
@@ -754,7 +770,7 @@ mod tests {
             "{k:?}"
         );
 
-        let r = apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
+        let r = crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
         assert_eq!(r.added, 3);
         assert!(
             lib.root().join("roms/fkh/Hello World (USA).fkh").exists(),
@@ -771,12 +787,12 @@ mod tests {
     #[test]
     fn without_a_dat_nothing_is_read_while_planning_and_duplicates_drop_late() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut lib = Library::init(&tmp.path().join("lib")).unwrap();
+        let lib = Library::init(&tmp.path().join("lib")).unwrap();
         let src = tempfile::tempdir().unwrap();
         fs::write(src.path().join("a.fkh"), "same bytes").unwrap();
         fs::write(src.path().join("b.fkh"), "same bytes").unwrap();
         let o = opts(false);
-        let plan = plan_folder(
+        let mut plan = plan_folder(
             &lib,
             src.path(),
             Some("fkh"),
@@ -797,7 +813,7 @@ mod tests {
                 ..
             }
         )));
-        let r = apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
+        let r = crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
         assert_eq!(r.added, 1);
         assert_eq!(r.duplicates.len(), 1);
         assert_eq!(r.duplicates[0].existing, "a.fkh");
@@ -810,10 +826,10 @@ mod tests {
     #[test]
     fn imported_copy_is_independent_of_source() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut lib = Library::init(&tmp.path().join("lib")).unwrap();
+        let lib = Library::init(&tmp.path().join("lib")).unwrap();
         let src = library_dir();
         let o = opts(false);
-        let plan = plan_folder(
+        let mut plan = plan_folder(
             &lib,
             src.path(),
             Some("fkh"),
@@ -824,7 +840,7 @@ mod tests {
             &mut |_| {},
         )
         .unwrap();
-        apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
+        crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
         let managed = lib.root().join("roms/fkh/random.fkh");
         fs::write(src.path().join("random.fkh"), "changed source").unwrap();
         assert_eq!(fs::read_to_string(&managed).unwrap(), "not in dat");
@@ -866,11 +882,11 @@ mod tests {
     #[test]
     fn failed_import_preserves_existing_files_and_rolls_back_its_own_files() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut lib = Library::init(&tmp.path().join("lib")).unwrap();
+        let lib = Library::init(&tmp.path().join("lib")).unwrap();
         let source = tmp.path().join("source");
         write(&source, "a.fkh", "new bytes");
         let options = opts(false);
-        let plan = plan_folder(
+        let mut plan = plan_folder(
             &lib,
             &source,
             Some("fkh"),
@@ -882,7 +898,7 @@ mod tests {
         )
         .unwrap();
         write(lib.root(), "roms/fkh/a.fkh", "existing bytes");
-        let result = apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
+        let result = crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
         assert_eq!(result.failed.len(), 1);
         assert_eq!(
             fs::read(lib.root().join("roms/fkh/a.fkh")).unwrap(),
@@ -891,7 +907,7 @@ mod tests {
         assert!(lib.list_games(None, None).unwrap().is_empty());
         fs::remove_file(lib.root().join("roms/fkh/a.fkh")).unwrap();
         lib.conn().execute_batch("CREATE TRIGGER reject_import BEFORE INSERT ON roms BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
-        let result = apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
+        let result = crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
         assert_eq!(result.failed.len(), 1);
         assert!(!lib.root().join("roms/fkh/a.fkh").exists());
         assert!(lib.list_games(None, None).unwrap().is_empty());
@@ -901,11 +917,11 @@ mod tests {
     #[test]
     fn dat_import_requires_the_bytes_that_were_verified_in_the_preview() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut lib = Library::init(&tmp.path().join("lib")).unwrap();
+        let lib = Library::init(&tmp.path().join("lib")).unwrap();
         let source = tmp.path().join("source");
         write(&source, "Hello World (USA).fkh", "hello world");
         let options = opts(true);
-        let plan = plan_folder(
+        let mut plan = plan_folder(
             &lib,
             &source,
             Some("fkh"),
@@ -918,7 +934,7 @@ mod tests {
         .unwrap();
         assert_eq!(plan.changes(), 1);
         write(&source, "Hello World (USA).fkh", "changed ROM");
-        let result = apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
+        let result = crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
         assert_eq!(result.failed.len(), 1);
         assert_eq!(result.added, 0);
         assert!(lib.list_games(None, None).unwrap().is_empty());

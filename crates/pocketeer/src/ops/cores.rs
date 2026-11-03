@@ -5,13 +5,13 @@ use std::path::PathBuf;
 use pocketeer_core::{
     Error, Result,
     card::cores::{self, CoreInfo, CoreListReport, CoreView, SearchFilter},
-    card::install::{self, Changes, PlanOptions, Prepared, UninstallPlan},
+    card::install::{self, Installer, PlanOptions, Prepared, UninstallPlan},
     catalog::inventory::{Inventory, InventoryStatus},
-    plan::{Event, Progress},
+    plan::Event,
 };
 use serde::Serialize;
 
-use super::{Apply, Batch, Mode, context::Context};
+use super::{Batch, Mode, context::Context};
 
 pub fn list(ctx: &Context, outdated: bool) -> Result<CoreListReport> {
     let pocket = ctx.pocket()?;
@@ -84,7 +84,7 @@ pub fn prepare(
 ) -> Result<Vec<(String, Result<Prepared>)>> {
     let pocket = ctx.pocket()?;
     let net = ctx.net()?;
-    let installer = net.installer(&pocket);
+    let installer = Installer::new(&pocket, &net);
     let installed = cores::list_installed(&pocket)?;
     let mut out = Vec::new();
     for spec in specs {
@@ -114,9 +114,8 @@ pub fn install(
             let net = ctx.net()?;
             let installed = cores::list_installed(&pocket)?;
             progress(Event::Status(format!("Planning {}", file.display())));
-            let result = net
-                .installer(&pocket)
-                .prepare_file(file, &installed, opts, progress);
+            let result =
+                Installer::new(&pocket, &net).prepare_file(file, &installed, opts, progress);
             vec![(file.display().to_string(), result)]
         }
         None => prepare(ctx, &ctx.inventory()?, &req.specs, opts, progress)?,
@@ -175,17 +174,6 @@ pub fn update(
     Ok(Batch::stage(ctx, mode, prepared, progress))
 }
 
-impl Apply for Prepared {
-    type Output = Changes;
-    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<Changes> {
-        progress(Event::Status(format!(
-            "Installing {} {}",
-            self.plan.core_id, self.plan.version
-        )));
-        Prepared::apply(self, &ctx.pocket()?, progress)
-    }
-}
-
 pub type RemoveReport = Batch<UninstallPlan>;
 
 pub fn remove(
@@ -204,12 +192,4 @@ pub fn remove(
         (target, plan)
     });
     Ok(Batch::stage(ctx, mode, plans, progress))
-}
-
-impl Apply for UninstallPlan {
-    type Output = Changes;
-    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<Changes> {
-        progress(Event::Status(format!("Removing {}", self.core_id)));
-        install::apply_remove(&ctx.pocket()?, self, progress)
-    }
 }

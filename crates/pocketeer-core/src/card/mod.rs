@@ -9,7 +9,6 @@ pub mod cores;
 pub mod formats;
 pub mod install;
 pub mod memories;
-pub mod rename;
 pub mod roms;
 
 use std::path::{Path, PathBuf};
@@ -410,74 +409,4 @@ mod tests {
         let err = Pocket::detect_in(mounts.path()).unwrap_err();
         assert_eq!(err.code(), "MULTIPLE_SD_CARDS");
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CardIdentity {
-    root: PathBuf,
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-    #[cfg(windows)]
-    volume_serial: u32,
-}
-
-impl CardIdentity {
-    pub(crate) fn read(pocket: &Pocket) -> Result<Self> {
-        let root = Pocket::open(pocket.root())?.root().to_path_buf();
-        #[cfg(unix)]
-        let meta = std::fs::metadata(&root).map_err(|e| Error::io(&root, e))?;
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
-        Ok(Self {
-            root,
-            #[cfg(unix)]
-            device: meta.dev(),
-            #[cfg(unix)]
-            inode: meta.ino(),
-            #[cfg(windows)]
-            volume_serial: volume_serial(pocket.root())?,
-        })
-    }
-
-    /// Fails with [`Error::Stale`] unless the mounted card is still the one
-    /// this identity was taken from (not unplugged, swapped or gone). Every
-    /// apply step that follows a plan made against a card starts with this.
-    pub(crate) fn check(&self, pocket: &Pocket) -> Result<()> {
-        if Self::read(pocket)? == *self {
-            Ok(())
-        } else {
-            Err(Error::Stale {
-                what: "the card".into(),
-            })
-        }
-    }
-}
-
-#[cfg(windows)]
-fn volume_serial(path: &Path) -> Result<u32> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
-    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut mount = vec![0u16; 32768];
-    let mut serial = 0;
-    // Both buffers are NUL-terminated and remain alive throughout these calls.
-    let success = unsafe {
-        GetVolumePathNameW(path_wide.as_ptr(), mount.as_mut_ptr(), mount.len() as u32) != 0
-            && GetVolumeInformationW(
-                mount.as_ptr(),
-                std::ptr::null_mut(),
-                0,
-                &mut serial,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                0,
-            ) != 0
-    };
-    if !success {
-        return Err(Error::io(path, std::io::Error::last_os_error()));
-    }
-    Ok(serial)
 }

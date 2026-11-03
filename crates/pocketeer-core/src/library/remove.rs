@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::{
     Error, Result,
-    plan::{Applied, Failure, Plan},
+    plan::{Applied, Checked, Event, Failure, Pinned, Plan, Progress, Resources},
 };
 
 use super::{Library, RomRef, db};
@@ -31,12 +31,55 @@ pub struct RemovePlan {
     /// Where files end up, relative to the library root.
     pub trash: PathBuf,
     #[serde(skip)]
-    library: super::LibraryIdentity,
+    pinned: Pinned,
 }
 
 impl Plan for RemovePlan {
+    type Output = RemoveResult;
+
     fn changes(&self) -> usize {
         self.items.len()
+    }
+
+    fn pinned(&self) -> &Pinned {
+        &self.pinned
+    }
+
+    fn execute(
+        &mut self,
+        res: &mut Resources,
+        progress: Progress<'_>,
+        _: Checked,
+    ) -> Result<RemoveResult> {
+        progress(Event::Status("Removing from library".into()));
+        let lib = res.library()?;
+        let root = lib.root().to_path_buf();
+        let trash = root.join(&self.trash);
+        let mut result = RemoveResult::default();
+        for item in &self.items {
+            let from = root.join(&item.file);
+            let moved: Result<()> = if from.exists() {
+                let to = trash.join(&item.file);
+                std::fs::create_dir_all(to.parent().unwrap_or(&trash))
+                    .map_err(|e| Error::io(&trash, e))
+                    .and_then(|_| std::fs::rename(&from, &to).map_err(|e| Error::io(&from, e)))
+            } else {
+                Ok(())
+            };
+            match moved.and_then(|_| db::delete_rom(lib.conn(), item.rom.rom_id, item.rom.game_id))
+            {
+                Ok(game_gone) => {
+                    result.removed += 1;
+                    result.bytes += item.size;
+                    if game_gone {
+                        result.games_removed += 1;
+                    }
+                }
+                Err(e) => result.failed.push(Failure::new(&item.file, &e)),
+            }
+        }
+        result.trash = trash.exists().then_some(self.trash.clone());
+        Ok(result)
     }
 }
 
@@ -47,7 +90,7 @@ pub fn plan(lib: &Library, platform: Option<&str>, specs: &[String]) -> Result<R
         items: Vec::new(),
         bytes: 0,
         trash: Library::new_trash_dir(),
-        library: lib.identity()?,
+        pinned: Pinned::library(lib)?,
     };
     for spec in specs {
         let hits = super::resolve_game_roms(lib, platform, spec)?;
@@ -88,36 +131,6 @@ impl Applied for RemoveResult {
     }
 }
 
-pub fn apply(lib: &mut Library, plan: &RemovePlan) -> Result<RemoveResult> {
-    lib.check(&plan.library)?;
-    let root = lib.root().to_path_buf();
-    let trash = root.join(&plan.trash);
-    let mut result = RemoveResult::default();
-    for item in &plan.items {
-        let from = root.join(&item.file);
-        let moved: Result<()> = if from.exists() {
-            let to = trash.join(&item.file);
-            std::fs::create_dir_all(to.parent().unwrap_or(&trash))
-                .map_err(|e| Error::io(&trash, e))
-                .and_then(|_| std::fs::rename(&from, &to).map_err(|e| Error::io(&from, e)))
-        } else {
-            Ok(())
-        };
-        match moved.and_then(|_| db::delete_rom(lib.conn(), item.rom.rom_id, item.rom.game_id)) {
-            Ok(game_gone) => {
-                result.removed += 1;
-                result.bytes += item.size;
-                if game_gone {
-                    result.games_removed += 1;
-                }
-            }
-            Err(e) => result.failed.push(Failure::new(&item.file, &e)),
-        }
-    }
-    result.trash = trash.exists().then_some(plan.trash.clone());
-    Ok(result)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,29 +139,34 @@ mod tests {
     #[test]
     fn a_plan_for_another_library_is_refused() {
         let (tmp, lib) = library_with(&[("game.fkh", "ROM")]);
-        let plan = plan(&lib, None, &["game.fkh".into()]).unwrap();
+        let mut plan = plan(&lib, None, &["game.fkh".into()]).unwrap();
         // Another library now sits where this one was.
         let root = lib.root().to_path_buf();
         drop(lib);
         std::fs::rename(&root, tmp.path().join("old")).unwrap();
-        let mut other = Library::init(&root).unwrap();
-        assert_eq!(apply(&mut other, &plan).unwrap_err().code(), "STALE_PLAN");
+        let other = Library::init(&root).unwrap();
+        assert_eq!(
+            crate::testutil::apply(&mut plan, None, Some(&other))
+                .unwrap_err()
+                .code(),
+            "STALE_PLAN"
+        );
         assert!(tmp.path().join("old/roms/fkh/game.fkh").is_file());
     }
 
     #[test]
     fn removes_to_trash_and_drops_empty_games() {
-        let (_tmp, mut lib) = library_with(&[("Foo.fkh", "1"), ("Bar.fkh", "22")]);
+        let (_tmp, lib) = library_with(&[("Foo.fkh", "1"), ("Bar.fkh", "22")]);
 
         assert_eq!(
             plan(&lib, None, &["nope".into()]).unwrap_err().code(),
             "ROM_NOT_FOUND"
         );
-        let plan = plan(&lib, None, &["Foo".into(), "foo.fkh".into()]).unwrap();
+        let mut plan = plan(&lib, None, &["Foo".into(), "foo.fkh".into()]).unwrap();
         assert_eq!(plan.items.len(), 1, "same ROM twice counts once");
         assert!(plan.items[0].last_of_game);
 
-        let r = apply(&mut lib, &plan).unwrap();
+        let r = crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
         assert_eq!((r.removed, r.games_removed, r.bytes), (1, 1, 1));
         assert!(r.failed.is_empty());
         assert!(!lib.root().join("roms/fkh/Foo.fkh").exists());

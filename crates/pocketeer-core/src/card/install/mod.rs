@@ -12,22 +12,19 @@ use crate::{
     Error, Pocket, Result, card,
     card::cores::CoreList,
     catalog::inventory::{Inventory, InventoryCore, Release},
-    net::{Cache, Http},
-    plan::{Event, Plan, Progress},
+    net::Net,
+    plan::{Checked, Event, Pinned, Plan, Progress, Resources},
 };
 
 pub use apply::Changes;
 pub use plan::{Action, InstallPlan, PlanOptions};
 pub use zipfile::{CoreZip, ZipSource};
 
-use crate::card::CardIdentity;
-
 /// A plan plus the zip it was made from, ready to apply.
 pub struct Prepared {
     pub plan: InstallPlan,
     zip: CoreZip,
-    /// The card it was planned for.
-    identity: CardIdentity,
+    pinned: Pinned,
 }
 
 /// A prepared install reads (and reports) as its plan.
@@ -37,20 +34,31 @@ impl serde::Serialize for Prepared {
     }
 }
 
-impl crate::plan::Plan for Prepared {
+impl Plan for Prepared {
+    type Output = Changes;
+
     fn changes(&self) -> usize {
         self.plan.changes()
     }
-}
 
-impl Prepared {
-    pub fn apply(&mut self, pocket: &Pocket, progress: Progress<'_>) -> Result<Changes> {
-        self.identity.check(pocket)?;
-        let label = self.plan.core_id.clone();
+    fn pinned(&self) -> &Pinned {
+        &self.pinned
+    }
+
+    fn execute(
+        &mut self,
+        res: &mut Resources,
+        progress: Progress<'_>,
+        _: Checked,
+    ) -> Result<Changes> {
+        progress(Event::Status(format!(
+            "Installing {} {}",
+            self.plan.core_id, self.plan.version
+        )));
         let zip = &mut self.zip;
         apply::apply(
-            pocket,
-            &label,
+            res.pocket()?,
+            &self.plan.core_id,
             &self.plan.actions,
             &mut |zip_path, dest| zip.extract_entry(zip_path, dest),
             progress,
@@ -91,15 +99,17 @@ pub fn resolve<'a>(
     Ok((core, release))
 }
 
+/// Plans installs on one card, downloading releases through `net`.
 pub struct Installer<'a> {
-    pub pocket: &'a Pocket,
-    pub http: &'a Http,
-    pub cache: &'a Cache,
-    /// Only use already-downloaded zips.
-    pub offline: bool,
+    pocket: &'a Pocket,
+    net: &'a Net,
 }
 
-impl Installer<'_> {
+impl<'a> Installer<'a> {
+    pub fn new(pocket: &'a Pocket, net: &'a Net) -> Self {
+        Installer { pocket, net }
+    }
+
     /// Downloads (or reuses a cached download of) a release and plans it.
     pub fn prepare_release(
         &self,
@@ -110,9 +120,10 @@ impl Installer<'_> {
         progress: Progress<'_>,
     ) -> Result<Prepared> {
         let url = &release.download_url;
-        let bytes = self
-            .cache
-            .download(self.http, url, self.offline, progress)?;
+        let bytes =
+            self.net
+                .cache()
+                .download(self.net.http(), url, self.net.offline(), progress)?;
         let mut zip = CoreZip::from_bytes(bytes, ZipSource::Url { url: url.clone() })?;
         let opts = PlanOptions {
             requested_id: Some(core.id.clone()),
@@ -120,11 +131,10 @@ impl Installer<'_> {
             ..opts
         };
         let plan = plan::plan_install(self.pocket, &mut zip, installed, &opts)?;
-        let identity = CardIdentity::read(self.pocket)?;
         Ok(Prepared {
             plan,
             zip,
-            identity,
+            pinned: Pinned::card(self.pocket)?,
         })
     }
 
@@ -139,11 +149,10 @@ impl Installer<'_> {
         progress(Event::Status(format!("Reading {}", path.display())));
         let mut zip = CoreZip::from_file(path)?;
         let plan = plan::plan_install(self.pocket, &mut zip, installed, &opts)?;
-        let identity = CardIdentity::read(self.pocket)?;
         Ok(Prepared {
             plan,
             zip,
-            identity,
+            pinned: Pinned::card(self.pocket)?,
         })
     }
 }
@@ -157,12 +166,34 @@ pub struct UninstallPlan {
     #[serde(flatten)]
     pub actions: plan::Actions,
     #[serde(skip)]
-    identity: CardIdentity,
+    pinned: Pinned,
 }
 
 impl Plan for UninstallPlan {
+    type Output = Changes;
+
     fn changes(&self) -> usize {
         self.actions.len()
+    }
+
+    fn pinned(&self) -> &Pinned {
+        &self.pinned
+    }
+
+    fn execute(
+        &mut self,
+        res: &mut Resources,
+        progress: Progress<'_>,
+        _: Checked,
+    ) -> Result<Changes> {
+        progress(Event::Status(format!("Removing {}", self.core_id)));
+        apply::apply(
+            res.pocket()?,
+            &format!("remove-{}", self.core_id),
+            &self.actions,
+            &mut |_, _| unreachable!("remove plans have no installs"),
+            progress,
+        )
     }
 }
 
@@ -197,23 +228,8 @@ pub fn plan_remove(
         installed_version: core.version.clone(),
         purge,
         actions: actions.into(),
-        identity: CardIdentity::read(pocket)?,
+        pinned: Pinned::card(pocket)?,
     })
-}
-
-pub fn apply_remove(
-    pocket: &Pocket,
-    plan: &UninstallPlan,
-    progress: Progress<'_>,
-) -> Result<Changes> {
-    plan.identity.check(pocket)?;
-    apply::apply(
-        pocket,
-        &format!("remove-{}", plan.core_id),
-        &plan.actions,
-        &mut |_, _| unreachable!("remove plans have no installs"),
-        progress,
-    )
 }
 
 #[cfg(test)]
@@ -230,10 +246,10 @@ mod tests {
             CORE_JSON,
         );
         let installed = crate::card::cores::list_installed(&pocket).unwrap();
-        let plan = plan_remove(&pocket, &installed, "spiritualized.GBA", false).unwrap();
+        let mut plan = plan_remove(&pocket, &installed, "spiritualized.GBA", false).unwrap();
         let aside = tempfile::tempdir().unwrap();
         swap_card(&pocket, aside.path());
-        let err = apply_remove(&pocket, &plan, &mut |_| {}).unwrap_err();
+        let err = crate::testutil::apply(&mut plan, Some(&pocket), None).unwrap_err();
         assert_eq!(err.code(), "STALE_PLAN");
         assert!(pocket.root().join("Cores/spiritualized.GBA").is_dir());
     }

@@ -8,10 +8,11 @@ use crate::{
     card::SAVE_ROOTS,
     fsutil::hash::{copy_and_hash, hash_file},
     fsutil::{self, mtime_secs, set_mtime},
-    plan::{Applied, Event, Failure, Plan, Progress},
+    plan::{Applied, Checked, Event, Failure, Pinned, Plan, Progress, Resources},
 };
 use serde::Serialize;
 use std::{
+    collections::BTreeMap,
     fs::File,
     path::{Component, Path, PathBuf},
 };
@@ -20,7 +21,7 @@ const MTIME_TOLERANCE: i64 = 2;
 mod owners;
 mod trash;
 pub use owners::{Owners, SaveKey, expected_saves, link_owners, rom_key, save_key};
-pub use trash::{TrashPlan, TrashResult, TrashTarget, apply_trash, plan_trash};
+pub use trash::{TrashPlan, TrashResult, TrashTarget, plan_trash};
 
 /// Which save files a backup looks at.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -165,17 +166,69 @@ pub struct SavesPlan {
     items: Vec<SaveItem>,
     summary: SavesSummary,
     #[serde(skip)]
-    library: crate::library::LibraryIdentity,
-    #[serde(skip)]
-    card_identity: crate::card::CardIdentity,
+    pinned: Pinned,
 }
+
 impl Plan for SavesPlan {
+    type Output = SavesResult;
+
     fn changes(&self) -> usize {
         self.summary.pull + self.summary.push
     }
     /// Unresolved conflicts count as failures: the CLI exits 1 on them.
     fn errors(&self) -> usize {
         self.summary.conflicts
+    }
+
+    fn pinned(&self) -> &Pinned {
+        &self.pinned
+    }
+
+    /// Copies each pulled or pushed save, then links new backups to their
+    /// games by name.
+    fn execute(
+        &mut self,
+        res: &mut Resources,
+        progress: Progress<'_>,
+        _: Checked,
+    ) -> Result<SavesResult> {
+        let pocket = res.pocket()?.clone();
+        let lib = res.library()?;
+        let mut result = SavesResult::default();
+        let mut done = 0;
+        for item in &self.items {
+            let action = &item.action;
+            let pull = match action {
+                SaveAction::Pull { .. } => true,
+                SaveAction::Push { .. } => false,
+                SaveAction::Conflict { .. } | SaveAction::Skip { .. } => continue,
+            };
+            let rel = action.path();
+            validate_path(rel)?;
+            match copy_one(lib, &pocket, self, item) {
+                Ok((archived, size)) => {
+                    if pull {
+                        result.pulled += 1;
+                    } else {
+                        result.pushed += 1;
+                    }
+                    result.versions_created += usize::from(archived);
+                    result.bytes += size;
+                }
+                Err(e) => result.failed.push(Failure {
+                    path: rel.to_path_buf(),
+                    error: e.to_info(),
+                }),
+            }
+            done += 1;
+            progress(Event::Step {
+                done,
+                total: self.changes(),
+            });
+        }
+        let games = lib.list_games(None, None)?;
+        link_owners(lib, &games, &BTreeMap::new())?;
+        Ok(result)
     }
 }
 
@@ -220,7 +273,12 @@ impl SavesPlan {
                 reason: PullReason::UserChoice,
             },
             ConflictChoice::Computer => SaveAction::Push {
-                source: self.library.root().join("saves").join(&rel),
+                source: self
+                    .pinned
+                    .library_root()
+                    .expect("a saves plan pins its library")
+                    .join("saves")
+                    .join(&rel),
                 rel,
                 identity: computer,
             },
@@ -374,8 +432,7 @@ pub fn plan(
     let mut plan = SavesPlan {
         items: Vec::new(),
         summary: SavesSummary::default(),
-        library: lib.identity()?,
-        card_identity: crate::card::CardIdentity::read(pocket)?,
+        pinned: Pinned::library(lib)?.and_card(pocket)?,
     };
     for (i, rel) in paths.iter().enumerate() {
         progress(Event::Status(format!("Comparing {}", rel.display())));
@@ -529,8 +586,7 @@ pub fn plan_restore(
             observed,
         }],
         summary: SavesSummary::default(),
-        library: lib.identity()?,
-        card_identity: crate::card::CardIdentity::read(pocket)?,
+        pinned: Pinned::library(lib)?.and_card(pocket)?,
     };
     plan.recount();
     Ok(plan)
@@ -566,47 +622,6 @@ impl Applied for SavesResult {
         &self.failed
     }
 }
-pub fn apply(
-    lib: &mut Library,
-    pocket: &Pocket,
-    plan: &SavesPlan,
-    progress: Progress<'_>,
-) -> Result<SavesResult> {
-    let mut result = SavesResult::default();
-    let mut done = 0;
-    for item in &plan.items {
-        let action = &item.action;
-        let pull = match action {
-            SaveAction::Pull { .. } => true,
-            SaveAction::Push { .. } => false,
-            SaveAction::Conflict { .. } | SaveAction::Skip { .. } => continue,
-        };
-        let rel = action.path();
-        validate_path(rel)?;
-        match copy_one(lib, pocket, plan, item) {
-            Ok((archived, size)) => {
-                if pull {
-                    result.pulled += 1;
-                } else {
-                    result.pushed += 1;
-                }
-                result.versions_created += usize::from(archived);
-                result.bytes += size;
-            }
-            Err(e) => result.failed.push(Failure {
-                path: rel.to_path_buf(),
-                error: e.to_info(),
-            }),
-        }
-        done += 1;
-        progress(Event::Step {
-            done,
-            total: plan.changes(),
-        });
-    }
-    Ok(result)
-}
-
 /// Copies one save across (card → library for a pull, the other way for a
 /// push) once both sides are confirmed to be as planned. The copy it
 /// overwrites is archived first. Returns whether an archive was made, and
@@ -619,8 +634,9 @@ fn copy_one(
 ) -> Result<(bool, u64)> {
     let action = &item.action;
     let rel = action.path();
-    lib.check(&plan.library)?;
-    plan.card_identity.check(pocket)?;
+    // Each copy checks again: the card may be pulled between two of them.
+    plan.pinned.check_library(lib)?;
+    plan.pinned.check_card(pocket)?;
     let observed = &item.observed;
     let on_card = pocket.root().join(rel);
     let in_library = current(lib, rel);
@@ -799,20 +815,20 @@ mod tests {
     #[test]
     fn backup_keeps_history_and_requires_a_choice_for_computer_newer() {
         let (tmp, pocket) = sd();
-        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
+        let lib = Library::init(&tmp.path().join("library")).unwrap();
         write(pocket.root(), REL, "AP one", 100);
         write(lib.root(), "saves/Saves/gb/common/offline.sav", "keep", 200);
-        let plan = plan_backup(&lib, &pocket);
+        let mut plan = plan_backup(&lib, &pocket);
         assert_eq!(
             (plan.summary.pull, plan.summary.push, plan.summary.retained),
             (1, 0, 1)
         );
-        let result = apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        let result = crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
         assert_eq!(result.pulled, 1);
         assert!(!pocket.root().join("Saves/gb/common/offline.sav").exists());
         write(pocket.root(), REL, "AP two", 300);
-        let plan = plan_backup(&lib, &pocket);
-        apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        let mut plan = plan_backup(&lib, &pocket);
+        crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
         let history = versions(&lib, Path::new(REL)).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(
@@ -823,14 +839,14 @@ mod tests {
         let mut plan = plan_backup(&lib, &pocket);
         assert_eq!(plan.summary.conflicts, 1);
         assert_eq!(plan.changes(), 0);
-        apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
         assert_eq!(std::fs::read(pocket.root().join(REL)).unwrap(), b"AP two");
         let i = plan
             .actions()
             .position(|a| matches!(a, SaveAction::Conflict { .. }))
             .unwrap();
         plan.resolve(i, ConflictChoice::Computer);
-        let result = apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        let result = crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
         assert_eq!(result.pushed, 1);
         assert_eq!(std::fs::read(pocket.root().join(REL)).unwrap(), b"PC new");
         assert!(
@@ -844,13 +860,13 @@ mod tests {
     #[test]
     fn renamed_card_saves_take_their_backup_and_history_along() {
         let (tmp, pocket) = sd();
-        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
+        let lib = Library::init(&tmp.path().join("library")).unwrap();
         write(pocket.root(), REL, "one", 100);
-        let plan = plan_backup(&lib, &pocket);
-        apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        let mut plan = plan_backup(&lib, &pocket);
+        crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
         write(pocket.root(), REL, "two", 200);
-        let plan = plan_backup(&lib, &pocket);
-        apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        let mut plan = plan_backup(&lib, &pocket);
+        crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
         let to = PathBuf::from("Saves/gba/common/nested/renamed.sav");
         std::fs::rename(pocket.root().join(REL), pocket.root().join(&to)).unwrap();
         assert_eq!(
@@ -871,7 +887,7 @@ mod tests {
     #[test]
     fn memories_are_their_own_scope_and_restore_with_their_companions() {
         let (tmp, pocket) = sd();
-        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
+        let lib = Library::init(&tmp.path().join("library")).unwrap();
         let sta = "Memories/Save States/cart_1.sta";
         let sav = "Memories/Save States/cart_1.sav";
         write(pocket.root(), REL, "game save", 100);
@@ -881,10 +897,10 @@ mod tests {
             scope: Scope::Memories,
             only: None,
         };
-        let planned = plan(&lib, &pocket, memories, &mut |_| {}).unwrap();
+        let mut planned = plan(&lib, &pocket, memories, &mut |_| {}).unwrap();
         let paths: Vec<&Path> = planned.actions().map(SaveAction::path).collect();
         assert_eq!(paths, [Path::new(sav), Path::new(sta)]);
-        apply(&mut lib, &pocket, &planned, &mut |_| {}).unwrap();
+        crate::testutil::apply(&mut planned, Some(&pocket), Some(&lib)).unwrap();
         // Cartridge saves alone leave Memories out.
         let saves = SavesOptions {
             scope: Scope::Saves,
@@ -898,9 +914,9 @@ mod tests {
         write(pocket.root(), sta, "newer state", 200);
         std::fs::remove_file(pocket.root().join(sav)).unwrap();
         let rels = [PathBuf::from(sta), PathBuf::from(sav)];
-        let restore = plan_restore_paths(&lib, &pocket, &rels).unwrap();
+        let mut restore = plan_restore_paths(&lib, &pocket, &rels).unwrap();
         assert_eq!(restore.summary.push, 2);
-        apply(&mut lib, &pocket, &restore, &mut |_| {}).unwrap();
+        crate::testutil::apply(&mut restore, Some(&pocket), Some(&lib)).unwrap();
         assert_eq!(std::fs::read(pocket.root().join(sta)).unwrap(), b"state");
         assert_eq!(std::fs::read(pocket.root().join(sav)).unwrap(), b"sram");
         assert!(
@@ -945,10 +961,10 @@ mod tests {
     #[test]
     fn overview_shows_each_save_as_both_sides_have_it() {
         let (tmp, pocket) = sd();
-        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
+        let lib = Library::init(&tmp.path().join("library")).unwrap();
         write(pocket.root(), REL, "one", 100);
-        let plan = plan_backup(&lib, &pocket);
-        apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        let mut plan = plan_backup(&lib, &pocket);
+        crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
         write(pocket.root(), REL, "two", 300);
         write(lib.root(), "saves/Saves/gb/common/offline.sav", "kept", 100);
         let seen = overview(&lib, Some(&pocket), Scope::Saves).unwrap();
@@ -979,27 +995,26 @@ mod tests {
     fn a_swapped_card_is_refused_between_plan_and_apply() {
         let (_card, pocket) = sd();
         let elsewhere = tempfile::tempdir().unwrap();
-        let mut lib = Library::init(&elsewhere.path().join("library")).unwrap();
+        let lib = Library::init(&elsewhere.path().join("library")).unwrap();
         write(pocket.root(), REL, "one", 100);
-        let plan = plan_backup(&lib, &pocket);
+        let mut plan = plan_backup(&lib, &pocket);
         crate::testutil::swap_card(&pocket, elsewhere.path());
-        let result = apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
-        assert_eq!(result.failed.len(), 1);
-        assert_eq!(result.failed[0].error.code, "STALE_PLAN");
+        let err = crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap_err();
+        assert_eq!(err.code(), "STALE_PLAN");
         assert!(!current(&lib, Path::new(REL)).exists());
     }
 
     #[test]
     fn equal_metadata_different_bytes_conflicts_and_stale_preview_is_rejected() {
         let (tmp, pocket) = sd();
-        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
+        let lib = Library::init(&tmp.path().join("library")).unwrap();
         write(pocket.root(), REL, "AAAA", 100);
         write(lib.root(), &format!("saves/{REL}"), "BBBB", 100);
         let mut plan = plan_backup(&lib, &pocket);
         assert_eq!(plan.summary.conflicts, 1);
         plan.resolve(0, ConflictChoice::Card);
         write(lib.root(), &format!("saves/{REL}"), "CCCC", 100);
-        let result = apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        let result = crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
         assert_eq!(result.failed.len(), 1);
         assert_eq!(
             std::fs::read(current(&lib, Path::new(REL))).unwrap(),
@@ -1014,17 +1029,17 @@ mod tests {
     #[test]
     fn restoring_history_archives_ap_first_and_rejects_corrupt_history() {
         let (tmp, pocket) = sd();
-        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
+        let lib = Library::init(&tmp.path().join("library")).unwrap();
         write(pocket.root(), REL, "old", 100);
-        let plan = plan_backup(&lib, &pocket);
-        apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        let mut plan = plan_backup(&lib, &pocket);
+        crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
         write(pocket.root(), REL, "new", 200);
-        let plan = plan_backup(&lib, &pocket);
-        apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        let mut plan = plan_backup(&lib, &pocket);
+        crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
         let old = versions(&lib, Path::new(REL)).unwrap().remove(0);
         write(pocket.root(), REL, "unbacked AP", 300);
-        let plan = plan_restore(&lib, &pocket, Path::new(REL), Some(old.id)).unwrap();
-        let result = apply(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        let mut plan = plan_restore(&lib, &pocket, Path::new(REL), Some(old.id)).unwrap();
+        let result = crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
         assert_eq!(result.pushed, 1);
         assert_eq!(std::fs::read(pocket.root().join(REL)).unwrap(), b"old");
         assert!(

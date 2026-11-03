@@ -3,18 +3,47 @@
 use std::{io::Write as _, path::Path};
 
 use crate::{
-    Pocket,
+    Error, Pocket, Result,
     catalog::Dat,
     fsutil::hash::HashCache,
     library::{
         Library,
         import::{self, ImportOptions},
     },
+    plan::{self, Plan, Resources},
 };
 
 /// A minimal but complete `core.json` (spiritualized.GBA 1.3.0), shared
 /// with the CLI tests.
 pub(crate) const CORE_JSON: &str = include_str!("../../../tests/fixtures/core-gba-1.3.0.json");
+
+/// Resources holding this card and this library (opened again from its
+/// folder, so the test keeps its own handle), and no network.
+pub(crate) fn resources(pocket: Option<&Pocket>, lib: Option<&Library>) -> Resources {
+    let pocket = pocket.cloned();
+    let root = lib.map(|l| l.root().to_path_buf());
+    Resources::new(
+        move || {
+            pocket.clone().ok_or(Error::SdNotFound {
+                searched: Vec::new(),
+            })
+        },
+        move || match &root {
+            Some(root) => Library::open(root),
+            None => Err(Error::NoHomeDir),
+        },
+        || Err(Error::NoCacheDir),
+    )
+}
+
+/// Applies `plan` against this card and library, as the front ends do.
+pub(crate) fn apply<P: Plan>(
+    plan: &mut P,
+    pocket: Option<&Pocket>,
+    lib: Option<&Library>,
+) -> Result<P::Output> {
+    plan::apply(&mut resources(pocket, lib), plan, &mut |_| {})
+}
 
 /// An empty but valid Pocket SD card in a temp dir.
 pub(crate) fn sd() -> (tempfile::TempDir, Pocket) {
@@ -120,6 +149,6 @@ pub(crate) fn library_on(platform: &str, files: &[(&str, &str)]) -> (tempfile::T
         &mut |_| {},
     )
     .unwrap();
-    import::apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
+    import::copy_in(&mut lib, &plan, &mut |_| {}).unwrap();
     (tmp, lib)
 }

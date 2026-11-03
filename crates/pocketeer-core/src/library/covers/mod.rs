@@ -364,9 +364,9 @@ mod tests {
             &server.url(),
             &mut |event| {
                 if !imported && matches!(event, Event::Status(_)) {
-                    let mut other = Library::open(lib.root()).unwrap();
-                    let plan = import::plan(&other, game.id, &source).unwrap();
-                    import::apply(&mut other, &plan).unwrap();
+                    let other = Library::open(lib.root()).unwrap();
+                    let mut plan = import::plan(&other, game.id, &source).unwrap();
+                    crate::testutil::apply(&mut plan, None, Some(&other)).unwrap();
                     imported = true;
                 }
             },

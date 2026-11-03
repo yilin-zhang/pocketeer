@@ -1,10 +1,14 @@
-//! Explicit AP ROM renames with mirrored ordinary saves and cache updates.
+//! Renaming a ROM on the card: its ordinary saves follow its name, the
+//! card's ROM index follows, and so do the library's backups of those saves
+//! (or the next backup would see them as new).
 
+use crate::card::roms::Index;
 use crate::fsutil::Stamp;
 use crate::fsutil::names::{
     FileRename, apply_renames, complete_name, extension, stem, validate_name,
 };
-use crate::plan::{Applied, Plan};
+use crate::plan::{Applied, Checked, Pinned, Plan, Progress, Resources};
+use crate::transfer::saves;
 use crate::{Error, Result};
 use serde::Serialize;
 use std::path::Path;
@@ -16,14 +20,57 @@ pub struct CardRenamePlan {
     pub saves: Vec<FileRename>,
     pub warnings: Vec<String>,
     #[serde(skip)]
-    identity: crate::card::CardIdentity,
+    pinned: Pinned,
     /// The ROM as it was when planned.
     #[serde(skip)]
     stamp: Stamp,
 }
 impl Plan for CardRenamePlan {
+    type Output = CardRenameResult;
+
     fn changes(&self) -> usize {
         1 + self.saves.len()
+    }
+
+    fn pinned(&self) -> &Pinned {
+        &self.pinned
+    }
+
+    fn execute(
+        &mut self,
+        res: &mut Resources,
+        _: Progress<'_>,
+        _: Checked,
+    ) -> Result<CardRenameResult> {
+        let pocket = res.pocket()?.clone();
+        let rom = &self.rom;
+        let source = pocket.root().join(&rom.from);
+        if Stamp::of(&source)? != self.stamp {
+            return Err(Error::Stale {
+                what: rom.from.display().to_string(),
+            });
+        }
+        let mut index = Index::scan(&pocket)?;
+        let renamed = apply_renames(pocket.root(), std::iter::once(rom).chain(&self.saves))?;
+        let mut warnings = self.warnings.clone();
+        if let Err(e) = index
+            .relocate(&pocket, &rom.from, &rom.to)
+            .and_then(|_| index.save(&pocket))
+        {
+            warnings.push(format!("Files renamed, but cache update failed: {e}"));
+        }
+        // Without a library there are no backups to follow.
+        if !self.saves.is_empty()
+            && let Ok(lib) = res.library()
+        {
+            let moves: Vec<_> = self
+                .saves
+                .iter()
+                .map(|m| (m.from.clone(), m.to.clone()))
+                .collect();
+            saves::follow_renames(lib, &moves)?;
+        }
+        Ok(CardRenameResult { renamed, warnings })
     }
 }
 
@@ -39,8 +86,8 @@ impl Applied for CardRenameResult {
     }
 }
 
-pub fn plan_card(pocket: &crate::Pocket, path: &Path, new_name: &str) -> Result<CardRenamePlan> {
-    let index = super::roms::Index::scan(pocket)?;
+pub fn plan(pocket: &crate::Pocket, path: &Path, new_name: &str) -> Result<CardRenamePlan> {
+    let index = Index::scan(pocket)?;
     let rom = index
         .roms
         .iter()
@@ -116,30 +163,9 @@ pub fn plan_card(pocket: &crate::Pocket, path: &Path, new_name: &str) -> Result<
         rom: rom_move,
         saves,
         warnings,
-        identity: crate::card::CardIdentity::read(pocket)?,
+        pinned: Pinned::card(pocket)?,
         stamp: Stamp::of(&pocket.root().join(path))?,
     })
-}
-
-pub fn apply_card(pocket: &crate::Pocket, plan: &CardRenamePlan) -> Result<CardRenameResult> {
-    plan.identity.check(pocket)?;
-    let rom = &plan.rom;
-    let source = pocket.root().join(&rom.from);
-    if Stamp::of(&source)? != plan.stamp {
-        return Err(Error::Stale {
-            what: rom.from.display().to_string(),
-        });
-    }
-    let mut index = super::roms::Index::scan(pocket)?;
-    let renamed = apply_renames(pocket.root(), std::iter::once(rom).chain(&plan.saves))?;
-    let mut warnings = plan.warnings.clone();
-    if let Err(e) = index
-        .relocate(pocket, &rom.from, &rom.to)
-        .and_then(|_| index.save(pocket))
-    {
-        warnings.push(format!("Files renamed, but cache update failed: {e}"));
-    }
-    Ok(CardRenameResult { renamed, warnings })
 }
 
 #[cfg(test)]
@@ -175,14 +201,14 @@ mod card_tests {
         }
         let sha1 = index.roms[0].identity.sha1().map(str::to_owned);
         index.save(&pocket).unwrap();
-        let preview = plan_card(
+        let mut preview = plan(
             &pocket,
             Path::new("Assets/gba/common/one/game.gba"),
             "new name",
         )
         .unwrap();
         assert_eq!(preview.saves.len(), 2);
-        let result = apply_card(&pocket, &preview).unwrap();
+        let result = crate::testutil::apply(&mut preview, Some(&pocket), None).unwrap();
         assert_eq!(result.renamed, 3);
         assert_eq!(
             std::fs::read(tmp.path().join("Memories/Save States/game.state")).unwrap(),
@@ -204,7 +230,7 @@ mod card_tests {
         );
         // "new name.gba" now sits beside it: its saves would be shared.
         assert_eq!(
-            plan_card(
+            plan(
                 &pocket,
                 Path::new("Assets/gba/common/one/game.v2.gba"),
                 "new name.gb"
@@ -229,7 +255,7 @@ mod card_tests {
         write(tmp.path(), "Assets/gb/common/game.gb", "source");
         write(tmp.path(), "Assets/gb/common/OTHER.gbc", "other");
         assert_eq!(
-            plan_card(&pocket, Path::new("Assets/gb/common/game.gb"), "other.gb")
+            plan(&pocket, Path::new("Assets/gb/common/game.gb"), "other.gb")
                 .unwrap_err()
                 .code(),
             "SAVE_OWNER_AMBIGUOUS"
@@ -253,8 +279,8 @@ mod card_tests {
         let index = Index::scan(&pocket).unwrap();
         assert_eq!(index.roms.len(), 1);
         assert_eq!(index.roms[0].platform, "gbstudio");
-        let preview = plan_card(&pocket, Path::new("GB Studio/demo.pocket"), "new").unwrap();
-        apply_card(&pocket, &preview).unwrap();
+        let mut preview = plan(&pocket, Path::new("GB Studio/demo.pocket"), "new").unwrap();
+        crate::testutil::apply(&mut preview, Some(&pocket), None).unwrap();
         let scanned = Index::scan(&pocket).unwrap();
         assert_eq!(scanned.roms.len(), 1);
         assert_eq!(scanned.roms[0].name, "new.pocket");

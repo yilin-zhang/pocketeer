@@ -16,6 +16,7 @@ pub mod saves;
 
 use std::path::Path;
 
+use pocketeer_core::plan::{self, Resources};
 pub use pocketeer_core::plan::{Applied, Plan};
 use pocketeer_core::{Error, ErrorInfo, Result, catalog::Dat, plan::Progress};
 use serde::Serialize;
@@ -41,19 +42,10 @@ pub fn verdict(changes: usize, failed: usize) -> Option<Error> {
     })
 }
 
-/// A plan the CLI and the TUI can carry out. Every write operation's plan
-/// implements it, so applying one never needs per-operation glue: `stage`
-/// and `Batch` run any of them, and the TUI applies any of them the same way.
-/// (`&mut self`: an install plan reads its zip as it goes.)
-pub trait Apply: Plan {
-    type Output: Applied;
-    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<Self::Output>;
-}
-
 /// A plan plus, when it was applied, its result. Serialises as
 /// `{mode, ...plan fields, result?}`.
 #[derive(Serialize)]
-pub struct Staged<P: Apply> {
+pub struct Staged<P: Plan> {
     pub mode: Mode,
     #[serde(flatten)]
     pub plan: P,
@@ -61,7 +53,7 @@ pub struct Staged<P: Apply> {
     pub result: Option<P::Output>,
 }
 
-impl<P: Apply> Staged<P> {
+impl<P: Plan> Staged<P> {
     /// A plan that was not (or not yet) applied.
     pub fn new(mode: Mode, plan: P) -> Self {
         Staged {
@@ -86,21 +78,21 @@ impl<P: Apply> Staged<P> {
     }
 }
 
-impl<P: Apply> Outcome for Staged<P> {
+impl<P: Plan> Outcome for Staged<P> {
     fn error(&self) -> Option<Error> {
         verdict(self.changes(), self.failed())
     }
 }
 
 /// Applies `plan` unless this is a dry run or there is nothing to do.
-pub fn stage<P: Apply>(
+pub fn stage<P: Plan>(
     ctx: &Context,
     mode: Mode,
     mut plan: P,
     progress: Progress<'_>,
 ) -> Result<Staged<P>> {
     let result = if mode == Mode::Applied && plan.changes() > 0 {
-        Some(plan.apply(ctx, progress)?)
+        Some(plan::apply(&mut ctx.resources(), &mut plan, progress)?)
     } else {
         None
     };
@@ -110,7 +102,7 @@ pub fn stage<P: Apply>(
 /// Like [`stage`], for a plan that must not run because of problems found
 /// alongside it (names that don't exist, say) unless `allowed`. Those
 /// problems are the caller's to count as failures.
-pub fn stage_if<P: Apply>(
+pub fn stage_if<P: Plan>(
     ctx: &Context,
     mode: Mode,
     allowed: bool,
@@ -128,13 +120,13 @@ pub fn stage_if<P: Apply>(
 /// `library standardize`): each item is planned and applied on its own,
 /// and a failure stays with its item instead of aborting the rest.
 #[derive(Serialize)]
-pub struct Batch<P: Apply> {
+pub struct Batch<P: Plan> {
     pub mode: Mode,
     pub items: Vec<BatchItem<P>>,
 }
 
 #[derive(Serialize)]
-pub struct BatchItem<P: Apply> {
+pub struct BatchItem<P: Plan> {
     /// What the user named: `id`, `id@version`, a zip path or a ROM.
     pub target: String,
     #[serde(flatten)]
@@ -144,7 +136,7 @@ pub struct BatchItem<P: Apply> {
 /// How far one item of a [`Batch`] got.
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub enum BatchState<P: Apply> {
+pub enum BatchState<P: Plan> {
     /// It couldn't be planned.
     Unplanned {
         error: ErrorInfo,
@@ -164,7 +156,7 @@ pub enum BatchState<P: Apply> {
     },
 }
 
-impl<P: Apply> Batch<P> {
+impl<P: Plan> Batch<P> {
     /// Stages every planned item in turn (see [`BatchItem::stage`]).
     pub fn stage(
         ctx: &Context,
@@ -172,10 +164,11 @@ impl<P: Apply> Batch<P> {
         plans: impl IntoIterator<Item = (String, Result<P>)>,
         progress: Progress<'_>,
     ) -> Self {
+        let mut res = ctx.resources();
         let items = plans
             .into_iter()
             .map(|(target, plan)| match plan {
-                Ok(plan) => BatchItem::stage(target, ctx, mode, plan, progress),
+                Ok(plan) => BatchItem::stage(target, &mut res, mode, plan, progress),
                 Err(e) => BatchItem {
                     target,
                     state: BatchState::Unplanned { error: e.to_info() },
@@ -218,7 +211,7 @@ impl<P: Apply> Batch<P> {
     }
 }
 
-impl<P: Apply> Outcome for Batch<P> {
+impl<P: Plan> Outcome for Batch<P> {
     fn error(&self) -> Option<Error> {
         let changes = self
             .items
@@ -229,11 +222,11 @@ impl<P: Apply> Outcome for Batch<P> {
     }
 }
 
-impl<P: Apply> BatchItem<P> {
+impl<P: Plan> BatchItem<P> {
     /// The same gate as [`stage`], but a failure to apply stays with the item.
     pub fn stage(
         target: String,
-        ctx: &Context,
+        res: &mut Resources,
         mode: Mode,
         mut plan: P,
         progress: Progress<'_>,
@@ -241,7 +234,7 @@ impl<P: Apply> BatchItem<P> {
         let state = if mode != Mode::Applied || plan.changes() == 0 {
             BatchState::Planned { plan }
         } else {
-            match plan.apply(ctx, progress) {
+            match plan::apply(res, &mut plan, progress) {
                 Ok(result) => BatchState::Applied { plan, result },
                 Err(e) => BatchState::Failed {
                     plan,
@@ -277,7 +270,10 @@ pub fn load_dat(path: Option<&Path>) -> Result<Option<Dat>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pocketeer_core::card::install::Changes;
+    use pocketeer_core::{
+        card::install::Changes,
+        plan::{Checked, Pinned},
+    };
 
     use crate::cli::Global;
 
@@ -285,17 +281,31 @@ mod tests {
     #[derive(Serialize)]
     struct Fake {
         fails: bool,
+        #[serde(skip)]
+        pinned: Pinned,
     }
 
-    impl Plan for Fake {
-        fn changes(&self) -> usize {
-            1
+    impl Fake {
+        fn new(fails: bool) -> Self {
+            Fake {
+                fails,
+                pinned: Pinned::default(),
+            }
         }
     }
 
-    impl Apply for Fake {
+    impl Plan for Fake {
         type Output = Changes;
-        fn apply(&mut self, _: &Context, _: Progress<'_>) -> Result<Changes> {
+
+        fn changes(&self) -> usize {
+            1
+        }
+
+        fn pinned(&self) -> &Pinned {
+            &self.pinned
+        }
+
+        fn execute(&mut self, _: &mut Resources, _: Progress<'_>, _: Checked) -> Result<Changes> {
             match self.fails {
                 true => Err(Error::NoHomeDir),
                 false => Ok(Changes::default()),
@@ -317,10 +327,10 @@ mod tests {
         let batch = run(
             Mode::Applied,
             vec![
-                Ok(Fake { fails: false }),
-                Ok(Fake { fails: true }),
+                Ok(Fake::new(false)),
+                Ok(Fake::new(true)),
                 Err(Error::NoHomeDir),
-                Ok(Fake { fails: false }),
+                Ok(Fake::new(false)),
             ],
         );
         let states: Vec<_> = batch
@@ -339,7 +349,7 @@ mod tests {
 
     #[test]
     fn a_dry_run_applies_nothing() {
-        let batch = run(Mode::DryRun, vec![Ok(Fake { fails: true })]);
+        let batch = run(Mode::DryRun, vec![Ok(Fake::new(true))]);
         assert!(matches!(batch.items[0].state, BatchState::Planned { .. }));
         assert!(batch.error().is_none());
     }

@@ -12,16 +12,16 @@ use pocketeer_core::{
         bios::PlacePlan,
         clean::CleanPlan,
         install::{Prepared, UninstallPlan},
-        rename::CardRenamePlan,
         roms::DeletePlan,
     },
     library::{
         covers::import::CoverImportPlan, import::ImportPlan,
         remove::RemovePlan as LibraryRemovePlan, rename::RenamePlan,
     },
-    plan::{Plan, Progress},
+    plan::{self, Plan, Progress},
     transfer::{
         from_card::CardImportPlan,
+        rename::CardRenamePlan,
         saves::{SaveAction, SavesPlan, TrashPlan, TrashTarget},
         to_card::CopyPlan,
     },
@@ -30,7 +30,7 @@ use pocketeer_core::{
 use super::worker::{Msg, applied, failed};
 use crate::{
     ops::{
-        Apply, Batch, Mode, Staged,
+        Batch, Mode, Staged,
         context::Context,
         library::{Imported, ImportsRoms},
     },
@@ -103,7 +103,7 @@ fn info(title: &str, lines: Vec<String>) -> Preview {
 }
 
 /// Asks `title` over the plan's own text.
-fn confirm_plan<P: Apply + Pending + 'static>(title: String, plan: P) -> Preview
+fn confirm_plan<P: Plan + Pending + 'static>(title: String, plan: P) -> Preview
 where
     Staged<P>: Text,
 {
@@ -113,11 +113,11 @@ where
 }
 
 /// Applies `plan` and says what happened the way the CLI does.
-fn apply_plan<P: Apply>(mut plan: P, ctx: &Context, progress: Progress<'_>) -> Msg
+fn apply_plan<P: Plan>(mut plan: P, ctx: &Context, progress: Progress<'_>) -> Msg
 where
     Staged<P>: Text,
 {
-    match plan.apply(ctx, progress) {
+    match plan::apply(&mut ctx.resources(), &mut plan, progress) {
         Ok(result) => {
             let staged = Staged {
                 mode: Mode::Applied,
@@ -132,7 +132,7 @@ where
 
 /// A plan asked about with its own text under a fixed kind of question;
 /// [`Pending`] follows from it.
-trait Ask: Apply + Send + Sized + 'static
+trait Ask: Plan + Send + Sized + 'static
 where
     Staged<Self>: Text,
 {
@@ -324,7 +324,7 @@ impl Pending for SaveSync {
 
     fn apply(self: Box<Self>, ctx: &Context, progress: Progress<'_>) -> Msg {
         let SaveSync { mut plan, games } = *self;
-        match plan.apply(ctx, progress) {
+        match plan::apply(&mut ctx.resources(), &mut plan, progress) {
             Ok(result) => {
                 let staged = Staged {
                     mode: Mode::Applied,
@@ -398,7 +398,7 @@ impl Pending for Import {
 /// An import reads like `library import`, without the follow-ups (the TUI
 /// identifies and fetches covers on its own afterwards).
 fn apply_import<P: ImportsRoms>(mut plan: P, ctx: &Context, progress: Progress<'_>) -> Msg {
-    match plan.apply(ctx, progress) {
+    match plan::apply(&mut ctx.resources(), &mut plan, progress) {
         Ok(result) => {
             let imported = Imported {
                 staged: Staged {
@@ -462,7 +462,7 @@ impl Pending for Batch<RenamePlan> {
 }
 
 /// Applies every planned item of a previewed batch.
-fn apply_batch<P: Apply + Send + 'static>(
+fn apply_batch<P: Plan + Send + 'static>(
     batch: Batch<P>,
     ctx: &Context,
     progress: Progress<'_>,
@@ -488,7 +488,7 @@ impl Pending for DeletePlan {
     }
 
     fn apply(mut self: Box<Self>, ctx: &Context, progress: Progress<'_>) -> Msg {
-        match Apply::apply(&mut *self, ctx, progress) {
+        match plan::apply(&mut ctx.resources(), &mut *self, progress) {
             Ok(_) => applied(
                 format!("✓ deleted {} from the card", self.path.display()),
                 0,

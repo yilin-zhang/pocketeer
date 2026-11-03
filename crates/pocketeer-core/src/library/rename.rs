@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::{
     Error, Result,
     fsutil::names::{FileRename, apply_renames, complete_name, stem, validate_name},
-    plan::{Applied, Plan},
+    plan::{Applied, Checked, Event, Pinned, Plan, Progress, Resources},
 };
 
 use super::{Library, RomRef, db, resolve_rom};
@@ -21,13 +21,73 @@ pub struct RenamePlan {
     /// The file move, relative to the library root.
     pub library_file: FileRename,
     #[serde(skip)]
-    library: super::LibraryIdentity,
+    pinned: Pinned,
 }
 
 impl Plan for RenamePlan {
+    type Output = RenameResult;
+
     /// The file move plus the index update.
     fn changes(&self) -> usize {
         2
+    }
+
+    fn pinned(&self) -> &Pinned {
+        &self.pinned
+    }
+
+    fn execute(
+        &mut self,
+        res: &mut Resources,
+        progress: Progress<'_>,
+        _: Checked,
+    ) -> Result<RenameResult> {
+        progress(Event::Status(format!("Renaming {}", self.rom.name)));
+        let lib = res.library()?;
+        let root = lib.root().to_path_buf();
+        let tx = lib
+            .conn_mut()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| Error::db(e, "begin rename"))?;
+        let current = db::rom_name(&tx, self.rom.rom_id)?;
+        if current != self.rom.name {
+            return Err(Error::Stale {
+                what: format!("ROM {}", self.rom.name),
+            });
+        }
+        let moves = [self.library_file.clone()];
+        let renamed = apply_renames(&root, &moves)?;
+        let updated = (|| -> Result<()> {
+            db::rename_rom(
+                &tx,
+                self.rom.rom_id,
+                &self.new_name,
+                &self.library_file.to.to_string_lossy(),
+            )?;
+            if self.new_game_name != self.rom.game {
+                db::rename_game(&tx, self.rom.game_id, &self.new_game_name)?;
+                db::reset_unfound_cover(&tx, self.rom.game_id)?;
+            }
+            tx.commit().map_err(|e| Error::db(e, "commit rename"))
+        })();
+        if let Err(error) = updated {
+            let undo: Vec<_> = moves
+                .iter()
+                .rev()
+                .map(|m| FileRename {
+                    from: m.to.clone(),
+                    to: m.from.clone(),
+                })
+                .collect();
+            return Err(Error::ApplyFailed {
+                step: renamed,
+                rolled_back: apply_renames(&root, &undo).is_ok(),
+                source: Box::new(error),
+            });
+        }
+        Ok(RenameResult {
+            library_renamed: renamed,
+        })
     }
 }
 
@@ -84,7 +144,7 @@ pub fn plan(
         new_name,
         new_game_name,
         library_file,
-        library: lib.identity()?,
+        pinned: Pinned::library(lib)?,
     })
 }
 
@@ -97,54 +157,6 @@ impl Applied for RenameResult {
     fn failed(&self) -> usize {
         0
     }
-}
-
-pub fn apply(lib: &mut Library, plan: &RenamePlan) -> Result<RenameResult> {
-    lib.check(&plan.library)?;
-    let root = lib.root().to_path_buf();
-    let tx = lib
-        .conn_mut()
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|e| Error::db(e, "begin rename"))?;
-    let current = db::rom_name(&tx, plan.rom.rom_id)?;
-    if current != plan.rom.name {
-        return Err(Error::Stale {
-            what: format!("ROM {}", plan.rom.name),
-        });
-    }
-    let moves = [plan.library_file.clone()];
-    let renamed = apply_renames(&root, &moves)?;
-    let updated = (|| -> Result<()> {
-        db::rename_rom(
-            &tx,
-            plan.rom.rom_id,
-            &plan.new_name,
-            &plan.library_file.to.to_string_lossy(),
-        )?;
-        if plan.new_game_name != plan.rom.game {
-            db::rename_game(&tx, plan.rom.game_id, &plan.new_game_name)?;
-            db::reset_unfound_cover(&tx, plan.rom.game_id)?;
-        }
-        tx.commit().map_err(|e| Error::db(e, "commit rename"))
-    })();
-    if let Err(error) = updated {
-        let undo: Vec<_> = moves
-            .iter()
-            .rev()
-            .map(|m| FileRename {
-                from: m.to.clone(),
-                to: m.from.clone(),
-            })
-            .collect();
-        return Err(Error::ApplyFailed {
-            step: renamed,
-            rolled_back: apply_renames(&root, &undo).is_ok(),
-            source: Box::new(error),
-        });
-    }
-    Ok(RenameResult {
-        library_renamed: renamed,
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -221,11 +233,11 @@ mod tests {
 
     #[test]
     fn local_rename_updates_the_managed_file_and_library_index() {
-        let (_tmp, mut lib) = library_with(&[("Foo.fkh", "rom"), ("Bar.fkh", "other")]);
+        let (_tmp, lib) = library_with(&[("Foo.fkh", "rom"), ("Bar.fkh", "other")]);
         write(lib.root(), "saves/Saves/fkh/common/Foo.sav", "backup");
-        let preview = plan(&lib, None, "Foo.fkh", "New name").unwrap();
+        let mut preview = plan(&lib, None, "Foo.fkh", "New name").unwrap();
         assert_eq!(preview.new_name, "New name.fkh");
-        apply(&mut lib, &preview).unwrap();
+        crate::testutil::apply(&mut preview, None, Some(&lib)).unwrap();
         let (game, rom) = resolve_rom(&lib, None, "New name.fkh").unwrap();
         assert_eq!(game.name, "New name");
         assert_eq!(std::fs::read(lib.rom_abs_path(&rom)).unwrap(), b"rom");
@@ -240,15 +252,20 @@ mod tests {
             "NAME_TAKEN"
         );
         // The preview was for the old name: applying it again is refused.
-        assert_eq!(apply(&mut lib, &preview).unwrap_err().code(), "STALE_PLAN");
+        assert_eq!(
+            crate::testutil::apply(&mut preview, None, Some(&lib))
+                .unwrap_err()
+                .code(),
+            "STALE_PLAN"
+        );
     }
 
     #[test]
     fn database_failure_restores_the_original_file_and_index() {
-        let (_tmp, mut lib) = library_with(&[("Foo.fkh", "rom")]);
-        let preview = plan(&lib, None, "Foo.fkh", "New name").unwrap();
+        let (_tmp, lib) = library_with(&[("Foo.fkh", "rom")]);
+        let mut preview = plan(&lib, None, "Foo.fkh", "New name").unwrap();
         lib.conn().execute_batch("CREATE TRIGGER reject_rename BEFORE UPDATE ON roms BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
-        assert!(apply(&mut lib, &preview).is_err());
+        assert!(crate::testutil::apply(&mut preview, None, Some(&lib)).is_err());
         let (_, rom) = resolve_rom(&lib, None, "Foo.fkh").unwrap();
         assert_eq!(std::fs::read(lib.rom_abs_path(&rom)).unwrap(), b"rom");
         assert!(!lib.root().join("roms/fkh/New name.fkh").exists());

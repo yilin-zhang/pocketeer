@@ -2,7 +2,7 @@
 
 use super::Cover;
 use crate::library::{Library, db};
-use crate::plan::{Applied, Plan};
+use crate::plan::{Applied, Checked, Pinned, Plan, Progress, Resources};
 use crate::{Error, Result, fsutil};
 use image::{ImageFormat, ImageReader, Limits};
 use serde::Serialize;
@@ -27,7 +27,7 @@ pub struct CoverImportPlan {
     /// The cover the game had when planned.
     pub previous: Option<Cover>,
     #[serde(skip)]
-    library: crate::library::LibraryIdentity,
+    pinned: Pinned,
     // The confirmation applies these exact validated bytes, even if the source moves.
     #[serde(skip)]
     image: Arc<[u8]>,
@@ -41,8 +41,75 @@ impl CoverImportPlan {
 }
 
 impl Plan for CoverImportPlan {
+    type Output = CoverImportResult;
+
     fn changes(&self) -> usize {
         1
+    }
+
+    fn pinned(&self) -> &Pinned {
+        &self.pinned
+    }
+
+    fn execute(
+        &mut self,
+        res: &mut Resources,
+        _: Progress<'_>,
+        _: Checked,
+    ) -> Result<CoverImportResult> {
+        let lib = res.library()?;
+        let root = lib.root().to_path_buf();
+        let destination = root.join(&self.destination);
+        let tx = lib
+            .conn_mut()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| Error::db(e, "begin cover import"))?;
+        if db::get_game(&tx, self.game.id)?.as_ref() != Some(&self.game)
+            || db::cover(&tx, self.game.id)? != self.previous
+        {
+            return Err(Error::Stale {
+                what: format!("{} or its cover", self.game.name),
+            });
+        }
+        let created = match fs::read(&destination) {
+            Ok(existing) if existing == self.image.as_ref() => false,
+            Ok(_) => return Err(Error::AlreadyExists { path: destination }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                fsutil::write_new_via_temp(&destination, |out| {
+                    use std::io::Write;
+                    out.write_all(&self.image)
+                        .map_err(|e| Error::io(&destination, e))
+                })?;
+                true
+            }
+            Err(e) => return Err(Error::io(&destination, e)),
+        };
+        let saved = (|| -> Result<()> {
+            db::set_imported_cover(&tx, self.game.id, &self.destination)?;
+            tx.commit().map_err(|e| Error::db(e, "commit cover import"))
+        })();
+        if let Err(e) = saved {
+            if created {
+                let _ = fs::remove_file(&destination);
+            }
+            return Err(e);
+        }
+        let mut warnings = Vec::new();
+        if let Some(Cover::Imported { path: rel }) = &self.previous
+            && rel != &self.destination
+            && rel.parent() == self.destination.parent()
+            && let Err(e) = fs::remove_file(root.join(rel))
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warnings.push(format!(
+                "New cover saved; old image could not be removed: {e}"
+            ));
+        }
+        Ok(CoverImportResult {
+            path: self.destination.clone(),
+            replaced: self.replaces_cover(),
+            warnings,
+        })
     }
 }
 
@@ -93,7 +160,7 @@ pub fn plan(lib: &Library, game_id: i64, source: &Path) -> Result<CoverImportPla
         width: decoded.width(),
         height: decoded.height(),
         bytes: bytes.len(),
-        library: lib.identity()?,
+        pinned: Pinned::library(lib)?,
         image: bytes.into(),
     })
 }
@@ -109,62 +176,6 @@ impl Applied for CoverImportResult {
     fn failed(&self) -> usize {
         0
     }
-}
-
-pub fn apply(lib: &mut Library, plan: &CoverImportPlan) -> Result<CoverImportResult> {
-    lib.check(&plan.library)?;
-    let root = lib.root().to_path_buf();
-    let destination = root.join(&plan.destination);
-    let tx = lib
-        .conn_mut()
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|e| Error::db(e, "begin cover import"))?;
-    if db::get_game(&tx, plan.game.id)?.as_ref() != Some(&plan.game)
-        || db::cover(&tx, plan.game.id)? != plan.previous
-    {
-        return Err(Error::Stale {
-            what: format!("{} or its cover", plan.game.name),
-        });
-    }
-    let created = match fs::read(&destination) {
-        Ok(existing) if existing == plan.image.as_ref() => false,
-        Ok(_) => return Err(Error::AlreadyExists { path: destination }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            fsutil::write_new_via_temp(&destination, |out| {
-                use std::io::Write;
-                out.write_all(&plan.image)
-                    .map_err(|e| Error::io(&destination, e))
-            })?;
-            true
-        }
-        Err(e) => return Err(Error::io(&destination, e)),
-    };
-    let saved = (|| -> Result<()> {
-        db::set_imported_cover(&tx, plan.game.id, &plan.destination)?;
-        tx.commit().map_err(|e| Error::db(e, "commit cover import"))
-    })();
-    if let Err(e) = saved {
-        if created {
-            let _ = fs::remove_file(&destination);
-        }
-        return Err(e);
-    }
-    let mut warnings = Vec::new();
-    if let Some(Cover::Imported { path: rel }) = &plan.previous
-        && rel != &plan.destination
-        && rel.parent() == plan.destination.parent()
-        && let Err(e) = fs::remove_file(root.join(rel))
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        warnings.push(format!(
-            "New cover saved; old image could not be removed: {e}"
-        ));
-    }
-    Ok(CoverImportResult {
-        path: plan.destination.clone(),
-        replaced: plan.replaces_cover(),
-        warnings,
-    })
 }
 
 #[cfg(test)]
@@ -183,20 +194,20 @@ mod tests {
 
     #[test]
     fn imported_copy_survives_source_removal_and_rom_rename_and_replaces_safely() {
-        let (tmp, mut lib) = library_with(&[("game.gba", "ROM")]);
+        let (tmp, lib) = library_with(&[("game.gba", "ROM")]);
         let game = lib.list_games(None, None).unwrap().remove(0);
         let source = tmp.path().join("art.png");
         image(&source, 10);
         let original = fs::read(&source).unwrap();
-        let preview = plan(&lib, game.id, &source).unwrap();
+        let mut preview = plan(&lib, game.id, &source).unwrap();
         assert_eq!((preview.width, preview.height), (3, 2));
         assert!(covers::path_for(&lib, game.id).unwrap().is_none());
-        let result = apply(&mut lib, &preview).unwrap();
+        let result = crate::testutil::apply(&mut preview, None, Some(&lib)).unwrap();
         let old = lib.root().join(&result.path);
         assert_eq!(fs::read(&old).unwrap(), original);
         fs::remove_file(&source).unwrap();
-        let rename = rename::plan(&lib, None, "game.gba", "renamed").unwrap();
-        rename::apply(&mut lib, &rename).unwrap();
+        let mut rename = rename::plan(&lib, None, "game.gba", "renamed").unwrap();
+        crate::testutil::apply(&mut rename, None, Some(&lib)).unwrap();
         assert_eq!(covers::path_for(&lib, game.id).unwrap(), Some(old.clone()));
 
         fs::write(&source, b"invalid image").unwrap();
@@ -206,8 +217,8 @@ mod tests {
         );
         assert_eq!(fs::read(&old).unwrap(), original);
         image(&source, 90);
-        let replacement = plan(&lib, game.id, &source).unwrap();
-        let result = apply(&mut lib, &replacement).unwrap();
+        let mut replacement = plan(&lib, game.id, &source).unwrap();
+        let result = crate::testutil::apply(&mut replacement, None, Some(&lib)).unwrap();
         assert!(result.replaced);
         assert!(!old.exists());
         assert_eq!(
@@ -219,19 +230,24 @@ mod tests {
             Some(Cover::Imported { .. })
         ));
         // The first preview is out of date now.
-        assert_eq!(apply(&mut lib, &preview).unwrap_err().code(), "STALE_PLAN");
+        assert_eq!(
+            crate::testutil::apply(&mut preview, None, Some(&lib))
+                .unwrap_err()
+                .code(),
+            "STALE_PLAN"
+        );
     }
 
     #[test]
     fn the_format_comes_from_the_bytes_not_the_file_name() {
-        let (tmp, mut lib) = library_with(&[("game.gba", "ROM")]);
+        let (tmp, lib) = library_with(&[("game.gba", "ROM")]);
         let game = lib.list_games(None, None).unwrap().remove(0);
         let source = tmp.path().join("cover.jpg");
         image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 128]))
             .save_with_format(&source, image::ImageFormat::WebP)
             .unwrap();
-        let preview = plan(&lib, game.id, &source).unwrap();
-        let result = apply(&mut lib, &preview).unwrap();
+        let mut preview = plan(&lib, game.id, &source).unwrap();
+        let result = crate::testutil::apply(&mut preview, None, Some(&lib)).unwrap();
         assert_eq!(result.path.extension().unwrap(), "webp");
         // Copied as is: the transparency survives.
         assert_eq!(
@@ -242,17 +258,17 @@ mod tests {
 
     #[test]
     fn failed_database_update_keeps_the_old_cover_and_removes_only_the_new_copy() {
-        let (tmp, mut lib) = library_with(&[("game.gba", "ROM")]);
+        let (tmp, lib) = library_with(&[("game.gba", "ROM")]);
         let game = lib.list_games(None, None).unwrap().remove(0);
         let source = tmp.path().join("art.jpg");
         image(&source, 10);
-        let first = plan(&lib, game.id, &source).unwrap();
-        apply(&mut lib, &first).unwrap();
+        let mut first = plan(&lib, game.id, &source).unwrap();
+        crate::testutil::apply(&mut first, None, Some(&lib)).unwrap();
         let before = db::cover(lib.conn(), game.id).unwrap();
         image(&source, 90);
-        let next = plan(&lib, game.id, &source).unwrap();
+        let mut next = plan(&lib, game.id, &source).unwrap();
         lib.conn().execute_batch("CREATE TRIGGER reject_cover BEFORE UPDATE ON covers BEGIN SELECT RAISE(FAIL, 'test failure'); END;").unwrap();
-        assert!(apply(&mut lib, &next).is_err());
+        assert!(crate::testutil::apply(&mut next, None, Some(&lib)).is_err());
         assert_eq!(db::cover(lib.conn(), game.id).unwrap(), before);
         assert_eq!(
             fs::read(lib.root().join(&first.destination)).unwrap(),

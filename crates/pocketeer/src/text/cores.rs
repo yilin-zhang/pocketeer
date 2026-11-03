@@ -7,7 +7,6 @@ use pocketeer_core::card::{
     install::{InstallPlan, UninstallPlan},
 };
 use pocketeer_core::catalog::inventory::InventoryStatus;
-use pocketeer_core::plan::Plan;
 
 use super::{Reader, Text, actions, batch_report, bytes, source, table};
 use crate::ops::cores::{InstallReport, RemoveReport, SearchReport};

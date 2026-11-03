@@ -6,7 +6,7 @@ use crate::{
     card::roms::{Identity, Index},
     fsutil,
     fsutil::hash::copy_and_hash,
-    plan::{Applied, Event, Failure, Plan, Progress},
+    plan::{Applied, Checked, Event, Failure, Pinned, Plan, Progress, Resources},
 };
 use serde::Serialize;
 use std::{fs::File, path::PathBuf};
@@ -22,14 +22,70 @@ pub struct CopyFile {
 #[derive(Debug, Clone, Serialize)]
 pub struct CopyPlan {
     #[serde(skip)]
-    identity: crate::card::CardIdentity,
+    pinned: Pinned,
     pub files: Vec<CopyFile>,
     pub already_present: Vec<PathBuf>,
     pub warnings: Vec<String>,
 }
 impl Plan for CopyPlan {
+    type Output = CopyResult;
+
     fn changes(&self) -> usize {
         self.files.len()
+    }
+
+    fn pinned(&self) -> &Pinned {
+        &self.pinned
+    }
+
+    fn execute(
+        &mut self,
+        res: &mut Resources,
+        progress: Progress<'_>,
+        _: Checked,
+    ) -> Result<CopyResult> {
+        let pocket = &res.pocket()?.clone();
+        let mut index = Index::scan(pocket)?;
+        let mut result = CopyResult::default();
+        for (i, file) in self.files.iter().enumerate() {
+            progress(Event::Status(format!(
+                "Copying {}",
+                file.destination.display()
+            )));
+            let dest = pocket.root().join(&file.destination);
+            let copied = fsutil::write_new_via_temp(&dest, |out| {
+                let mut input = File::open(&file.source).map_err(|e| Error::io(&file.source, e))?;
+                let hashes =
+                    copy_and_hash(&mut input, out).map_err(|e| Error::io(&file.source, e))?;
+                if hashes.sha1 != file.sha1 || hashes.size != file.size {
+                    return Err(Error::Mismatch {
+                        path: file.source.clone(),
+                        what: "differs from its library identity; reimport it before copying"
+                            .into(),
+                    });
+                }
+                Ok(())
+            });
+            match copied {
+                Ok(()) => {
+                    result.copied += 1;
+                    if let Err(e) = index.record_copy(pocket, &file.destination, &file.sha1) {
+                        result
+                            .warnings
+                            .push(format!("Copied ROM, but could not update its cache: {e}"));
+                    }
+                }
+                Err(e) => result.failed.push(Failure::new(&file.destination, &e)),
+            }
+            progress(Event::Step {
+                done: i + 1,
+                total: self.files.len(),
+            });
+        }
+        if let Err(e) = index.save(pocket) {
+            result.warnings.push(format!("Cache not saved: {e}"));
+        }
+        Ok(result)
     }
 }
 
@@ -66,7 +122,7 @@ pub fn plan(
     let mut index = Index::scan(pocket)?;
     let mut checked = vec![false; index.roms.len()];
     let mut plan = CopyPlan {
-        identity: crate::card::CardIdentity::read(pocket)?,
+        pinned: Pinned::card(pocket)?,
         files: Vec::new(),
         already_present: Vec::new(),
         warnings: index.warning.take().into_iter().collect(),
@@ -137,49 +193,6 @@ pub fn plan(
     Ok(plan)
 }
 
-pub fn apply(pocket: &Pocket, plan: &CopyPlan, progress: Progress<'_>) -> Result<CopyResult> {
-    plan.identity.check(pocket)?;
-    let mut index = Index::scan(pocket)?;
-    let mut result = CopyResult::default();
-    for (i, file) in plan.files.iter().enumerate() {
-        progress(Event::Status(format!(
-            "Copying {}",
-            file.destination.display()
-        )));
-        let dest = pocket.root().join(&file.destination);
-        let copied = fsutil::write_new_via_temp(&dest, |out| {
-            let mut input = File::open(&file.source).map_err(|e| Error::io(&file.source, e))?;
-            let hashes = copy_and_hash(&mut input, out).map_err(|e| Error::io(&file.source, e))?;
-            if hashes.sha1 != file.sha1 || hashes.size != file.size {
-                return Err(Error::Mismatch {
-                    path: file.source.clone(),
-                    what: "differs from its library identity; reimport it before copying".into(),
-                });
-            }
-            Ok(())
-        });
-        match copied {
-            Ok(()) => {
-                result.copied += 1;
-                if let Err(e) = index.record_copy(pocket, &file.destination, &file.sha1) {
-                    result
-                        .warnings
-                        .push(format!("Copied ROM, but could not update its cache: {e}"));
-                }
-            }
-            Err(e) => result.failed.push(Failure::new(&file.destination, &e)),
-        }
-        progress(Event::Step {
-            done: i + 1,
-            total: plan.files.len(),
-        });
-    }
-    if let Err(e) = index.save(pocket) {
-        result.warnings.push(format!("Cache not saved: {e}"));
-    }
-    Ok(result)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,8 +202,8 @@ mod tests {
     fn confirmed_copy_does_not_require_checking_unrelated_same_size_roms() {
         let (_tmp, lib) = library_with(&[("local.fkh", "ROM")]);
         let (tmp, pocket) = sd();
-        let preview = plan(&lib, &pocket, None, &["local.fkh".into()], &mut |_| {}).unwrap();
-        apply(&pocket, &preview, &mut |_| {}).unwrap();
+        let mut preview = plan(&lib, &pocket, None, &["local.fkh".into()], &mut |_| {}).unwrap();
+        crate::testutil::apply(&mut preview, Some(&pocket), None).unwrap();
         write(tmp.path(), "Assets/fkh/common/a-unresolved.fkh", "???");
 
         let preview = plan(&lib, &pocket, None, &["local.fkh".into()], &mut |_| {}).unwrap();
@@ -212,9 +225,9 @@ mod tests {
     fn explicit_copy_updates_identity_and_recognizes_renamed_copies() {
         let (_tmp, lib) = library_with(&[("local.fkh", "ROM")]);
         let (tmp, pocket) = sd();
-        let preview = plan(&lib, &pocket, None, &["local.fkh".into()], &mut |_| {}).unwrap();
+        let mut preview = plan(&lib, &pocket, None, &["local.fkh".into()], &mut |_| {}).unwrap();
         assert_eq!(preview.files.len(), 1);
-        let result = apply(&pocket, &preview, &mut |_| {}).unwrap();
+        let result = crate::testutil::apply(&mut preview, Some(&pocket), None).unwrap();
         assert_eq!(result.copied, 1);
         assert!(result.failed.is_empty());
         assert!(result.warnings.is_empty());
@@ -234,10 +247,9 @@ mod tests {
             [PathBuf::from("Assets/fkh/common/renamed.fkh")]
         );
         write(tmp.path(), "Assets/fkh/common/local.fkh", "other content");
-        let result = apply(
-            &pocket,
-            &CopyPlan {
-                identity: crate::card::CardIdentity::read(&pocket).unwrap(),
+        let result = crate::testutil::apply(
+            &mut CopyPlan {
+                pinned: Pinned::card(&pocket).unwrap(),
                 files: vec![CopyFile {
                     source: lib.root().join("roms/fkh/local.fkh"),
                     destination: "Assets/fkh/common/local.fkh".into(),
@@ -247,7 +259,8 @@ mod tests {
                 already_present: Vec::new(),
                 warnings: Vec::new(),
             },
-            &mut |_| {},
+            Some(&pocket),
+            None,
         )
         .unwrap();
         assert_eq!(result.copied, 0);

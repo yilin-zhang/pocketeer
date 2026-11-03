@@ -1,21 +1,18 @@
 //! Save files and save states: card ⇄ library, with history.
 
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use pocketeer_core::{
     Result,
-    plan::{Event, Progress},
+    plan::Event,
     transfer::saves::{
-        self, ConflictChoice, SaveEntry, SaveVersion, SavesOptions, SavesPlan, SavesResult, Scope,
-        TrashPlan, TrashResult, TrashTarget,
+        self, ConflictChoice, SaveEntry, SaveVersion, SavesOptions, SavesPlan, Scope, TrashPlan,
+        TrashTarget,
     },
 };
 use serde::Serialize;
 
-use super::{Apply, Mode, Staged, context::Context, stage};
+use super::{Mode, Staged, context::Context, stage};
 
 pub type SyncReport = Staged<SavesPlan>;
 
@@ -25,18 +22,6 @@ pub fn plan_sync(
     progress: &mut dyn FnMut(Event),
 ) -> Result<SavesPlan> {
     saves::plan(&ctx.library()?, &ctx.pocket()?, opts, progress)
-}
-
-impl Apply for SavesPlan {
-    type Output = SavesResult;
-    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<SavesResult> {
-        let mut lib = ctx.library()?;
-        let result = saves::apply(&mut lib, &ctx.pocket()?, self, progress)?;
-        // New backups are linked to their games by name.
-        let games = lib.list_games(None, None)?;
-        saves::link_owners(&lib, &games, &BTreeMap::new())?;
-        Ok(result)
-    }
 }
 
 /// `saves backup`: pull newer card saves into the library. `conflicts`
@@ -108,17 +93,6 @@ pub fn plan_trash(ctx: &Context, rels: &[PathBuf], target: TrashTarget) -> Resul
         _ => None,
     };
     saves::plan_trash(&ctx.library()?, pocket.as_ref(), rels, target)
-}
-
-impl Apply for TrashPlan {
-    type Output = TrashResult;
-    fn apply(&mut self, ctx: &Context, _: Progress<'_>) -> Result<TrashResult> {
-        let pocket = match self.target {
-            TrashTarget::Card => Some(ctx.pocket()?),
-            _ => None,
-        };
-        saves::apply_trash(&mut ctx.library()?, pocket.as_ref(), self)
-    }
 }
 
 /// `saves trash`.

@@ -27,7 +27,7 @@ use pocketeer_core::{
 use crate::{
     cli::DocsReport,
     ops::{
-        Apply, Batch, BatchState, Mode,
+        Batch, BatchState, Mode, Plan,
         context::{ConfigPathReport, ConfigShowReport},
     },
 };
@@ -453,7 +453,7 @@ impl Text for DocsReport {
 
 /// Each item's plan (`plan`), then how applying it went (`done` sums up
 /// the changes).
-fn batch_report<P: Apply>(
+fn batch_report<P: Plan>(
     r: &Batch<P>,
     reader: Reader,
     plan: impl Fn(&mut String, &P, Reader),

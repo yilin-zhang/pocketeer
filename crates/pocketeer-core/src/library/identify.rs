@@ -477,8 +477,8 @@ mod tests {
         image::RgbImage::from_pixel(2, 2, image::Rgb([1, 2, 3]))
             .save(&source)
             .unwrap();
-        let plan = covers::import::plan(&lib, id, &source).unwrap();
-        covers::import::apply(&mut lib, &plan).unwrap();
+        let mut plan = covers::import::plan(&lib, id, &source).unwrap();
+        crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
         let before = db::cover(lib.conn(), id).unwrap();
         store(
             &cache,

@@ -18,7 +18,6 @@ use crate::{
     card::{cores::CoreList, formats::PreviousCore},
     catalog::inventory::update_available,
     fsutil::is_junk,
-    plan::Plan,
 };
 
 use super::zipfile::{CoreZip, ZipSource};
@@ -167,10 +166,10 @@ pub struct InstallPlan {
     pub actions: Actions,
 }
 
-/// One change: the core, installed or updated. Zero when it is already at
-/// this version (the plan then has no actions).
-impl Plan for InstallPlan {
-    fn changes(&self) -> usize {
+impl InstallPlan {
+    /// One change: the core, installed or updated. Zero when it is already
+    /// at this version (the plan then has no actions).
+    pub fn changes(&self) -> usize {
         usize::from(
             self.actions
                 .iter()

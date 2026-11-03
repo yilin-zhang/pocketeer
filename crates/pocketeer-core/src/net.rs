@@ -142,6 +142,38 @@ fn is_github(url: &str) -> bool {
         .is_some_and(|host| host == "github.com" || host.ends_with(".github.com"))
 }
 
+/// What talks to the network: the HTTP client and the download cache, and
+/// whether downloads may happen at all.
+#[derive(Debug, Clone)]
+pub struct Net {
+    http: Http,
+    cache: Cache,
+    offline: bool,
+}
+
+impl Net {
+    pub fn new(http: Http, cache: Cache, offline: bool) -> Self {
+        Net {
+            http,
+            cache,
+            offline,
+        }
+    }
+
+    pub fn http(&self) -> &Http {
+        &self.http
+    }
+
+    pub fn cache(&self) -> &Cache {
+        &self.cache
+    }
+
+    /// `--offline`: only what is already cached.
+    pub fn offline(&self) -> bool {
+        self.offline
+    }
+}
+
 /// How willing we are to hit the network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Policy {

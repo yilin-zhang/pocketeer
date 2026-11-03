@@ -8,24 +8,23 @@ use pocketeer_core::{
     card::{
         Status,
         bios::{self, BiosReport, PlacePlan},
-        clean::{self, CleanPlan, CleanResult},
-        install, rename as card_rename,
-        roms::{self, CardRom, Identity, Index},
+        clean::{self, CleanPlan},
+        roms::{CardRom, Identity, Index},
     },
     catalog::inventory::{Inventory, Platforms},
-    library::import::{ImportPlan, ImportResult},
+    library::import::ImportPlan,
     net::{Policy, Source},
     plan::{Event, Progress},
     transfer::{
         self, Comparison,
         from_card::{self, CardImportPlan},
-        to_card,
+        rename as card_rename, to_card,
     },
 };
 use serde::Serialize;
 
 use super::{
-    Apply, Mode, Staged,
+    Mode, Staged,
     context::Context,
     library::{ImportSettings, Imported, ImportsRoms, suggest_standard_names},
     load_dat, stage,
@@ -52,14 +51,14 @@ pub fn inventory_refresh(ctx: &Context) -> Result<RefreshReport> {
     } else {
         Policy::Refresh
     };
-    let inventory = Inventory::load(&net.http, &net.cache, policy)?;
-    let platforms = Platforms::load(&net.http, &net.cache, policy)?;
+    let inventory = Inventory::load(net.http(), net.cache(), policy)?;
+    let platforms = Platforms::load(net.http(), net.cache(), policy)?;
     Ok(RefreshReport {
         cores: inventory.cores.len(),
         platforms: platforms.platforms.len(),
         cores_source: inventory.source,
         platforms_source: platforms.source,
-        cache_dir: net.cache.dir().to_path_buf(),
+        cache_dir: net.cache().dir().to_path_buf(),
     })
 }
 
@@ -80,13 +79,6 @@ pub fn bios_check(ctx: &Context, ids: &[String], present: bool) -> Result<BiosRe
 
 pub type PlaceReport = Staged<PlacePlan>;
 
-impl Apply for PlacePlan {
-    type Output = install::Changes;
-    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<install::Changes> {
-        bios::apply_place(&ctx.pocket()?, self, progress)
-    }
-}
-
 pub fn bios_place(
     ctx: &Context,
     mode: Mode,
@@ -99,13 +91,6 @@ pub fn bios_place(
 }
 
 pub type CleanReport = Staged<CleanPlan>;
-
-impl Apply for CleanPlan {
-    type Output = CleanResult;
-    fn apply(&mut self, ctx: &Context, _: Progress<'_>) -> Result<CleanResult> {
-        clean::apply(&ctx.pocket()?, self)
-    }
-}
 
 pub fn clean(
     ctx: &Context,
@@ -189,43 +174,10 @@ pub fn plan_copy(
     to_card::plan(&ctx.library()?, &ctx.pocket()?, platform, roms, progress)
 }
 
-impl Apply for roms::DeletePlan {
-    type Output = install::Changes;
-    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<install::Changes> {
-        roms::apply_delete(&ctx.pocket()?, self, progress)
-    }
-}
-
-impl Apply for to_card::CopyPlan {
-    type Output = to_card::CopyResult;
-    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<Self::Output> {
-        to_card::apply(&ctx.pocket()?, self, progress)
-    }
-}
-
 pub type RenameReport = Staged<card_rename::CardRenamePlan>;
 
 pub fn plan_rename(ctx: &Context, path: &Path, name: &str) -> Result<card_rename::CardRenamePlan> {
-    card_rename::plan_card(&ctx.pocket()?, path, name)
-}
-
-impl Apply for card_rename::CardRenamePlan {
-    type Output = card_rename::CardRenameResult;
-    fn apply(&mut self, ctx: &Context, _: Progress<'_>) -> Result<Self::Output> {
-        let result = card_rename::apply_card(&ctx.pocket()?, self)?;
-        // Backed-up saves follow, or the next backup would see them as new.
-        let saves: Vec<_> = self
-            .saves
-            .iter()
-            .map(|m| (m.from.clone(), m.to.clone()))
-            .collect();
-        if !saves.is_empty()
-            && let Ok(lib) = ctx.library()
-        {
-            pocketeer_core::transfer::saves::follow_renames(&lib, &saves)?;
-        }
-        Ok(result)
-    }
+    card_rename::plan(&ctx.pocket()?, path, name)
 }
 
 // ---------------------------------------------------------------------------
@@ -283,14 +235,6 @@ pub fn plan_import(
     )?;
     suggest_standard_names(ctx, &lib, &mut plan.plan, req.settings.standard_names)?;
     Ok(plan)
-}
-
-/// Copies the planned ROMs into the library. The card itself is not changed.
-impl Apply for CardImportPlan {
-    type Output = ImportResult;
-    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<Self::Output> {
-        from_card::apply_import(&mut ctx.library()?, &ctx.pocket()?, self, progress)
-    }
 }
 
 impl ImportsRoms for CardImportPlan {

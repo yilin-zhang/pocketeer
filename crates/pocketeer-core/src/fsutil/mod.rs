@@ -102,6 +102,66 @@ pub fn set_mtime(path: &Path, secs: i64) -> Result<()> {
         .map_err(|e| Error::io(path, e))
 }
 
+/// Which file or folder a path names right now: two readings are equal only
+/// if it is the same one (not replaced, not another volume mounted at the
+/// same place).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileId {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume_serial: u32,
+}
+
+impl FileId {
+    pub fn of(path: &Path) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::metadata(path).map_err(|e| Error::io(path, e))?;
+            Ok(FileId {
+                device: meta.dev(),
+                inode: meta.ino(),
+            })
+        }
+        #[cfg(windows)]
+        {
+            Ok(FileId {
+                volume_serial: volume_serial(path)?,
+            })
+        }
+    }
+}
+
+#[cfg(windows)]
+fn volume_serial(path: &Path) -> Result<u32> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut mount = vec![0u16; 32768];
+    let mut serial = 0;
+    // Both buffers are NUL-terminated and remain alive throughout these calls.
+    let success = unsafe {
+        GetVolumePathNameW(path_wide.as_ptr(), mount.as_mut_ptr(), mount.len() as u32) != 0
+            && GetVolumeInformationW(
+                mount.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                &mut serial,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            ) != 0
+    };
+    if !success {
+        return Err(Error::io(path, std::io::Error::last_os_error()));
+    }
+    Ok(serial)
+}
+
 /// File size, 0 when the file can't be read.
 pub fn size_of(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)

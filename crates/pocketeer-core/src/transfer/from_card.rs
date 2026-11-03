@@ -16,7 +16,7 @@ use crate::{
         hash::HashCache,
         scan::{Candidate, FileRef},
     },
-    plan::{Plan, Progress},
+    plan::{Checked, Pinned, Plan, Progress, Resources},
 };
 
 use crate::library::{
@@ -53,8 +53,9 @@ fn unmatched(
 /// the card, for the card it was made on.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CardImportPlan {
+    /// The card and the library.
     #[serde(skip)]
-    identity: crate::card::CardIdentity,
+    pinned: Pinned,
     #[serde(flatten)]
     pub plan: ImportPlan,
     /// Paths asked for that aren't card-only ROMs; nothing runs while any are.
@@ -63,12 +64,47 @@ pub struct CardImportPlan {
 }
 
 impl Plan for CardImportPlan {
+    type Output = ImportResult;
+
     fn changes(&self) -> usize {
         self.plan.changes()
     }
 
     fn errors(&self) -> usize {
         self.not_found.len()
+    }
+
+    fn pinned(&self) -> &Pinned {
+        &self.pinned
+    }
+
+    /// Copies the planned files into the library, then records their hashes
+    /// in the card's ROM cache so it needn't read them again.
+    fn execute(
+        &mut self,
+        res: &mut Resources,
+        progress: Progress<'_>,
+        _: Checked,
+    ) -> Result<ImportResult> {
+        let pocket = res.pocket()?.clone();
+        let mut result = import::copy_in(res.library()?, &self.plan, progress)?;
+        let mut index = crate::card::roms::Index::scan(&pocket)?;
+        for verified in &result.verified_sources {
+            let Ok(relative) = verified.path.strip_prefix(pocket.root()) else {
+                continue;
+            };
+            if Stamp::of(&verified.path).ok() == Some(verified.stamp)
+                && let Err(e) = index.record_copy(&pocket, relative, &verified.sha1)
+            {
+                result
+                    .warnings
+                    .push(format!("Imported ROM, but cache was not updated: {e}"));
+            }
+        }
+        if let Err(e) = index.save(&pocket) {
+            result.warnings.push(format!("Cache not saved: {e}"));
+        }
+        Ok(result)
     }
 }
 
@@ -98,39 +134,10 @@ pub fn plan_import(
     }
     let plan = import::plan_import(lib, pocket.root(), &groups, opts, dat, cache, progress)?;
     Ok(CardImportPlan {
-        identity: crate::card::CardIdentity::read(pocket)?,
+        pinned: plan.pinned().clone().and_card(pocket)?,
         plan,
         not_found,
     })
-}
-
-/// Copies the planned files into the library, then records their hashes in
-/// the card's ROM cache so it needn't read them again.
-pub fn apply_import(
-    lib: &mut Library,
-    pocket: &Pocket,
-    plan: &CardImportPlan,
-    progress: Progress<'_>,
-) -> Result<ImportResult> {
-    plan.identity.check(pocket)?;
-    let mut result = import::apply_import(lib, &plan.plan, progress)?;
-    let mut index = crate::card::roms::Index::scan(pocket)?;
-    for verified in &result.verified_sources {
-        let Ok(relative) = verified.path.strip_prefix(pocket.root()) else {
-            continue;
-        };
-        if Stamp::of(&verified.path).ok() == Some(verified.stamp)
-            && let Err(e) = index.record_copy(pocket, relative, &verified.sha1)
-        {
-            result
-                .warnings
-                .push(format!("Imported ROM, but cache was not updated: {e}"));
-        }
-    }
-    if let Err(e) = index.save(pocket) {
-        result.warnings.push(format!("Cache not saved: {e}"));
-    }
-    Ok(result)
 }
 
 #[cfg(test)]
@@ -141,7 +148,7 @@ mod tests {
 
     #[test]
     fn lists_then_imports_card_only_roms() {
-        let (_tmp, mut lib) = library_with(&[
+        let (_tmp, lib) = library_with(&[
             ("In Library.fkh", "hello world"),
             ("Renamed Later.fkh", "22"),
         ]);
@@ -192,7 +199,7 @@ mod tests {
         );
         assert_eq!(all[2].owner, "x.Core");
         assert_eq!(list(&lib, &pocket, Some("gb")).unwrap().len(), 1);
-        let plan = plan_import(
+        let mut plan = plan_import(
             &lib,
             &pocket,
             &all,
@@ -205,7 +212,7 @@ mod tests {
         .unwrap();
         assert_eq!(plan.plan.platforms().len(), 2);
         assert_eq!(plan.changes(), 4);
-        let result = apply_import(&mut lib, &pocket, &plan, &mut |_| {}).unwrap();
+        let result = crate::testutil::apply(&mut plan, Some(&pocket), Some(&lib)).unwrap();
         assert_eq!(result.added, 4);
         assert!(lib.root().join("roms/fkh/Only Here.fkh").is_file());
         assert!(lib.root().join("roms/gb/Other.gb").is_file());

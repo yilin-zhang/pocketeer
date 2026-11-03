@@ -23,7 +23,7 @@ use crate::{
     },
     fsutil,
     fsutil::hash::digest_hex,
-    plan::Plan,
+    plan::{Checked, Pinned, Plan, Progress, Resources},
 };
 
 /// Cores whose instance JSONs describe things that aren't downloadable files.
@@ -394,12 +394,34 @@ pub struct PlacePlan {
     /// Zipped root files we won't unpack automatically.
     pub zipped: Vec<RequiredFile>,
     #[serde(skip)]
-    identity: crate::card::CardIdentity,
+    pinned: Pinned,
 }
 
 impl Plan for PlacePlan {
+    type Output = install::Changes;
+
     fn changes(&self) -> usize {
         self.actions.len()
+    }
+
+    fn pinned(&self) -> &Pinned {
+        &self.pinned
+    }
+
+    /// Moves the planned files.
+    fn execute(
+        &mut self,
+        res: &mut Resources,
+        progress: Progress<'_>,
+        _: Checked,
+    ) -> Result<install::Changes> {
+        install::apply::apply(
+            res.pocket()?,
+            "bios-place",
+            &self.actions,
+            &mut |_, _| unreachable!("place plans have no installs"),
+            progress,
+        )
     }
 }
 
@@ -434,24 +456,8 @@ pub fn plan_place(pocket: &Pocket, report: &BiosReport) -> Result<PlacePlan> {
     Ok(PlacePlan {
         actions: actions.into(),
         zipped,
-        identity: crate::card::CardIdentity::read(pocket)?,
+        pinned: Pinned::card(pocket)?,
     })
-}
-
-/// Moves the planned files, on the card the plan was made for.
-pub fn apply_place(
-    pocket: &Pocket,
-    plan: &PlacePlan,
-    progress: crate::plan::Progress<'_>,
-) -> Result<install::Changes> {
-    plan.identity.check(pocket)?;
-    install::apply::apply(
-        pocket,
-        "bios-place",
-        &plan.actions,
-        &mut |_, _| unreachable!("place plans have no installs"),
-        progress,
-    )
 }
 
 #[cfg(test)]
@@ -502,11 +508,11 @@ mod tests {
     fn placing_on_a_swapped_card_is_refused() {
         let (tmp, pocket) = bios_card();
         fs::write(tmp.path().join("game1.hex"), "hex").unwrap();
-        let plan = plan_place(&pocket, &report(&pocket)).unwrap();
+        let mut plan = plan_place(&pocket, &report(&pocket)).unwrap();
         assert_eq!(plan.actions.len(), 1);
         let aside = tempfile::tempdir().unwrap();
         crate::testutil::swap_card(&pocket, aside.path());
-        let err = apply_place(&pocket, &plan, &mut |_| {}).unwrap_err();
+        let err = crate::testutil::apply(&mut plan, Some(&pocket), None).unwrap_err();
         assert_eq!(err.code(), "STALE_PLAN");
         assert!(pocket.root().join("game1.hex").exists());
     }

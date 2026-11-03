@@ -12,11 +12,11 @@ use serde::Serialize;
 
 use pocketeer_core::{
     Error, HashCache, Pocket, Result,
-    card::install::Installer,
     catalog::inventory::{Inventory, InventoryLoad, Platforms},
     config::Config,
     library::{self, Library},
-    net::{Cache, Http, Policy},
+    net::{Cache, Http, Net, Policy},
+    plan::Resources,
 };
 
 use crate::cli::Global;
@@ -41,25 +41,6 @@ enum CardSource {
     Detect,
     Known(Pocket),
     Absent,
-}
-
-/// What talks to the network: the HTTP client and the download cache, plus
-/// whether downloads may happen at all. Build an [`Installer`] from it.
-pub struct Net {
-    pub http: Http,
-    pub cache: Cache,
-    offline: bool,
-}
-
-impl Net {
-    pub fn installer<'a>(&'a self, pocket: &'a Pocket) -> Installer<'a> {
-        Installer {
-            pocket,
-            http: &self.http,
-            cache: &self.cache,
-            offline: self.offline,
-        }
-    }
 }
 
 impl Context {
@@ -143,11 +124,18 @@ impl Context {
     }
 
     pub fn net(&self) -> Result<Net> {
-        Ok(Net {
-            http: self.http()?,
-            cache: self.cache()?,
-            offline: self.offline(),
-        })
+        Ok(Net::new(self.http()?, self.cache()?, self.offline()))
+    }
+
+    /// What plans need to run, opened on first use: this context's card,
+    /// library and network.
+    pub fn resources(&self) -> Resources {
+        let (card, lib, net) = (self.clone(), self.clone(), self.clone());
+        Resources::new(
+            move || card.pocket(),
+            move || lib.library(),
+            move || net.net(),
+        )
     }
 
     /// The persistent ROM hash cache (in-memory if there is no cache dir).

@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn saves_are_linked_by_name_and_the_link_survives_a_rename() {
-        let (_tmp, mut lib) = library_with(&[("Metroid Fusion (USA).fkh", "rom")]);
+        let (_tmp, lib) = library_with(&[("Metroid Fusion (USA).fkh", "rom")]);
         write(
             lib.root(),
             "saves/Saves/fkh/common/metroid fusion (usa).sav",
@@ -128,10 +128,10 @@ mod tests {
         assert_eq!(owners[&None], [PathBuf::from("Saves/fkh/common/Other.sav")]);
 
         // Renamed in the library: the stored link still holds.
-        let plan =
+        let mut plan =
             crate::library::rename::plan(&lib, Some("fkh"), "Metroid Fusion (USA).fkh", "Renamed")
                 .unwrap();
-        crate::library::rename::apply(&mut lib, &plan).unwrap();
+        crate::testutil::apply(&mut plan, None, Some(&lib)).unwrap();
         let games = lib.list_games(None, None).unwrap();
         assert_eq!(games[0].roms[0].name, "Renamed.fkh");
         let owners = link_owners(&lib, &games, &BTreeMap::new()).unwrap();

@@ -9,7 +9,7 @@ use crate::{
     Error, Pocket, Result,
     card::POCKETEER_DIR,
     fsutil,
-    plan::{Applied, Failure, Plan},
+    plan::{Applied, Checked, Failure, Pinned, Plan, Progress, Resources},
 };
 
 /// Volume-level folders macOS creates on every card. Harmless to delete
@@ -61,12 +61,45 @@ pub struct CleanPlan {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<PathBuf>,
     #[serde(skip)]
-    identity: crate::card::CardIdentity,
+    pinned: Pinned,
 }
 
 impl Plan for CleanPlan {
+    type Output = CleanResult;
+
     fn changes(&self) -> usize {
         self.entries.len()
+    }
+
+    fn pinned(&self) -> &Pinned {
+        &self.pinned
+    }
+
+    /// Deletes everything in the plan. Junk isn't backed up. Per-entry
+    /// failures are reported in the result, not returned.
+    fn execute(&mut self, res: &mut Resources, _: Progress<'_>, _: Checked) -> Result<CleanResult> {
+        let root = res.pocket()?.root();
+        let mut result = CleanResult::default();
+        for entry in &self.entries {
+            let full = root.join(&entry.path);
+            let outcome = if entry.kind.is_dir() {
+                std::fs::remove_dir_all(&full)
+            } else {
+                std::fs::remove_file(&full)
+            };
+            match outcome {
+                Ok(()) => {
+                    result.removed += 1;
+                    result.bytes += entry.bytes;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => result.failed.push(Failure {
+                    path: entry.path.clone(),
+                    error: Error::io(full, e).to_info(),
+                }),
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -78,7 +111,7 @@ pub fn plan(pocket: &Pocket, include_system: bool) -> Result<CleanPlan> {
         include_system,
         system_dirs_present: Vec::new(),
         skipped: Vec::new(),
-        identity: crate::card::CardIdentity::read(pocket)?,
+        pinned: Pinned::card(pocket)?,
     };
 
     let old_backups = pocket.pocketeer_dir().join("backup");
@@ -166,33 +199,6 @@ impl Applied for CleanResult {
     }
 }
 
-/// Deletes everything in the plan. Junk isn't backed up. Per-entry failures
-/// are reported in the result, not returned.
-pub fn apply(pocket: &Pocket, plan: &CleanPlan) -> Result<CleanResult> {
-    plan.identity.check(pocket)?;
-    let mut result = CleanResult::default();
-    for entry in &plan.entries {
-        let full = pocket.root().join(&entry.path);
-        let outcome = if entry.kind.is_dir() {
-            std::fs::remove_dir_all(&full)
-        } else {
-            std::fs::remove_file(&full)
-        };
-        match outcome {
-            Ok(()) => {
-                result.removed += 1;
-                result.bytes += entry.bytes;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => result.failed.push(Failure {
-                path: entry.path.clone(),
-                error: Error::io(full, e).to_info(),
-            }),
-        }
-    }
-    Ok(result)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,10 +207,15 @@ mod tests {
     #[test]
     fn a_swapped_card_is_refused() {
         let (_tmp, pocket) = junk_card();
-        let plan = plan(&pocket, false).unwrap();
+        let mut plan = plan(&pocket, false).unwrap();
         let aside = tempfile::tempdir().unwrap();
         crate::testutil::swap_card(&pocket, aside.path());
-        assert_eq!(apply(&pocket, &plan).unwrap_err().code(), "STALE_PLAN");
+        assert_eq!(
+            crate::testutil::apply(&mut plan, Some(&pocket), None)
+                .unwrap_err()
+                .code(),
+            "STALE_PLAN"
+        );
         assert!(pocket.root().join("Cores/.DS_Store").exists());
     }
 
@@ -245,11 +256,11 @@ mod tests {
         assert_eq!(p.bytes, 4 + 1 + 2);
         assert_eq!(p.system_dirs_present, [PathBuf::from(".Spotlight-V100")]);
 
-        let p = plan(&pocket, true).unwrap();
+        let mut p = plan(&pocket, true).unwrap();
         assert!(p.entries.iter().any(|e| e.kind == JunkKind::SystemDir));
         assert_eq!(p.bytes, 4 + 1 + 2 + 5);
 
-        let r = apply(&pocket, &p).unwrap();
+        let r = crate::testutil::apply(&mut p, Some(&pocket), None).unwrap();
         assert_eq!(r.removed, 4);
         assert!(r.failed.is_empty());
         assert!(!tmp.path().join("Cores/.DS_Store").exists());

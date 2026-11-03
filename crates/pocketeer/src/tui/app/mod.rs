@@ -561,18 +561,20 @@ mod tests {
     #[test]
     fn removing_a_game_asks_first_then_moves_it_to_the_library_trash() {
         use pocketeer_core::{
-            HashCache,
+            Error, HashCache,
             library::{
                 Library,
                 import::{self, ImportOptions},
             },
+            plan::{self, Resources},
         };
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("Only Game.gba"), "rom").unwrap();
-        let mut lib = Library::init(&tmp.path().join("library")).unwrap();
-        let plan = import::plan_folder(
+        let root = tmp.path().join("library");
+        let lib = Library::init(&root).unwrap();
+        let mut plan = import::plan_folder(
             &lib,
             &src,
             Some("gba"),
@@ -583,7 +585,12 @@ mod tests {
             &mut |_| {},
         )
         .unwrap();
-        import::apply_import(&mut lib, &plan, &mut |_| {}).unwrap();
+        let mut res = Resources::new(
+            || Err(Error::NoHomeDir),
+            move || Library::open(&root),
+            || Err(Error::NoCacheDir),
+        );
+        plan::apply(&mut res, &mut plan, &mut |_| {}).unwrap();
         drop(lib);
 
         let mut app = test_app(tmp.path());

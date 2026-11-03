@@ -9,14 +9,14 @@ use pocketeer_core::{
         self, Game, Library, PlatformStats,
         covers::{self, FetchOptions, FetchReport},
         import::{self, ImportAction, ImportOptions, ImportPlan, ImportResult},
-        remove::{self, RemovePlan, RemoveResult},
-        rename::{self, RenamePlan, RenameResult},
+        remove::{self, RemovePlan},
+        rename::{self, RenamePlan},
     },
     plan::{Event, Progress},
 };
 use serde::Serialize;
 
-use super::{Apply, Batch, Mode, Staged, context::Context, load_dat, stage, stage_if};
+use super::{Batch, Mode, Plan, Staged, context::Context, load_dat, stage, stage_if};
 use crate::output::Outcome;
 
 #[derive(Debug, Serialize)]
@@ -43,7 +43,7 @@ pub fn status(ctx: &Context) -> Result<library::Status> {
 /// import and a card import.
 /// A plan that copies ROMs into the library: from a folder on this
 /// computer ([`ImportPlan`]) or from the card (`CardImportPlan`).
-pub trait ImportsRoms: Apply<Output = ImportResult> {
+pub trait ImportsRoms: Plan<Output = ImportResult> {
     fn import(&self) -> &ImportPlan;
     fn import_mut(&mut self) -> &mut ImportPlan;
     /// Card paths asked for that aren't there; nothing runs while any are.
@@ -63,7 +63,7 @@ impl ImportsRoms for ImportPlan {
 }
 
 #[derive(Serialize)]
-pub struct Imported<P: Apply> {
+pub struct Imported<P: Plan> {
     #[serde(flatten)]
     pub staged: Staged<P>,
     /// Covers fetched for the new games afterwards (online only).
@@ -107,7 +107,7 @@ impl<P: ImportsRoms> Imported<P> {
     }
 }
 
-impl<P: Apply> Outcome for Imported<P> {
+impl<P: Plan> Outcome for Imported<P> {
     fn error(&self) -> Option<Error> {
         self.staged.error()
     }
@@ -232,8 +232,8 @@ pub fn names_for(ctx: &Context, platform: &str) -> Option<Vec<String>> {
     }
     let net = ctx.net().ok()?;
     pocketeer_core::catalog::libretro::standard_names_for_platform(
-        &net.http,
-        &net.cache,
+        net.http(),
+        net.cache(),
         platform,
         ctx.policy(),
     )
@@ -302,13 +302,6 @@ pub fn plan_import(
     Ok(plan)
 }
 
-impl Apply for ImportPlan {
-    type Output = ImportResult;
-    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<ImportResult> {
-        import::apply_import(&mut ctx.library()?, self, progress)
-    }
-}
-
 pub fn import(
     ctx: &Context,
     req: &ImportRequest,
@@ -342,14 +335,6 @@ pub fn list(ctx: &Context, platform: Option<&str>, query: Option<&str>) -> Resul
 
 pub type RenameReport = Staged<RenamePlan>;
 
-impl Apply for RenamePlan {
-    type Output = RenameResult;
-    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<RenameResult> {
-        progress(Event::Status(format!("Renaming {}", self.rom.name)));
-        rename::apply(&mut ctx.library()?, self)
-    }
-}
-
 /// Rename a managed ROM locally.
 pub fn plan_rename(
     ctx: &Context,
@@ -372,14 +357,6 @@ pub fn rename(
 }
 
 pub type RemoveReport = Staged<RemovePlan>;
-
-impl Apply for RemovePlan {
-    type Output = RemoveResult;
-    fn apply(&mut self, ctx: &Context, progress: Progress<'_>) -> Result<RemoveResult> {
-        progress(Event::Status("Removing from library".into()));
-        remove::apply(&mut ctx.library()?, self)
-    }
-}
 
 pub fn plan_remove(ctx: &Context, platform: Option<&str>, specs: &[String]) -> Result<RemovePlan> {
     remove::plan(&ctx.library()?, platform, specs)
@@ -412,13 +389,6 @@ pub fn standardize(ctx: &Context, platform: Option<&str>, mode: Mode) -> Result<
 }
 
 pub type CoverImportReport = Staged<covers::import::CoverImportPlan>;
-
-impl Apply for covers::import::CoverImportPlan {
-    type Output = covers::import::CoverImportResult;
-    fn apply(&mut self, ctx: &Context, _: Progress<'_>) -> Result<Self::Output> {
-        covers::import::apply(&mut ctx.library()?, self)
-    }
-}
 
 /// Copies a local image in as the cover of the game `spec` names.
 pub fn import_cover(

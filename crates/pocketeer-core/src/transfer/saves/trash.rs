@@ -13,9 +13,8 @@ use serde::Serialize;
 use super::{SaveInfo, current, inspect, validate_path, versions, versions_by_id};
 use crate::{
     Error, Pocket, Result,
-    card::CardIdentity,
     library::{Library, db},
-    plan::{Applied, Failure, Plan},
+    plan::{Applied, Checked, Failure, Pinned, Plan, Progress, Resources},
 };
 
 /// Which copies of a save to throw away.
@@ -49,15 +48,69 @@ pub struct TrashPlan {
     pub files: Vec<TrashFile>,
     /// Where library files go, relative to the library root.
     pub trash: PathBuf,
+    /// Card target only: each card file as it was when planned.
     #[serde(skip)]
-    card: Option<(CardIdentity, BTreeMap<PathBuf, SaveInfo>)>,
+    card: Option<BTreeMap<PathBuf, SaveInfo>>,
     #[serde(skip)]
-    library: crate::library::LibraryIdentity,
+    pinned: Pinned,
 }
 
 impl Plan for TrashPlan {
+    type Output = TrashResult;
+
     fn changes(&self) -> usize {
         self.files.len()
+    }
+
+    fn pinned(&self) -> &Pinned {
+        &self.pinned
+    }
+
+    fn execute(&mut self, res: &mut Resources, _: Progress<'_>, _: Checked) -> Result<TrashResult> {
+        // Only throwing away the card copy needs the card.
+        let pocket = match self.target {
+            TrashTarget::Card => Some(res.pocket()?.clone()),
+            _ => None,
+        };
+        let pocket = pocket.as_ref();
+        let lib = res.library()?;
+        let mut result = TrashResult::default();
+        if let Some(observed) = &self.card {
+            let pocket = pocket.ok_or(Error::SdNotFound {
+                searched: Vec::new(),
+            })?;
+            for file in &self.files {
+                match delete_from_card(lib, pocket, file, &observed[&file.path]) {
+                    Ok(archived) => {
+                        result.trashed += 1;
+                        result.archived += usize::from(archived);
+                    }
+                    Err(e) => result.failed.push(Failure {
+                        path: file.path.clone(),
+                        error: e.to_info(),
+                    }),
+                }
+            }
+            return Ok(result);
+        }
+        let root = lib.root().to_path_buf();
+        let trash = root.join(&self.trash);
+        for file in &self.files {
+            let moved = move_to_trash(&root, &trash, &file.path).and_then(|_| match self.target {
+                TrashTarget::Version(id) => db::delete_save_version(lib.conn(), id),
+                TrashTarget::Library => forget_versions(lib, &file.save),
+                _ => Ok(()),
+            });
+            match moved {
+                Ok(()) => result.trashed += 1,
+                Err(e) => result.failed.push(Failure {
+                    path: file.path.clone(),
+                    error: e.to_info(),
+                }),
+            }
+        }
+        result.trash = trash.exists().then(|| self.trash.clone());
+        Ok(result)
     }
 }
 
@@ -90,7 +143,7 @@ pub fn plan_trash(
         files: Vec::new(),
         trash: Library::new_trash_dir(),
         card: None,
-        library: lib.identity()?,
+        pinned: Pinned::library(lib)?,
     };
     for rel in saves {
         validate_path(rel)?;
@@ -115,7 +168,8 @@ pub fn plan_trash(
                 });
                 observed.insert(rel.clone(), info);
             }
-            plan.card = Some((CardIdentity::read(pocket)?, observed));
+            plan.card = Some(observed);
+            plan.pinned = plan.pinned.clone().and_card(pocket)?;
         }
         TrashTarget::Version(id) => {
             let version = versions_by_id(lib, id)?;
@@ -162,52 +216,6 @@ pub fn plan_trash(
     Ok(plan)
 }
 
-pub fn apply_trash(
-    lib: &mut Library,
-    pocket: Option<&Pocket>,
-    plan: &TrashPlan,
-) -> Result<TrashResult> {
-    lib.check(&plan.library)?;
-    let mut result = TrashResult::default();
-    if let Some((identity, observed)) = &plan.card {
-        let pocket = pocket.ok_or(Error::SdNotFound {
-            searched: Vec::new(),
-        })?;
-        identity.check(pocket)?;
-        for file in &plan.files {
-            match delete_from_card(lib, pocket, file, &observed[&file.path]) {
-                Ok(archived) => {
-                    result.trashed += 1;
-                    result.archived += usize::from(archived);
-                }
-                Err(e) => result.failed.push(Failure {
-                    path: file.path.clone(),
-                    error: e.to_info(),
-                }),
-            }
-        }
-        return Ok(result);
-    }
-    let root = lib.root().to_path_buf();
-    let trash = root.join(&plan.trash);
-    for file in &plan.files {
-        let moved = move_to_trash(&root, &trash, &file.path).and_then(|_| match plan.target {
-            TrashTarget::Version(id) => db::delete_save_version(lib.conn(), id),
-            TrashTarget::Library => forget_versions(lib, &file.save),
-            _ => Ok(()),
-        });
-        match moved {
-            Ok(()) => result.trashed += 1,
-            Err(e) => result.failed.push(Failure {
-                path: file.path.clone(),
-                error: e.to_info(),
-            }),
-        }
-    }
-    result.trash = trash.exists().then(|| plan.trash.clone());
-    Ok(result)
-}
-
 fn delete_from_card(
     lib: &Library,
     pocket: &Pocket,
@@ -250,15 +258,15 @@ fn move_to_trash(root: &Path, trash: &Path, rel: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{SavesOptions, apply, plan};
+    use super::super::{SavesOptions, plan};
     use super::*;
     use crate::testutil::{sd, write_with_mtime as write};
 
     const REL: &str = "Saves/gba/common/game.sav";
 
     fn back_up(lib: &mut Library, pocket: &Pocket) {
-        let p = plan(lib, pocket, SavesOptions::default(), &mut |_| {}).unwrap();
-        apply(lib, pocket, &p, &mut |_| {}).unwrap();
+        let mut p = plan(lib, pocket, SavesOptions::default(), &mut |_| {}).unwrap();
+        crate::testutil::apply(&mut p, Some(pocket), Some(lib)).unwrap();
     }
 
     #[test]
@@ -273,7 +281,7 @@ mod tests {
         write(pocket.root(), REL, "three, never backed up", 300);
 
         // Deleting from the card archives the unbacked bytes first.
-        let p = plan_trash(
+        let mut p = plan_trash(
             &lib,
             Some(&pocket),
             std::slice::from_ref(&rel),
@@ -281,21 +289,21 @@ mod tests {
         )
         .unwrap();
         assert!(p.files[0].archive_first);
-        let r = apply_trash(&mut lib, Some(&pocket), &p).unwrap();
+        let r = crate::testutil::apply(&mut p, Some(&pocket), Some(&lib)).unwrap();
         assert_eq!((r.trashed, r.archived), (1, 1));
         assert!(!pocket.root().join(REL).exists());
         assert_eq!(versions(&lib, &rel).unwrap().len(), 2);
 
         // One older version goes to the library's trash.
         let oldest = versions(&lib, &rel).unwrap().pop().unwrap();
-        let p = plan_trash(
+        let mut p = plan_trash(
             &lib,
             None,
             std::slice::from_ref(&rel),
             TrashTarget::Version(oldest.id),
         )
         .unwrap();
-        let r = apply_trash(&mut lib, None, &p).unwrap();
+        let r = crate::testutil::apply(&mut p, None, Some(&lib)).unwrap();
         let trash = lib.root().join(r.trash.unwrap());
         assert_eq!(
             std::fs::read(trash.join(&oldest.stored_path)).unwrap(),
@@ -304,9 +312,10 @@ mod tests {
         assert_eq!(versions(&lib, &rel).unwrap().len(), 1);
 
         // Everything else in the library.
-        let p = plan_trash(&lib, None, std::slice::from_ref(&rel), TrashTarget::Library).unwrap();
+        let mut p =
+            plan_trash(&lib, None, std::slice::from_ref(&rel), TrashTarget::Library).unwrap();
         assert_eq!(p.files.len(), 2);
-        apply_trash(&mut lib, None, &p).unwrap();
+        crate::testutil::apply(&mut p, None, Some(&lib)).unwrap();
         assert!(versions(&lib, &rel).unwrap().is_empty());
         assert!(!current(&lib, &rel).exists());
     }
@@ -318,7 +327,7 @@ mod tests {
         write(pocket.root(), REL, "same", 100);
         back_up(&mut lib, &pocket);
         let rel = PathBuf::from(REL);
-        let p = plan_trash(
+        let mut p = plan_trash(
             &lib,
             Some(&pocket),
             std::slice::from_ref(&rel),
@@ -328,7 +337,7 @@ mod tests {
         assert!(!p.files[0].archive_first);
         // Changed after the plan: refused.
         write(pocket.root(), REL, "changed", 500);
-        let r = apply_trash(&mut lib, Some(&pocket), &p).unwrap();
+        let r = crate::testutil::apply(&mut p, Some(&pocket), Some(&lib)).unwrap();
         assert_eq!(r.failed.len(), 1);
         assert!(pocket.root().join(REL).exists());
     }

@@ -17,9 +17,9 @@ use sha1::{Digest, Sha1};
 use crate::fsutil::hash;
 use crate::{
     Error, Pocket, Result,
-    card::CardIdentity,
     card::bios,
     fsutil::{self, Stamp},
+    plan::{Checked, Pinned, Plan, Progress, Resources},
 };
 
 // ---------------------------------------------------------------------------
@@ -186,7 +186,8 @@ struct Store {
 }
 
 pub struct Index {
-    identity: CardIdentity,
+    /// The card this index describes; every write checks it is still mounted.
+    pinned: Pinned,
     pub roms: Vec<CardRom>,
     /// Cache failures do not prevent listing or operating on ROM files.
     pub warning: Option<String>,
@@ -201,7 +202,7 @@ impl Index {
 
     /// Reuses declarations already read for a BIOS report in the same load.
     pub fn scan_with_protected(pocket: &Pocket, declared: &BTreeSet<PathBuf>) -> Result<Self> {
-        let identity = CardIdentity::read(pocket)?;
+        let pinned = Pinned::card(pocket)?;
         let cache_path = pocket.pocketeer_dir().join(CACHE_FILE);
         let (mut entries, warning) = match fs::read(&cache_path) {
             Ok(bytes) => match rmp_serde::from_slice::<Store>(&bytes) {
@@ -245,9 +246,9 @@ impl Index {
         let stamps: BTreeMap<_, _> = roms.iter().map(|r| (&r.rel_path, &r.stamp)).collect();
         entries.retain(|path, entry| stamps.get(path).is_some_and(|stamp| **stamp == entry.stamp));
         let dirty = before != entries.len();
-        identity.check(pocket)?;
+        pinned.check_card(pocket)?;
         Ok(Self {
-            identity,
+            pinned,
             roms,
             warning,
             entries,
@@ -302,7 +303,7 @@ impl Index {
         full: bool,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(Cached, Identity)> {
-        self.identity.check(pocket)?;
+        self.pinned.check_card(pocket)?;
         let path = pocket.root().join(rel);
         let before = Stamp::of(&path)?;
         let mut file = File::open(&path).map_err(|e| Error::io(&path, e))?;
@@ -325,7 +326,7 @@ impl Index {
                 (digest.finalize().into(), false)
             }
         };
-        self.identity.check(pocket)?;
+        self.pinned.check_card(pocket)?;
         if before != Stamp::of(&path)? {
             return Err(Error::Changed { path });
         }
@@ -343,7 +344,7 @@ impl Index {
     }
 
     pub fn relocate(&mut self, pocket: &Pocket, from: &Path, to: &Path) -> Result<()> {
-        self.identity.check(pocket)?;
+        self.pinned.check_card(pocket)?;
         if let Some(entry) = self.entries.remove(from) {
             self.dirty = true;
             if entry.stamp == Stamp::of(&pocket.root().join(to))? {
@@ -356,7 +357,7 @@ impl Index {
     /// The caller has just copied and fully hashed these bytes. Reading only
     /// the sample here seeds future checks without rereading the whole ROM.
     pub fn record_copy(&mut self, pocket: &Pocket, path: &Path, sha1: &str) -> Result<()> {
-        self.identity.check(pocket)?;
+        self.pinned.check_card(pocket)?;
         let full = pocket.root().join(path);
         let before = Stamp::of(&full)?;
         let mut file = File::open(&full).map_err(|e| Error::io(&full, e))?;
@@ -386,7 +387,7 @@ impl Index {
         if !self.dirty {
             return Ok(());
         }
-        self.identity.check(pocket)?;
+        self.pinned.check_card(pocket)?;
         let path = pocket.pocketeer_dir().join(CACHE_FILE);
         fs::create_dir_all(path.parent().expect("parent")).map_err(|e| Error::io(&path, e))?;
         let lock_path = pocket.pocketeer_dir().join(LOCK_FILE);
@@ -439,40 +440,45 @@ pub struct DeletePlan {
     /// Relative to the card root.
     pub path: PathBuf,
     #[serde(skip)]
-    identity: CardIdentity,
+    pinned: Pinned,
 }
 
-impl crate::plan::Plan for DeletePlan {
+impl Plan for DeletePlan {
+    type Output = crate::card::install::Changes;
+
     fn changes(&self) -> usize {
         1
+    }
+
+    fn pinned(&self) -> &Pinned {
+        &self.pinned
+    }
+
+    fn execute(
+        &mut self,
+        res: &mut Resources,
+        progress: Progress<'_>,
+        _: Checked,
+    ) -> Result<Self::Output> {
+        let actions = [crate::card::install::Action::Remove {
+            path: self.path.clone(),
+            reason: crate::card::install::plan::RemoveReason::Uninstall,
+        }];
+        crate::card::install::apply::apply(
+            res.pocket()?,
+            "delete-rom",
+            &actions,
+            &mut |_, _| unreachable!("a delete installs nothing"),
+            progress,
+        )
     }
 }
 
 pub fn plan_delete(pocket: &Pocket, path: &Path) -> Result<DeletePlan> {
     Ok(DeletePlan {
         path: path.to_path_buf(),
-        identity: CardIdentity::read(pocket)?,
+        pinned: Pinned::card(pocket)?,
     })
-}
-
-/// Deletes the file, on the card the plan was made for.
-pub fn apply_delete(
-    pocket: &Pocket,
-    plan: &DeletePlan,
-    progress: crate::plan::Progress<'_>,
-) -> Result<crate::card::install::Changes> {
-    plan.identity.check(pocket)?;
-    let actions = [crate::card::install::Action::Remove {
-        path: plan.path.clone(),
-        reason: crate::card::install::plan::RemoveReason::Uninstall,
-    }];
-    crate::card::install::apply::apply(
-        pocket,
-        "delete-rom",
-        &actions,
-        &mut |_, _| unreachable!("a delete installs nothing"),
-        progress,
-    )
 }
 
 #[cfg(test)]
@@ -484,10 +490,10 @@ mod index_tests {
     fn deleting_from_a_swapped_card_is_refused() {
         let (_tmp, pocket) = sd();
         write(pocket.root(), "Assets/gba/common/a.gba", "rom");
-        let plan = plan_delete(&pocket, Path::new("Assets/gba/common/a.gba")).unwrap();
+        let mut plan = plan_delete(&pocket, Path::new("Assets/gba/common/a.gba")).unwrap();
         let aside = tempfile::tempdir().unwrap();
         crate::testutil::swap_card(&pocket, aside.path());
-        let err = apply_delete(&pocket, &plan, &mut |_| {}).unwrap_err();
+        let err = crate::testutil::apply(&mut plan, Some(&pocket), None).unwrap_err();
         assert_eq!(err.code(), "STALE_PLAN");
         assert!(pocket.root().join("Assets/gba/common/a.gba").exists());
     }
