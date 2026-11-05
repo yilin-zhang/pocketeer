@@ -10,7 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pocketeer_core::{
     cores::{BiosRow, BiosStatus, CoreRow},
     device::{DeviceEntry, OrphanDeviceSave},
-    game::Save,
+    game::{Game, Save},
     library::{LocalEntry, OrphanLocalSave},
     log::{device_orphan_ref, library_orphan_ref},
     platform::Platform,
@@ -80,6 +80,39 @@ pub struct Import {
     pub input: PathInput,
 }
 
+/// Which copy of a game is being renamed.
+pub enum Renaming {
+    InLibrary(LocalEntry),
+    OnDevice(DeviceEntry),
+}
+
+/// A new name being typed for a game.
+pub struct Rename {
+    pub renaming: Renaming,
+    input: Input,
+}
+
+impl Rename {
+    /// What is typed before and after the cursor.
+    pub fn text_around_cursor(&self) -> (String, String) {
+        path_input::text_around_cursor(&self.input)
+    }
+
+    /// The name it has, without the extension.
+    fn stem(&self) -> String {
+        match &self.renaming {
+            Renaming::InLibrary(local) => local.stem().to_string(),
+            Renaming::OnDevice(on_device) => file_stem(&on_device.path),
+        }
+    }
+}
+
+/// The name of the file at `path`, without the extension.
+fn file_stem(path: &Path) -> String {
+    let stem = path.file_stem().unwrap_or_default();
+    stem.to_string_lossy().into_owned()
+}
+
 /// A file to import as a game, while the user says which platform it is for.
 pub struct PlatformChoice {
     pub file: PathBuf,
@@ -114,31 +147,18 @@ enum Mode {
 
 const NOT_ON_BOTH: &str = "nothing here is both in the library and on the device";
 
-/// A row, whatever else changes: marks and the selection stay with it.
+/// A row, whatever else changes: marks and the selection stay with it. A game
+/// is its contents, whatever it is called and wherever it is.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum RowKey {
-    Game {
-        platform: Platform,
-        local: Option<String>,
-        on_device: Option<PathBuf>,
-    },
-    OrphanInLibrary {
-        platform: Platform,
-        stem: String,
-    },
-    OrphanOnDevice {
-        platform: Platform,
-        path: PathBuf,
-    },
+    Game(Game),
+    OrphanInLibrary { platform: Platform, stem: String },
+    OrphanOnDevice { platform: Platform, path: PathBuf },
 }
 
 fn key_of(row: &Row) -> RowKey {
     match row {
-        Row::Game { row, .. } => RowKey::Game {
-            platform: row.game().platform.clone(),
-            local: row.local().map(|l| l.name.clone()),
-            on_device: row.on_device().map(|d| d.path.clone()),
-        },
+        Row::Game { row, .. } => RowKey::Game(row.game().clone()),
         Row::OrphanInLibrary(o) => RowKey::OrphanInLibrary {
             platform: o.platform.clone(),
             stem: o.stem.clone(),
@@ -162,12 +182,12 @@ pub fn name_of(row: &Row) -> String {
     }
 }
 
-fn searched(row: &Row, query: &str) -> bool {
+fn matches_query(row: &Row, query: &str) -> bool {
     let on_device = row
-        .on_device()
+        .device_entry()
         .map_or(String::new(), |d| d.path.display().to_string());
-    path_input::fuzzy(query, &name_of(row)).is_some()
-        || path_input::fuzzy(query, &on_device).is_some()
+    path_input::fuzzy_match(query, &name_of(row)).is_some()
+        || path_input::fuzzy_match(query, &on_device).is_some()
 }
 
 pub struct App {
@@ -195,6 +215,7 @@ pub struct App {
     waiting_dialog: Option<Dialog>,
     import: Option<Import>,
     platform_choice: Option<PlatformChoice>,
+    rename: Option<Rename>,
     job: Option<Job>,
     /// The device being opened and read.
     reading_device: Option<PathBuf>,
@@ -230,6 +251,7 @@ impl App {
             waiting_dialog: None,
             import: None,
             platform_choice: None,
+            rename: None,
             job: None,
             reading_device: None,
             message: None,
@@ -248,7 +270,7 @@ impl App {
         self.library_failure.take()
     }
 
-    pub fn busy(&self) -> bool {
+    pub fn is_busy(&self) -> bool {
         self.job.is_some() || self.reading_device.is_some()
     }
 
@@ -256,7 +278,7 @@ impl App {
         self.reading_device.as_deref()
     }
 
-    pub fn loaded(&self) -> bool {
+    pub fn is_loaded(&self) -> bool {
         self.snapshot.is_some()
     }
 
@@ -284,6 +306,10 @@ impl App {
         self.platform_choice.as_ref()
     }
 
+    pub fn rename(&self) -> Option<&Rename> {
+        self.rename.as_ref()
+    }
+
     pub fn page(&self) -> Page {
         self.page
     }
@@ -309,16 +335,16 @@ impl App {
     }
 
     /// What is typed in the search box before and after the cursor.
-    pub fn query_split(&self) -> (String, String) {
-        path_input::split(&self.query)
+    pub fn query_around_cursor(&self) -> (String, String) {
+        path_input::text_around_cursor(&self.query)
     }
 
-    pub fn typing(&self) -> bool {
+    pub fn is_typing(&self) -> bool {
         matches!(self.mode, Mode::Typing)
     }
 
     /// The version selected in the saves panel, if it is open.
-    pub fn panel(&self) -> Option<usize> {
+    pub fn selected_version(&self) -> Option<usize> {
         match self.mode {
             Mode::Panel(selected) => Some(selected),
             Mode::List | Mode::Typing => None,
@@ -326,7 +352,7 @@ impl App {
     }
 
     /// How many rows are marked, seen or not.
-    pub fn marked(&self) -> usize {
+    pub fn marked_count(&self) -> usize {
         self.rows().iter().filter(|r| self.is_marked(r)).count()
     }
 
@@ -335,7 +361,7 @@ impl App {
     }
 
     /// How many games there are, and how many orphan saves.
-    pub fn counts(&self) -> (usize, usize) {
+    pub fn game_and_orphan_counts(&self) -> (usize, usize) {
         let is_game = |row: &&Row| matches!(row, Row::Game { .. });
         let games = self.rows().iter().filter(is_game).count();
         (games, self.rows().len() - games)
@@ -358,8 +384,8 @@ impl App {
     }
 
     /// The versions of the selected game's save in the library, newest first.
-    pub fn versions(&self) -> Vec<Save> {
-        let local = self.selected_row().and_then(Row::local);
+    pub fn selected_save_versions(&self) -> Vec<Save> {
+        let local = self.selected_row().and_then(Row::local_entry);
         let history = local.and_then(|l| l.save.as_ref());
         history.iter().flat_map(|h| h.iter().cloned()).collect()
     }
@@ -369,7 +395,7 @@ impl App {
     pub fn covers_around(&self) -> Vec<PathBuf> {
         let at = |i: usize| {
             let &row = self.visible.get(i)?;
-            self.rows()[row].local()?.cover_path.clone()
+            self.rows()[row].local_entry()?.cover_path.clone()
         };
         let before = self.selected.checked_sub(1).and_then(at);
         [at(self.selected + 1), before]
@@ -378,12 +404,12 @@ impl App {
             .collect()
     }
 
-    pub fn cover_ready(&mut self) {
-        self.covers.receive();
+    pub fn on_cover_ready(&mut self) {
+        self.covers.collect_finished();
     }
 
-    pub fn folder_read(&mut self) {
-        for (folder, entries) in self.paths.take() {
+    pub fn on_folder_read(&mut self) {
+        for (folder, entries) in self.paths.folders_read() {
             if let Some(import) = &mut self.import {
                 import.input.set_entries(folder, entries);
             }
@@ -407,7 +433,7 @@ impl App {
                 let kept = keep.and_then(|id| rows.iter().position(|r| r.id() == id));
                 self.selected_core = kept.unwrap_or(self.selected_core);
                 self.cores = Some(CoreList { rows, failure });
-                self.go_to_core(self.selected_core);
+                self.select_core(self.selected_core);
             }
             Update::Bios(rows) => {
                 let same = |a: &BiosRow, b: &BiosRow| a.platform == b.platform && a.path == b.path;
@@ -415,7 +441,7 @@ impl App {
                 let kept = keep.and_then(|k| rows.iter().position(|r| same(r, &k)));
                 self.selected_bios = kept.unwrap_or(self.selected_bios);
                 self.bios = rows;
-                self.go_to_bios(self.selected_bios);
+                self.select_bios(self.selected_bios);
             }
             Update::ReadingDevice(root) => self.reading_device = Some(root),
             Update::DeviceRead => self.reading_device = None,
@@ -465,7 +491,7 @@ impl App {
             .rows()
             .iter()
             .enumerate()
-            .filter(|(_, r)| searched(r, self.query.value()));
+            .filter(|(_, r)| matches_query(r, self.query.value()));
         let visible: Vec<usize> = found.map(|(i, _)| i).collect();
         let kept = keep.and_then(|k| visible.iter().position(|&i| key_of(&self.rows()[i]) == k));
         self.selected = kept.unwrap_or(self.selected.min(visible.len().saturating_sub(1)));
@@ -473,7 +499,7 @@ impl App {
         self.table.select(self.selected_index());
     }
 
-    pub fn key(&mut self, key: KeyEvent) {
+    pub fn handle_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('c') {
             self.quit = true;
@@ -481,16 +507,20 @@ impl App {
         }
         // Before the keys below stand for others: here they edit the text.
         if self.dialog.is_none() && self.import.is_some() {
-            self.import_key(key);
+            self.handle_import_key(key);
             return;
         }
-        let key = emacs(key);
+        if self.dialog.is_none() && self.rename.is_some() {
+            self.handle_rename_key(key);
+            return;
+        }
+        let key = translate_emacs_key(key);
         if self.dialog.is_none() && self.platform_choice.is_some() {
-            self.platform_choice_key(key);
+            self.handle_platform_choice_key(key);
             return;
         }
         if self.dialog.is_some() {
-            self.dialog_key(key);
+            self.handle_dialog_key(key);
             if self.dialog.is_none() {
                 self.dialog = self.waiting_dialog.take();
             }
@@ -498,17 +528,17 @@ impl App {
         }
         match self.page {
             Page::Games => {}
-            Page::Cores => return self.cores_key(key),
-            Page::Bios => return self.bios_key(key),
+            Page::Cores => return self.handle_cores_key(key),
+            Page::Bios => return self.handle_bios_key(key),
         }
         match self.mode {
-            Mode::List => self.list_key(key),
-            Mode::Typing => self.search_key(key),
-            Mode::Panel(selected) => self.panel_key(key, selected),
+            Mode::List => self.handle_list_key(key),
+            Mode::Typing => self.handle_search_key(key),
+            Mode::Panel(selected) => self.handle_panel_key(key, selected),
         }
     }
 
-    fn dialog_key(&mut self, key: KeyEvent) {
+    fn handle_dialog_key(&mut self, key: KeyEvent) {
         let Some(dialog) = &mut self.dialog else {
             return;
         };
@@ -540,7 +570,7 @@ impl App {
         }
     }
 
-    fn import_key(&mut self, key: KeyEvent) {
+    fn handle_import_key(&mut self, key: KeyEvent) {
         let Some(import) = &mut self.import else {
             return;
         };
@@ -552,18 +582,19 @@ impl App {
             }
             return;
         }
+        let takes_folder = matches!(import.importing, Importing::Game);
         if key.code != KeyCode::Enter {
-            import.input.key(key);
-        } else if !import.input.take_picked() && !import.input.is_folder() {
-            self.import_path_typed();
+            import.input.handle_key(key);
+        } else if !import.input.fill_in_picked() && (takes_folder || !import.input.is_folder()) {
+            self.import_typed_path();
             return;
         }
-        self.read_folder_typed();
+        self.read_typed_folder();
     }
 
     /// Imports what the path typed leads to, or else, for a game whose
     /// extension doesn't tell its platform, asks which it is for.
-    fn import_path_typed(&mut self) {
+    fn import_typed_path(&mut self) {
         let Some(import) = self.import.take() else {
             return;
         };
@@ -573,7 +604,8 @@ impl App {
             Importing::Bios(row) => self.worker.send(Command::PutBios(row, path)),
             Importing::Game => {
                 let extension = path.extension().and_then(|e| e.to_str());
-                if extension.and_then(Platform::from_extension).is_some() {
+                let tells_platform = extension.and_then(Platform::from_extension).is_some();
+                if tells_platform || import.input.names_folder() {
                     self.worker.send(Command::ImportGame(path, None));
                 } else {
                     self.platform_choice = Some(PlatformChoice {
@@ -585,7 +617,54 @@ impl App {
         }
     }
 
-    fn platform_choice_key(&mut self, key: KeyEvent) {
+    fn handle_rename_key(&mut self, key: KeyEvent) {
+        let Some(rename) = &mut self.rename else {
+            return;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if key.code == KeyCode::Esc || (ctrl && key.code == KeyCode::Char('g')) {
+            self.rename = None;
+        } else if key.code != KeyCode::Enter {
+            path_input::edit(&mut rename.input, key);
+        } else if let Some(rename) = self.rename.take() {
+            let new = rename.input.value().trim().to_string();
+            if new != rename.stem() {
+                self.worker.send(match rename.renaming {
+                    Renaming::InLibrary(local) => Command::RenameInLibrary(local, new),
+                    Renaming::OnDevice(on_device) => Command::RenameOnDevice(on_device, new),
+                });
+            }
+        }
+    }
+
+    /// Asks what to call the selected row's copy in the library.
+    fn ask_to_rename_in_library(&mut self) {
+        let Some(local) = self.selected_row().and_then(Row::local_entry).cloned() else {
+            self.say("nothing here is in the library");
+            return;
+        };
+        self.start_rename(Renaming::InLibrary(local));
+    }
+
+    /// Asks what to call the selected row's copy on the device.
+    fn ask_to_rename_on_device(&mut self) {
+        let Some(on_device) = self.selected_row().and_then(Row::device_entry).cloned() else {
+            self.say("this game isn't on the device");
+            return;
+        };
+        self.start_rename(Renaming::OnDevice(on_device));
+    }
+
+    fn start_rename(&mut self, renaming: Renaming) {
+        let mut rename = Rename {
+            renaming,
+            input: Input::default(),
+        };
+        rename.input = Input::new(rename.stem());
+        self.rename = Some(rename);
+    }
+
+    fn handle_platform_choice_key(&mut self, key: KeyEvent) {
         let Some(choice) = &mut self.platform_choice else {
             return;
         };
@@ -605,15 +684,15 @@ impl App {
     }
 
     /// Asks for the folder of the path being typed, if it has changed.
-    fn read_folder_typed(&mut self) {
+    fn read_typed_folder(&mut self) {
         let import = self.import.as_mut();
         if let Some(folder) = import.and_then(|i| i.input.folder_to_read()) {
-            self.paths.ask(folder);
+            self.paths.request_folder(folder);
         }
     }
 
     fn ask_for_a_save_to_import(&mut self) {
-        let Some(local) = self.selected_row().and_then(Row::local).cloned() else {
+        let Some(local) = self.selected_row().and_then(Row::local_entry).cloned() else {
             self.say("nothing here is in the library");
             return;
         };
@@ -625,10 +704,10 @@ impl App {
             importing,
             input: PathInput::new("~/"),
         });
-        self.read_folder_typed();
+        self.read_typed_folder();
     }
 
-    fn search_key(&mut self, key: KeyEvent) {
+    fn handle_search_key(&mut self, key: KeyEvent) {
         let keep = self.selected_row().map(key_of);
         match key.code {
             KeyCode::Enter => self.mode = Mode::List,
@@ -638,7 +717,7 @@ impl App {
             }
             KeyCode::Down | KeyCode::Up | KeyCode::PageDown | KeyCode::PageUp => {
                 self.mode = Mode::List;
-                self.list_key(key);
+                self.handle_list_key(key);
                 return;
             }
             _ => {
@@ -648,26 +727,28 @@ impl App {
         self.search_again(keep);
     }
 
-    fn list_key(&mut self, key: KeyEvent) {
+    fn handle_list_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Down | KeyCode::Char('j') => self.go(1),
-            KeyCode::Up | KeyCode::Char('k') => self.go(-1),
-            KeyCode::PageDown => self.go(PAGE),
-            KeyCode::PageUp => self.go(-PAGE),
-            KeyCode::Char('g') | KeyCode::Home => self.go_to(0),
-            KeyCode::Char('G') | KeyCode::End => self.go_to(usize::MAX),
-            KeyCode::Char('m') => self.mark_here(true),
-            KeyCode::Char('u') => self.mark_here(false),
+            KeyCode::Down | KeyCode::Char('j') => self.move_selection_by(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection_by(-1),
+            KeyCode::PageDown => self.move_selection_by(PAGE),
+            KeyCode::PageUp => self.move_selection_by(-PAGE),
+            KeyCode::Char('g') | KeyCode::Home => self.select_row(0),
+            KeyCode::Char('G') | KeyCode::End => self.select_row(usize::MAX),
+            KeyCode::Char('m') => self.set_mark_and_move_on(true),
+            KeyCode::Char('u') => self.set_mark_and_move_on(false),
             KeyCode::Char('M') => {
                 let keys: Vec<RowKey> = self.visible_rows().map(key_of).collect();
                 self.marks.extend(keys);
             }
             KeyCode::Char('U') => self.marks.clear(),
-            KeyCode::Char('i') => self.on_device_rows(Command::PullGames),
-            KeyCode::Char('b') => self.on_device_rows(Command::PullSaves),
+            KeyCode::Char('i') => self.send_for_device_rows(Command::PullGames),
+            KeyCode::Char('b') => self.send_for_device_rows(Command::PullSaves),
             KeyCode::Char('I') => self.ask_for_a_path(Importing::Game),
-            KeyCode::Char('s') => self.in_library_rows(Command::PushGames),
-            KeyCode::Char('f') => self.in_library_rows(Command::FetchCovers),
+            KeyCode::Char('n') => self.ask_to_rename_in_library(),
+            KeyCode::Char('N') => self.ask_to_rename_on_device(),
+            KeyCode::Char('s') => self.send_for_library_rows(Command::PushGames),
+            KeyCode::Char('f') => self.send_for_library_rows(Command::FetchCovers),
             KeyCode::Char('p') => self.push_saves(),
             KeyCode::Char('x') => self.ask_to_trash_games(),
             KeyCode::Char('X') => self.ask_to_delete(),
@@ -678,15 +759,15 @@ impl App {
             KeyCode::Tab | KeyCode::Char('2') => self.show_cores(),
             KeyCode::Char('3') => self.page = Page::Bios,
             KeyCode::Char('/') => self.mode = Mode::Typing,
-            KeyCode::Char('?') => self.dialog = Some(help()),
+            KeyCode::Char('?') => self.dialog = Some(help_dialog()),
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Esc => self.escape(),
+            KeyCode::Esc => self.handle_escape(),
             _ => {}
         }
     }
 
-    fn panel_key(&mut self, key: KeyEvent, selected: usize) {
-        let len = self.versions().len();
+    fn handle_panel_key(&mut self, key: KeyEvent, selected: usize) {
+        let len = self.selected_save_versions().len();
         let selected = selected.min(len.saturating_sub(1));
         match key.code {
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => self.mode = Mode::List,
@@ -694,12 +775,12 @@ impl App {
                 self.mode = Mode::Panel((selected + 1).min(len.saturating_sub(1)));
             }
             KeyCode::Up | KeyCode::Char('k') => self.mode = Mode::Panel(selected.saturating_sub(1)),
-            KeyCode::Char('b') => self.on_device_rows(Command::PullSaves),
+            KeyCode::Char('b') => self.send_for_device_rows(Command::PullSaves),
             KeyCode::Char('p') => self.push_version(selected),
             KeyCode::Char('I') => self.ask_for_a_save_to_import(),
             KeyCode::Char('x') => self.ask_to_trash_version(selected),
             KeyCode::Char('X') => self.ask_to_delete_save(),
-            KeyCode::Char('?') => self.dialog = Some(help()),
+            KeyCode::Char('?') => self.dialog = Some(help_dialog()),
             KeyCode::Char('q') => self.quit = true,
             _ => {}
         }
@@ -713,9 +794,9 @@ impl App {
         }
     }
 
-    fn cores_key(&mut self, key: KeyEvent) {
-        if let Some(i) = moved_to(key, self.selected_core) {
-            return self.go_to_core(i);
+    fn handle_cores_key(&mut self, key: KeyEvent) {
+        if let Some(i) = row_after_key(key, self.selected_core) {
+            return self.select_core(i);
         }
         match key.code {
             KeyCode::Char('1') => self.page = Page::Games,
@@ -724,15 +805,15 @@ impl App {
             KeyCode::Char('U') => self.update_every_core(),
             KeyCode::Char('x') => self.ask_to_remove_core(),
             KeyCode::Char('r') => self.worker.send(Command::Reload),
-            KeyCode::Char('?') => self.dialog = Some(help()),
+            KeyCode::Char('?') => self.dialog = Some(help_dialog()),
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Esc => self.escape(),
+            KeyCode::Esc => self.handle_escape(),
             _ => {}
         }
     }
 
     /// Selects core `i`, or the last if there are fewer.
-    fn go_to_core(&mut self, i: usize) {
+    fn select_core(&mut self, i: usize) {
         let len = self.cores.as_ref().map_or(0, |c| c.rows.len());
         self.selected_core = i.min(len.saturating_sub(1));
         self.cores_table
@@ -746,9 +827,7 @@ impl App {
         let id = row.id().to_string();
         let why_not = match row {
             CoreRow::Installed(_) => Some("only the cores with a latest version can be installed"),
-            CoreRow::Both { .. } if !row.update_available() => {
-                Some("the device has the newest version")
-            }
+            CoreRow::Both { .. } if !row.has_update() => Some("the device has the newest version"),
             _ if self.device_root().is_none() => Some("no device is open"),
             _ => None,
         };
@@ -760,7 +839,7 @@ impl App {
 
     fn update_every_core(&mut self) {
         let rows = self.cores.as_ref().map_or(&[][..], |c| &c.rows);
-        let with_updates = rows.iter().filter(|r| r.update_available());
+        let with_updates = rows.iter().filter(|r| r.has_update());
         let ids: Vec<String> = with_updates.map(|r| r.id().to_string()).collect();
         if ids.is_empty() {
             self.say("every core is up to date");
@@ -790,24 +869,24 @@ impl App {
         });
     }
 
-    fn bios_key(&mut self, key: KeyEvent) {
-        if let Some(i) = moved_to(key, self.selected_bios) {
-            return self.go_to_bios(i);
+    fn handle_bios_key(&mut self, key: KeyEvent) {
+        if let Some(i) = row_after_key(key, self.selected_bios) {
+            return self.select_bios(i);
         }
         match key.code {
             KeyCode::Tab | KeyCode::Char('1') => self.page = Page::Games,
             KeyCode::Char('2') => self.show_cores(),
             KeyCode::Char('I') => self.ask_for_a_bios_file(),
             KeyCode::Char('r') => self.worker.send(Command::Reload),
-            KeyCode::Char('?') => self.dialog = Some(help()),
+            KeyCode::Char('?') => self.dialog = Some(help_dialog()),
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Esc => self.escape(),
+            KeyCode::Esc => self.handle_escape(),
             _ => {}
         }
     }
 
     /// Selects file `i`, or the last if there are fewer.
-    fn go_to_bios(&mut self, i: usize) {
+    fn select_bios(&mut self, i: usize) {
         self.selected_bios = i.min(self.bios.len().saturating_sub(1));
         self.bios_table
             .select((!self.bios.is_empty()).then_some(self.selected_bios));
@@ -825,7 +904,7 @@ impl App {
     }
 
     /// Closes what is open, or else stops what is running.
-    fn escape(&mut self) {
+    fn handle_escape(&mut self) {
         if !self.query.value().is_empty() {
             let keep = self.selected_row().map(key_of);
             self.query.reset();
@@ -836,18 +915,18 @@ impl App {
         }
     }
 
-    fn go(&mut self, by: isize) {
-        self.go_to(self.selected.saturating_add_signed(by));
+    fn move_selection_by(&mut self, by: isize) {
+        self.select_row(self.selected.saturating_add_signed(by));
     }
 
     /// Selects row `i`, or the last if there are fewer.
-    fn go_to(&mut self, i: usize) {
+    fn select_row(&mut self, i: usize) {
         self.selected = i.min(self.visible.len().saturating_sub(1));
         self.table.select(self.selected_index());
     }
 
     /// Marks the row, or not, and moves on to the next.
-    fn mark_here(&mut self, mark: bool) {
+    fn set_mark_and_move_on(&mut self, mark: bool) {
         let Some(key) = self.selected_row().map(key_of) else {
             return;
         };
@@ -856,14 +935,14 @@ impl App {
         } else {
             self.marks.remove(&key);
         }
-        self.go(1);
+        self.move_selection_by(1);
     }
 
     /// What a key acts on: the rows marked, seen or not, or else the one
     /// selected. In the saves panel, always the one selected.
-    fn targets(&self) -> Vec<&Row> {
+    fn target_rows(&self) -> Vec<&Row> {
         let marked: Vec<&Row> = self.rows().iter().filter(|r| self.is_marked(r)).collect();
-        if marked.is_empty() || self.panel().is_some() {
+        if marked.is_empty() || self.selected_version().is_some() {
             self.selected_row().into_iter().collect()
         } else {
             marked
@@ -872,10 +951,10 @@ impl App {
 
     /// The copies on the device among the targets, and how many had none.
     fn device_targets(&self) -> (Vec<DeviceEntry>, usize) {
-        let targets = self.targets();
+        let targets = self.target_rows();
         let entries: Vec<DeviceEntry> = targets
             .iter()
-            .filter_map(|r| r.on_device().cloned())
+            .filter_map(|r| r.device_entry().cloned())
             .collect();
         let left = targets.len() - entries.len();
         (entries, left)
@@ -883,23 +962,26 @@ impl App {
 
     /// The games in the library among the targets, and how many had none.
     fn library_targets(&self) -> (Vec<LocalEntry>, usize) {
-        let targets = self.targets();
-        let entries: Vec<LocalEntry> = targets.iter().filter_map(|r| r.local().cloned()).collect();
+        let targets = self.target_rows();
+        let entries: Vec<LocalEntry> = targets
+            .iter()
+            .filter_map(|r| r.local_entry().cloned())
+            .collect();
         let left = targets.len() - entries.len();
         (entries, left)
     }
 
-    fn on_device_rows(&mut self, command: fn(Vec<DeviceEntry>) -> Command) {
+    fn send_for_device_rows(&mut self, command: fn(Vec<DeviceEntry>) -> Command) {
         let (entries, left) = self.device_targets();
-        self.dispatch(entries, left, command, "nothing here is on the device");
+        self.send_for_entries(entries, left, command, "nothing here is on the device");
     }
 
-    fn in_library_rows(&mut self, command: fn(Vec<LocalEntry>) -> Command) {
+    fn send_for_library_rows(&mut self, command: fn(Vec<LocalEntry>) -> Command) {
         let (entries, left) = self.library_targets();
-        self.dispatch(entries, left, command, "nothing here is in the library");
+        self.send_for_entries(entries, left, command, "nothing here is in the library");
     }
 
-    fn dispatch<T>(
+    fn send_for_entries<T>(
         &mut self,
         entries: Vec<T>,
         left: usize,
@@ -918,7 +1000,7 @@ impl App {
     /// The newest versions, onto the copies among the targets with their
     /// game in the library.
     fn push_saves(&mut self) {
-        let targets = self.targets();
+        let targets = self.target_rows();
         let entries: Vec<DeviceEntry> = targets
             .iter()
             .filter_map(|r| match r {
@@ -930,13 +1012,13 @@ impl App {
             })
             .collect();
         let left = targets.len() - entries.len();
-        self.dispatch(entries, left, Command::PushSaves, NOT_ON_BOTH);
+        self.send_for_entries(entries, left, Command::PushSaves, NOT_ON_BOTH);
     }
 
     /// The version selected in the saves panel, onto the selected row's copy.
     fn push_version(&mut self, selected: usize) {
-        let version = self.versions().get(selected).cloned();
-        let on_device = self.selected_row().and_then(Row::on_device).cloned();
+        let version = self.selected_save_versions().get(selected).cloned();
+        let on_device = self.selected_row().and_then(Row::device_entry).cloned();
         match (on_device, version) {
             (Some(on_device), Some(version)) => {
                 self.worker
@@ -973,7 +1055,7 @@ impl App {
             self.ask_to_trash_orphans();
             return;
         }
-        let rows = self.targets();
+        let rows = self.target_rows();
         let mut files = Vec::new();
         for row in rows {
             if let Row::Game { files: f, .. } = row {
@@ -988,10 +1070,12 @@ impl App {
             "These go to the system's trash. Their saves stay.".to_string(),
             String::new(),
         ];
-        lines.extend(few(files.iter().map(|f| f.display().to_string()).collect()));
+        lines.extend(cut_short_for_dialog(
+            files.iter().map(|f| f.display().to_string()).collect(),
+        ));
         self.skipped += left;
         self.dialog = Some(Dialog {
-            title: format!("Trash {}", count(entries.len(), "game")),
+            title: format!("Trash {}", pluralized(entries.len(), "game")),
             lines,
             buttons: vec![
                 Button::new("Trash", Some(Command::TrashGames(entries))),
@@ -1003,7 +1087,7 @@ impl App {
     }
 
     fn ask_to_trash_orphans(&mut self) {
-        let targets = self.targets();
+        let targets = self.target_rows();
         let orphans = targets.iter().filter_map(|r| r.orphan_in_library());
         let orphans: Vec<OrphanLocalSave> = orphans.cloned().collect();
         if orphans.is_empty() {
@@ -1014,9 +1098,11 @@ impl App {
             "Every version goes to the system's trash.".to_string(),
             String::new(),
         ];
-        lines.extend(few(orphans.iter().map(library_orphan_ref).collect()));
+        lines.extend(cut_short_for_dialog(
+            orphans.iter().map(library_orphan_ref).collect(),
+        ));
         self.dialog = Some(Dialog {
-            title: format!("Trash {}", count(orphans.len(), "orphan save")),
+            title: format!("Trash {}", pluralized(orphans.len(), "orphan save")),
             lines,
             buttons: vec![
                 Button::new("Trash", Some(Command::TrashOrphanSaves(orphans))),
@@ -1028,10 +1114,10 @@ impl App {
     }
 
     fn ask_to_trash_version(&mut self, selected: usize) {
-        let Some(local) = self.selected_row().and_then(Row::local).cloned() else {
+        let Some(local) = self.selected_row().and_then(Row::local_entry).cloned() else {
             return;
         };
-        let Some(version) = self.versions().get(selected).cloned() else {
+        let Some(version) = self.selected_save_versions().get(selected).cloned() else {
             return;
         };
         self.dialog = Some(Dialog {
@@ -1068,7 +1154,7 @@ impl App {
         let mut lines = vec![format!(
             "This deletes {it} from the device for good: there is no trash there."
         )];
-        let only_here = self.targets().iter().any(|r| {
+        let only_here = self.target_rows().iter().any(|r| {
             matches!(
                 r,
                 Row::Game {
@@ -1086,10 +1172,13 @@ impl App {
             "Their saves stay on the device.".to_string()
         });
         lines.push(String::new());
-        lines.extend(few(names));
+        lines.extend(cut_short_for_dialog(names));
         self.skipped += left;
         self.dialog = Some(Dialog {
-            title: format!("Delete {} from the device", count(entries.len(), "game")),
+            title: format!(
+                "Delete {} from the device",
+                pluralized(entries.len(), "game")
+            ),
             lines,
             buttons: vec![
                 Button::new("Delete", Some(Command::DeleteGames(entries))),
@@ -1101,7 +1190,7 @@ impl App {
     }
 
     fn ask_to_delete_orphans(&mut self) {
-        let targets = self.targets();
+        let targets = self.target_rows();
         let orphans = targets.iter().filter_map(|r| r.orphan_on_device());
         let orphans: Vec<OrphanDeviceSave> = orphans.cloned().collect();
         if orphans.is_empty() {
@@ -1112,11 +1201,13 @@ impl App {
             "This deletes them from the device for good: there is no trash there.".to_string(),
             String::new(),
         ];
-        lines.extend(few(orphans.iter().map(device_orphan_ref).collect()));
+        lines.extend(cut_short_for_dialog(
+            orphans.iter().map(device_orphan_ref).collect(),
+        ));
         self.dialog = Some(Dialog {
             title: format!(
                 "Delete {} from the device",
-                count(orphans.len(), "orphan save")
+                pluralized(orphans.len(), "orphan save")
             ),
             lines,
             buttons: vec![
@@ -1138,9 +1229,9 @@ impl App {
             "This deletes the save from the device for good: there is no trash there.".to_string(),
         ];
         let unsaved = self
-            .targets()
+            .target_rows()
             .iter()
-            .any(|r| matches!(r, Row::Game { row, .. } if row.new_save_on_device()));
+            .any(|r| matches!(r, Row::Game { row, .. } if row.has_new_save_on_device()));
         if unsaved {
             lines.push("The library doesn't have this save.".to_string());
         }
@@ -1160,7 +1251,7 @@ impl App {
 /// How far a page key moves.
 const PAGE: isize = 20;
 
-fn count(n: usize, what: &str) -> String {
+fn pluralized(n: usize, what: &str) -> String {
     match n {
         1 => format!("1 {what}"),
         n => format!("{n} {what}s"),
@@ -1168,7 +1259,7 @@ fn count(n: usize, what: &str) -> String {
 }
 
 /// `lines`, cut short for a dialog.
-fn few(mut lines: Vec<String>) -> Vec<String> {
+fn cut_short_for_dialog(mut lines: Vec<String>) -> Vec<String> {
     const SHOWN: usize = 10;
     if lines.len() > SHOWN {
         let more = lines.len() - SHOWN;
@@ -1179,7 +1270,7 @@ fn few(mut lines: Vec<String>) -> Vec<String> {
 }
 
 /// Emacs keys, as the keys they stand for.
-fn emacs(key: KeyEvent) -> KeyEvent {
+fn translate_emacs_key(key: KeyEvent) -> KeyEvent {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let code = match key.code {
@@ -1201,7 +1292,7 @@ fn duplicates_dialog(duplicates: Vec<String>) -> Dialog {
         "To clean them up, use a file manager.".to_string(),
         String::new(),
     ];
-    lines.extend(few(duplicates));
+    lines.extend(cut_short_for_dialog(duplicates));
     Dialog {
         title: "Duplicate games on the device".to_string(),
         lines,
@@ -1213,7 +1304,7 @@ fn duplicates_dialog(duplicates: Vec<String>) -> Dialog {
 
 /// The row a key moves the selection to, from row `at`, if it is such a key.
 /// It may be past the last.
-fn moved_to(key: KeyEvent, at: usize) -> Option<usize> {
+fn row_after_key(key: KeyEvent, at: usize) -> Option<usize> {
     Some(match key.code {
         KeyCode::Down | KeyCode::Char('j') => at + 1,
         KeyCode::Up | KeyCode::Char('k') => at.saturating_sub(1),
@@ -1225,7 +1316,7 @@ fn moved_to(key: KeyEvent, at: usize) -> Option<usize> {
     })
 }
 
-fn help() -> Dialog {
+fn help_dialog() -> Dialog {
     let lines = [
         "Move      j k, arrows, C-n C-p; C-v M-v page; g G top, bottom",
         "Mark      m mark, u unmark; M mark all shown, U unmark all",
@@ -1234,6 +1325,7 @@ fn help() -> Dialog {
         "Library   i pull the game; b back up the save; I import a game from a file",
         "Device    s push the game; p push the newest save; E eject",
         "Covers    f download; d update the DATs, which name games",
+        "Rename    n in the library; N on the device; saves and cover go with it",
         "Remove    x game and cover to the system's trash",
         "          X delete from the device: for good, it asks",
         "          On an orphan save, they remove the save.",
@@ -1288,7 +1380,10 @@ mod tests {
 
     fn local(name: &str, crc32: u32, saves: &[&[u8]]) -> LocalEntry {
         let at = |i: usize| UNIX_EPOCH + Duration::from_secs(1_000 * (i as u64 + 1));
-        let saves = saves.iter().enumerate().map(|(i, b)| Save::of(b, at(i)));
+        let saves = saves
+            .iter()
+            .enumerate()
+            .map(|(i, b)| Save::from_bytes(b, at(i)));
         LocalEntry {
             name: name.into(),
             game: game(crc32),
@@ -1301,14 +1396,14 @@ mod tests {
         DeviceEntry {
             path: PathBuf::from(path),
             game: game(crc32),
-            save: save.map(|b| Save::of(b, UNIX_EPOCH)),
+            save: save.map(|b| Save::from_bytes(b, UNIX_EPOCH)),
         }
     }
 
     fn row(row: GameRow) -> Row {
         Row::Game {
             files: row
-                .local()
+                .local_entry()
                 .iter()
                 .map(|l| PathBuf::from(format!("roms/gba/{}", l.name)))
                 .collect(),
@@ -1330,7 +1425,7 @@ mod tests {
             Row::OrphanOnDevice(OrphanDeviceSave {
                 platform: Platform::Gba,
                 path: PathBuf::from("Gone.sav"),
-                save: Save::of(b"x", UNIX_EPOCH),
+                save: Save::from_bytes(b"x", UNIX_EPOCH),
             }),
         ]
     }
@@ -1349,7 +1444,7 @@ mod tests {
 
     fn press(app: &mut App, keys: &str) {
         for c in keys.chars() {
-            app.key(KeyEvent::from(match c {
+            app.handle_key(KeyEvent::from(match c {
                 '\n' => KeyCode::Enter,
                 '\x1b' => KeyCode::Esc,
                 c => KeyCode::Char(c),
@@ -1383,7 +1478,7 @@ mod tests {
 
     /// Clears the path being typed and presses `keys`.
     fn retype(app: &mut App, keys: &str) {
-        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         press(app, keys);
     }
 
@@ -1391,7 +1486,7 @@ mod tests {
     fn type_path(app: &mut App, path: &str) {
         retype(app, path);
         for _ in 0..1000 {
-            app.folder_read();
+            app.on_folder_read();
             if !app.import().unwrap().input.matches().is_empty() {
                 return;
             }
@@ -1406,22 +1501,22 @@ mod tests {
         // A mark elsewhere doesn't count in the panel.
         press(&mut app, "mk");
         press(&mut app, "j\n");
-        assert_eq!(app.versions().len(), 2);
+        assert_eq!(app.selected_save_versions().len(), 2);
         press(&mut app, "jp");
         let [Command::PushSaveVersion(game, version)] = &sent(&rx)[..] else {
             panic!()
         };
         assert_eq!(game.path, Path::new("Both.gba"));
-        assert_eq!(version, &app.versions()[1]);
+        assert_eq!(version, &app.selected_save_versions()[1]);
         press(&mut app, "x");
         press(&mut app, "y");
         let [Command::TrashSaveVersion(game, version)] = &sent(&rx)[..] else {
             panic!()
         };
         assert_eq!(game.name, "Both.gba");
-        assert_eq!(version, &app.versions()[1]);
+        assert_eq!(version, &app.selected_save_versions()[1]);
         press(&mut app, "\x1b");
-        assert_eq!(app.panel(), None);
+        assert_eq!(app.selected_version(), None);
     }
 
     #[test]
@@ -1437,7 +1532,7 @@ mod tests {
             summary: "stopped".into(),
             failed: false,
         });
-        assert!(!app.busy());
+        assert!(!app.is_busy());
     }
 
     fn core_row(id: &str, on_device: Option<&str>, latest: Option<&str>) -> CoreRow {
@@ -1464,7 +1559,7 @@ mod tests {
     /// can't be installed; on the Cores page.
     fn on_cores_page() -> (App, Receiver<Sent>) {
         let (mut app, rx) = app();
-        app.key(KeyEvent::from(KeyCode::Tab));
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
         app.update(Update::Cores {
             rows: vec![
                 core_row("new.Core", None, Some("1")),
@@ -1476,6 +1571,84 @@ mod tests {
         });
         assert_eq!(sent(&rx), [Command::ShowCores]);
         (app, rx)
+    }
+
+    mod renaming {
+        use super::*;
+
+        #[test]
+        fn n_starts_from_its_name_without_the_extension_and_sends_the_new_one() {
+            let (mut app, rx) = app();
+            press(&mut app, "n");
+            let (before, after) = app.rename().unwrap().text_around_cursor();
+            assert_eq!((before.as_str(), after.as_str()), ("Alpha", ""));
+            // Keys are text here, whatever they do elsewhere.
+            press(&mut app, "qx\n");
+            let [Command::RenameInLibrary(game, new)] = &sent(&rx)[..] else {
+                panic!()
+            };
+            assert_eq!((game.name.as_str(), new.as_str()), ("Alpha.gba", "Alphaqx"));
+            assert!(app.rename().is_none());
+        }
+
+        #[test]
+        fn big_n_renames_the_copy_on_the_device() {
+            let (mut app, rx) = app();
+            press(&mut app, "jN!\n");
+            let [Command::RenameOnDevice(game, new)] = &sent(&rx)[..] else {
+                panic!()
+            };
+            assert_eq!(game.path, Path::new("Both.gba"));
+            assert_eq!(new, "Both!");
+        }
+
+        #[test]
+        fn nothing_is_sent_for_the_same_name_or_when_cancelled() {
+            let (mut app, rx) = app();
+            press(&mut app, "n\n");
+            assert!(app.rename().is_none());
+            press(&mut app, "nabc\x1b");
+            assert!(app.rename().is_none());
+            assert_eq!(sent(&rx), []);
+        }
+
+        #[test]
+        fn a_row_with_no_such_copy_says_so() {
+            let (mut app, rx) = app();
+            press(&mut app, "N");
+            assert_eq!(app.message().unwrap().text, "this game isn't on the device");
+            press(&mut app, "jjn");
+            assert_eq!(
+                app.message().unwrap().text,
+                "nothing here is in the library"
+            );
+            assert!(app.rename().is_none());
+            assert_eq!(sent(&rx), []);
+        }
+
+        #[test]
+        fn the_selection_and_the_mark_stay_with_the_game_renamed() {
+            let (mut app, _rx) = app();
+            // Marks the first and moves on to the second, which goes first.
+            press(&mut app, "m");
+            let mut rows = rows();
+            let Row::Game { row, .. } = &mut rows[1] else {
+                panic!()
+            };
+            let GameRow::Both { local, .. } = row else {
+                panic!()
+            };
+            local.name = "Aaa.gba".to_string();
+            let renamed = rows.remove(1);
+            rows.insert(0, renamed);
+            app.update(Update::Snapshot(Snapshot {
+                rows,
+                device: Some(PathBuf::from("/Volumes/POCKET")),
+            }));
+            let selected = app.selected_row().unwrap().local_entry().unwrap();
+            assert_eq!(selected.name, "Aaa.gba");
+            assert_eq!(app.marked_count(), 1);
+        }
     }
 
     /// A file that is there, then one that is missing; on the BIOS page, with
@@ -1506,11 +1679,11 @@ mod tests {
         #[test]
         fn tab_goes_through_the_pages_and_numbers_go_straight_there() {
             let (mut app, _rx) = app();
-            app.key(KeyEvent::from(KeyCode::Tab));
+            app.handle_key(KeyEvent::from(KeyCode::Tab));
             assert_eq!(app.page(), Page::Cores);
-            app.key(KeyEvent::from(KeyCode::Tab));
+            app.handle_key(KeyEvent::from(KeyCode::Tab));
             assert_eq!(app.page(), Page::Bios);
-            app.key(KeyEvent::from(KeyCode::Tab));
+            app.handle_key(KeyEvent::from(KeyCode::Tab));
             assert_eq!(app.page(), Page::Games);
             press(&mut app, "3");
             assert_eq!(app.page(), Page::Bios);
@@ -1607,7 +1780,7 @@ mod tests {
         fn pages_do_not_change_while_typing_a_search() {
             let (mut app, rx) = app();
             press(&mut app, "/2");
-            app.key(KeyEvent::from(KeyCode::Tab));
+            app.handle_key(KeyEvent::from(KeyCode::Tab));
             assert_eq!(app.page(), Page::Games);
             assert_eq!(app.query(), "2");
             assert_eq!(sent(&rx), []);
@@ -1719,12 +1892,12 @@ mod tests {
         let (mut app, _rx) = app();
         let root = PathBuf::from("/Volumes/OTHER");
         app.update(Update::ReadingDevice(root));
-        assert!(app.busy());
+        assert!(app.is_busy());
         assert!(app.job().is_none());
         let top = header(&mut app);
         assert!(top.contains("reading OTHER…"), "{top}");
         app.update(Update::DeviceRead);
-        assert!(!app.busy());
+        assert!(!app.is_busy());
         let top = header(&mut app);
         assert!(top.contains("● POCKET"), "{top}");
     }
@@ -1819,7 +1992,7 @@ mod tests {
             draw(&mut app);
             type_path(&mut app, "/");
             draw(&mut app);
-            app.key(KeyEvent::from(KeyCode::Down));
+            app.handle_key(KeyEvent::from(KeyCode::Down));
             draw(&mut app);
             press(&mut app, "\x1b\x1b\x1b");
             press(&mut app, "\x1bI");
@@ -1838,7 +2011,7 @@ mod tests {
                 summary: "pushed".into(),
                 failed: false,
             });
-            app.key(KeyEvent::from(KeyCode::Tab));
+            app.handle_key(KeyEvent::from(KeyCode::Tab));
             draw(&mut app);
             app.update(Update::Cores {
                 rows: vec![
@@ -1860,6 +2033,10 @@ mod tests {
             ]));
             draw(&mut app);
             press(&mut app, "GI");
+            draw(&mut app);
+            press(&mut app, "\x1b1n");
+            draw(&mut app);
+            press(&mut app, "\x1bjN");
             draw(&mut app);
         }
     }
@@ -1886,20 +2063,20 @@ mod tests {
                 panic!()
             };
             assert_eq!(paths(games), [Path::new("Both.gba"), Path::new("Hack.gba")]);
-            assert_eq!(app.marked(), 0);
+            assert_eq!(app.marked_count(), 0);
         }
 
         #[test]
         fn u_unmarks_one_big_u_all_and_big_m_marks_what_is_shown() {
             let (mut app, _rx) = app();
             press(&mut app, "mm");
-            assert_eq!(app.marked(), 2);
+            assert_eq!(app.marked_count(), 2);
             press(&mut app, "ku");
-            assert_eq!(app.marked(), 1);
+            assert_eq!(app.marked_count(), 1);
             press(&mut app, "U");
-            assert_eq!(app.marked(), 0);
+            assert_eq!(app.marked_count(), 0);
             press(&mut app, "/hack\nM");
-            assert_eq!(app.marked(), 1);
+            assert_eq!(app.marked_count(), 1);
         }
 
         #[test]
@@ -1922,11 +2099,14 @@ mod tests {
         fn the_search_box_edits_at_the_cursor() {
             let (mut app, _rx) = app();
             press(&mut app, "/hck");
-            app.key(KeyEvent::from(KeyCode::Left));
-            app.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+            app.handle_key(KeyEvent::from(KeyCode::Left));
+            app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
             press(&mut app, "a");
             assert_eq!(app.query(), "hack");
-            assert_eq!(app.query_split(), ("ha".to_string(), "ck".to_string()));
+            assert_eq!(
+                app.query_around_cursor(),
+                ("ha".to_string(), "ck".to_string())
+            );
             assert_eq!(name_of(app.selected_row().unwrap()), "Hack.gba");
         }
 
@@ -1960,7 +2140,7 @@ mod tests {
                 device: None,
             }));
             assert_eq!(name_of(app.selected_row().unwrap()), "Hack.gba");
-            assert_eq!(app.marked(), 1);
+            assert_eq!(app.marked_count(), 1);
         }
     }
 
@@ -2058,6 +2238,19 @@ mod tests {
         }
 
         #[test]
+        fn a_folder_is_imported_with_no_platform_asked_for() {
+            let (mut app, rx) = app();
+            press(&mut app, "I");
+            retype(&mut app, "/some/roms/\n");
+            let [Command::ImportGame(path, None)] = &sent(&rx)[..] else {
+                panic!()
+            };
+            assert_eq!(path, Path::new("/some/roms"));
+            assert!(app.import().is_none());
+            assert!(app.platform_choice().is_none());
+        }
+
+        #[test]
         fn a_game_whose_extension_does_not_tell_waits_for_the_platform_chosen() {
             let (mut app, rx) = app();
             press(&mut app, "I");
@@ -2082,9 +2275,9 @@ mod tests {
         }
 
         #[test]
-        fn enter_on_a_folder_keeps_the_window_open() {
+        fn enter_on_a_folder_keeps_the_window_for_a_save_open() {
             let (mut app, rx) = app();
-            press(&mut app, "I\n");
+            press(&mut app, "j\nI\n");
             assert!(app.import().is_some());
             assert!(sent(&rx).is_empty());
         }
@@ -2114,7 +2307,7 @@ mod tests {
             let (mut app, rx) = app();
             press(&mut app, "j\nI");
             type_path(&mut app, &folder);
-            app.key(KeyEvent::from(KeyCode::Down));
+            app.handle_key(KeyEvent::from(KeyCode::Down));
             press(&mut app, "\n");
             assert!(sent(&rx).is_empty());
             press(&mut app, "\n");
@@ -2132,13 +2325,13 @@ mod tests {
             let (mut app, rx) = app();
             press(&mut app, "j\nI");
             type_path(&mut app, &folder);
-            app.key(KeyEvent::from(KeyCode::Down));
+            app.handle_key(KeyEvent::from(KeyCode::Down));
             press(&mut app, "\x1b");
             let import = app.import().unwrap();
             assert_eq!(import.input.picked(), None);
             press(&mut app, "\x1b");
             assert!(app.import().is_none());
-            assert_eq!(app.panel(), Some(0));
+            assert_eq!(app.selected_version(), Some(0));
             assert!(sent(&rx).is_empty());
         }
 

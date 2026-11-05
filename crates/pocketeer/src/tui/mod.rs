@@ -49,11 +49,11 @@ pub fn run(library: PathBuf, device: Option<PathBuf>) -> ExitCode {
         Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())
     };
     let mut terminal = ratatui::init();
-    let (mut app, rx) = start(library, device, picker);
-    let result = event_loop(&mut terminal, &mut app, &rx);
+    let (mut app, rx) = start_threads(library, device, picker);
+    let result = run_event_loop(&mut terminal, &mut app, &rx);
     ratatui::restore();
     // `app` going waits for the worker, with the terminal the user's again.
-    if app.busy() {
+    if app.is_busy() {
         eprintln!("finishing what is under way; Ctrl-C stops it now");
     }
     match result {
@@ -70,7 +70,7 @@ pub fn run(library: PathBuf, device: Option<PathBuf>) -> ExitCode {
 }
 
 /// The threads, and the app that hears from them through what is returned.
-fn start(
+fn start_threads(
     library: PathBuf,
     device: Option<PathBuf>,
     picker: Picker,
@@ -94,7 +94,7 @@ fn start(
 
 /// Runs until the user quits, or the library can't be opened, for the reason
 /// returned.
-fn event_loop(
+fn run_event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     rx: &mpsc::Receiver<Event>,
@@ -102,7 +102,7 @@ fn event_loop(
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
         // Only a running job has anything to animate.
-        let next = if app.busy() {
+        let next = if app.is_busy() {
             rx.recv_timeout(SPIN)
         } else {
             rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
@@ -116,10 +116,10 @@ fn event_loop(
         // an arrow key doesn't redraw for each repeat.
         for event in first.into_iter().chain(rx.try_iter()) {
             match event {
-                Event::Key(key) => app.key(key),
+                Event::Key(key) => app.handle_key(key),
                 Event::Worker(update) => app.update(*update),
-                Event::CoverReady => app.cover_ready(),
-                Event::FolderRead => app.folder_read(),
+                Event::CoverReady => app.on_cover_ready(),
+                Event::FolderRead => app.on_folder_read(),
                 Event::Resized => {}
             }
         }

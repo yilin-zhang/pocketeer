@@ -26,7 +26,7 @@ thread_local! {
 /// How well `name` has the letters of `typed` in order, whatever their case,
 /// and which of its characters they are; none if it doesn't. Every name has
 /// nothing typed.
-pub fn fuzzy(typed: &str, name: &str) -> Option<(u16, Vec<usize>)> {
+pub fn fuzzy_match(typed: &str, name: &str) -> Option<(u16, Vec<usize>)> {
     if typed.is_empty() {
         return Some((0, Vec::new()));
     }
@@ -60,7 +60,7 @@ pub fn edit(input: &mut Input, key: KeyEvent) -> bool {
 }
 
 /// The text before and after the cursor.
-pub fn split(input: &Input) -> (String, String) {
+pub fn text_around_cursor(input: &Input) -> (String, String) {
     let text = input.value();
     let at = text.char_indices().nth(input.cursor());
     let (before, after) = text.split_at(at.map_or(text.len(), |(i, _)| i));
@@ -76,8 +76,8 @@ pub struct PathEntry {
 
 impl PathEntry {
     /// Which of the name's characters `typed` matches, to show it.
-    pub fn matched(&self, typed: &str) -> Vec<usize> {
-        fuzzy(typed, &self.name).map_or(Vec::new(), |(_, found)| found)
+    pub fn matched_positions(&self, typed: &str) -> Vec<usize> {
+        fuzzy_match(typed, &self.name).map_or(Vec::new(), |(_, found)| found)
     }
 }
 
@@ -106,13 +106,13 @@ impl PathInput {
     }
 
     /// The text before and after the cursor.
-    pub fn split(&self) -> (String, String) {
-        split(&self.input)
+    pub fn text_around_cursor(&self) -> (String, String) {
+        text_around_cursor(&self.input)
     }
 
     /// The path typed, with `~` as the home folder.
     pub fn path(&self) -> PathBuf {
-        expand(self.input.value())
+        expand_tilde(self.input.value())
     }
 
     /// What is typed after the last `/`.
@@ -123,6 +123,13 @@ impl PathInput {
     /// Whether what is typed ends in `/`, so can only be a folder.
     pub fn is_folder(&self) -> bool {
         self.partial().is_empty() && !self.input.value().is_empty()
+    }
+
+    /// Whether what is typed is a folder, going by what has been read of the
+    /// folder it is in.
+    pub fn names_folder(&self) -> bool {
+        let is_it = |e: &&PathEntry| e.is_dir && e.name == self.partial();
+        self.is_folder() || self.matches().iter().any(is_it)
     }
 
     pub fn picked(&self) -> Option<usize> {
@@ -141,7 +148,7 @@ impl PathInput {
             .entries
             .iter()
             .filter(|e| hidden || !e.name.starts_with('.'))
-            .filter_map(|e| Some((fuzzy(partial, &e.name)?.0, e)))
+            .filter_map(|e| Some((fuzzy_match(partial, &e.name)?.0, e)))
             .collect();
         found.sort_by_key(|(score, _)| Reverse(*score));
         found.into_iter().map(|(_, e)| e).collect()
@@ -172,17 +179,17 @@ impl PathInput {
     }
 
     /// Puts the match picked in the text; whether one was.
-    pub fn take_picked(&mut self) -> bool {
+    pub fn fill_in_picked(&mut self) -> bool {
         let picked = self.picked.and_then(|i| self.matches().get(i).copied());
         let Some(entry) = picked.cloned() else {
             return false;
         };
-        self.fill(&entry);
+        self.fill_in(&entry);
         true
     }
 
     /// Editing, moving through the matches, and Tab.
-    pub fn key(&mut self, key: KeyEvent) {
+    pub fn handle_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Down => self.pick_next(),
@@ -208,7 +215,7 @@ impl PathInput {
     fn folder(&self) -> PathBuf {
         match self.partial_start() {
             0 => PathBuf::from("."),
-            n => expand(&self.input.value()[..n]),
+            n => expand_tilde(&self.input.value()[..n]),
         }
     }
 
@@ -224,13 +231,13 @@ impl PathInput {
     /// The match picked or the only one; or else as far as all those starting
     /// with what is typed agree.
     fn complete(&mut self) {
-        if self.take_picked() {
+        if self.fill_in_picked() {
             return;
         }
         let matches = self.matches();
         if let [only] = matches[..] {
             let only = only.clone();
-            self.fill(&only);
+            self.fill_in(&only);
             return;
         }
         let partial = self.partial().to_lowercase();
@@ -251,7 +258,7 @@ impl PathInput {
         }
     }
 
-    fn fill(&mut self, entry: &PathEntry) {
+    fn fill_in(&mut self, entry: &PathEntry) {
         let slash = if entry.is_dir { "/" } else { "" };
         self.set_partial(format!("{}{slash}", entry.name));
     }
@@ -265,7 +272,7 @@ impl PathInput {
     /// Cuts the word before the cursor: a word ends at `/` or a space.
     fn cut_word(&mut self) {
         let is_end = |c: char| c == '/' || c == ' ';
-        let (before, after) = self.split();
+        let (before, after) = self.text_around_cursor();
         let word = before.trim_end_matches(is_end);
         let kept = &word[..word.rfind(is_end).map_or(0, |i| i + 1)];
         self.input = Input::new(format!("{kept}{after}")).with_cursor(kept.chars().count());
@@ -298,12 +305,12 @@ impl PathReader {
         Self { tx, rx }
     }
 
-    pub fn ask(&self, folder: PathBuf) {
+    pub fn request_folder(&self, folder: PathBuf) {
         let _ = self.tx.send(folder);
     }
 
     /// The folders read since the last time.
-    pub fn take(&self) -> impl Iterator<Item = (PathBuf, Vec<PathEntry>)> + '_ {
+    pub fn folders_read(&self) -> impl Iterator<Item = (PathBuf, Vec<PathEntry>)> + '_ {
         self.rx.try_iter()
     }
 }
@@ -325,7 +332,7 @@ fn read_folder(folder: &Path) -> Vec<PathEntry> {
 }
 
 /// `path` with `~` as the home folder, if there is one.
-fn expand(path: &str) -> PathBuf {
+fn expand_tilde(path: &str) -> PathBuf {
     let rest = match path.strip_prefix('~') {
         Some(rest) if rest.is_empty() || rest.starts_with('/') => rest.trim_start_matches('/'),
         _ => return PathBuf::from(path),
@@ -357,16 +364,25 @@ mod tests {
         input
     }
 
+    #[test]
+    fn what_is_typed_names_a_folder_if_it_ends_so_or_the_folder_read_says_so() {
+        let entries = [entry("roms", true), entry("Mine.gba", false)];
+        assert!(input("/some/", &entries).names_folder());
+        assert!(input("/some/roms", &entries).names_folder());
+        assert!(!input("/some/Mine.gba", &entries).names_folder());
+        assert!(!input("/some/rom", &entries).names_folder());
+    }
+
     fn press(input: &mut PathInput, code: KeyCode) {
-        input.key(KeyEvent::from(code));
+        input.handle_key(KeyEvent::from(code));
     }
 
     fn ctrl(input: &mut PathInput, c: char) {
-        input.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        input.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
     }
 
     fn text(input: &PathInput) -> String {
-        let (before, after) = input.split();
+        let (before, after) = input.text_around_cursor();
         before + &after
     }
 
@@ -424,16 +440,16 @@ mod tests {
         #[test]
         fn what_is_typed_is_found_by_character() {
             let name = entry("Mine.sav", false);
-            assert_eq!(name.matched("in"), [1, 2]);
-            assert_eq!(name.matched("MINE"), [0, 1, 2, 3]);
-            assert_eq!(name.matched("zzz"), Vec::<usize>::new());
-            assert_eq!(name.matched(""), Vec::<usize>::new());
+            assert_eq!(name.matched_positions("in"), [1, 2]);
+            assert_eq!(name.matched_positions("MINE"), [0, 1, 2, 3]);
+            assert_eq!(name.matched_positions("zzz"), Vec::<usize>::new());
+            assert_eq!(name.matched_positions(""), Vec::<usize>::new());
         }
 
         #[test]
         fn characters_are_counted_past_ones_that_take_several_bytes() {
             let name = entry("日本語 mine.sav", false);
-            assert_eq!(name.matched("mine"), [4, 5, 6, 7]);
+            assert_eq!(name.matched_positions("mine"), [4, 5, 6, 7]);
         }
 
         /// A capital that lowercases to two characters, by a name holding those
@@ -442,7 +458,11 @@ mod tests {
         fn a_character_whose_lowercase_is_longer_cuts_nothing_in_half() {
             let name = entry("i\u{0307}.gba", false);
             let chars = name.name.chars().count();
-            assert!(name.matched("\u{0130}").iter().all(|i| *i < chars));
+            assert!(
+                name.matched_positions("\u{0130}")
+                    .iter()
+                    .all(|i| *i < chars)
+            );
         }
     }
 
@@ -502,7 +522,10 @@ mod tests {
             ctrl(&mut input, 'a');
             press(&mut input, KeyCode::Right);
             press(&mut input, KeyCode::Char('x'));
-            assert_eq!(input.split(), ("/x".to_string(), "one/two".to_string()));
+            assert_eq!(
+                input.text_around_cursor(),
+                ("/x".to_string(), "one/two".to_string())
+            );
             ctrl(&mut input, 'k');
             assert_eq!(text(&input), "/x");
             ctrl(&mut input, 'e');
@@ -545,9 +568,9 @@ mod tests {
             let reader = PathReader::spawn(move || {
                 let _ = woken.send(());
             });
-            reader.ask(dir.path().to_path_buf());
+            reader.request_folder(dir.path().to_path_buf());
             wake.recv_timeout(Duration::from_secs(10)).unwrap();
-            let (folder, entries) = reader.take().next().unwrap();
+            let (folder, entries) = reader.folders_read().next().unwrap();
             assert_eq!(folder, dir.path());
             assert_eq!(
                 entries,

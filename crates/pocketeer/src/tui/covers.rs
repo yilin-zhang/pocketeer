@@ -161,7 +161,7 @@ impl Covers {
                     .iter()
                     .find_map(|p| queue.iter().position(|job| job.path() == p));
                 let results: Vec<Done> = match next {
-                    Some(i) => vec![run(&picker, queue.swap_remove(i))],
+                    Some(i) => vec![do_work(&picker, queue.swap_remove(i))],
                     // Everything queued is for rows the user has left.
                     None => queue.drain(..).map(drop_work).collect(),
                 };
@@ -194,15 +194,15 @@ impl Covers {
         // The selected cover goes to the thread first, so it never waits
         // behind the ones around it.
         for p in std::iter::once(path).chain(next.iter().map(PathBuf::as_path)) {
-            if let Some(stamp) = stamp(p) {
-                self.request(p, stamp, size);
+            if let Some(stamp) = file_stamp(p) {
+                self.request_unless_cached(p, stamp, size);
             }
         }
-        self.get(path, size)
+        self.cover_at(path, size)
     }
 
     /// Takes in whatever the thread finished.
-    pub fn receive(&mut self) {
+    pub fn collect_finished(&mut self) {
         for Done {
             path,
             stamp,
@@ -230,11 +230,11 @@ impl Covers {
 
     /// The cover at `path`, encoded for `size` cells, if it is ready. When it
     /// isn't, the thread is asked for it and the panel says it's loading.
-    fn get(&mut self, path: &Path, size: Size) -> Cover<'_> {
-        let Some(stamp) = stamp(path) else {
+    fn cover_at(&mut self, path: &Path, size: Size) -> Cover<'_> {
+        let Some(stamp) = file_stamp(path) else {
             return Cover::Unreadable;
         };
-        if !self.request(path, stamp, size) {
+        if !self.request_unless_cached(path, stamp, size) {
             return Cover::Loading;
         }
         let Some((_, state)) = self.cache.get_mut(path) else {
@@ -264,7 +264,7 @@ impl Covers {
 
     /// Sends the cover to the thread unless the cached copy is for this
     /// version of the file. `false` when it was sent.
-    fn request(&mut self, path: &Path, stamp: Stamp, size: Size) -> bool {
+    fn request_unless_cached(&mut self, path: &Path, stamp: Stamp, size: Size) -> bool {
         if self.cache.get(path).is_some_and(|(s, _)| *s == stamp) {
             return true;
         }
@@ -284,7 +284,7 @@ impl Covers {
     }
 }
 
-fn stamp(path: &Path) -> Option<Stamp> {
+fn file_stamp(path: &Path) -> Option<Stamp> {
     let meta = fs::metadata(path).ok()?;
     Some((meta.modified().ok(), meta.len()))
 }
@@ -308,7 +308,7 @@ fn drop_work(work: Work) -> Done {
     }
 }
 
-fn run(picker: &Picker, work: Work) -> Done {
+fn do_work(picker: &Picker, work: Work) -> Done {
     let (path, stamp, cover, size) = match work {
         Work::Decode { path, stamp, size } => {
             let cover = image::ImageReader::open(&path)
@@ -351,7 +351,7 @@ struct Dots {
 impl Dots {
     fn new(image: &DynamicImage, size: Size) -> Self {
         let source = DynamicImage::ImageRgb8(image.to_rgb8());
-        let lines = render(&source, size);
+        let lines = render_dots(&source, size);
         Self {
             source,
             size,
@@ -361,7 +361,7 @@ impl Dots {
 
     fn resize(&mut self, size: Size) {
         self.size = size;
-        self.lines = render(&self.source, size);
+        self.lines = render_dots(&self.source, size);
     }
 }
 
@@ -376,7 +376,7 @@ const BITS: [[u8; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
 /// twice as tall as it is wide), dithers its brightness and encodes it as
 /// braille. Which dots are lit carries the brightness; each cell is drawn
 /// in the average colour of its lit dots, so the colour carries the hue.
-fn render(source: &DynamicImage, size: Size) -> Vec<Line<'static>> {
+fn render_dots(source: &DynamicImage, size: Size) -> Vec<Line<'static>> {
     let (cols, rows) = (u32::from(size.width), u32::from(size.height));
     if cols == 0 || rows == 0 || source.width() == 0 || source.height() == 0 {
         return Vec::new();
@@ -420,7 +420,7 @@ fn render(source: &DynamicImage, size: Size) -> Vec<Line<'static>> {
             let [r, g, b] = sum.map(|s| s / lit);
             spans.push(Span::styled(
                 dot.to_string(),
-                Style::new().fg(visible(r, g, b)),
+                Style::new().fg(lifted_color(r, g, b)),
             ));
         }
         lines.push(Line::from(spans));
@@ -431,7 +431,7 @@ fn render(source: &DynamicImage, size: Size) -> Vec<Line<'static>> {
 /// A dot's colour, lifted so a dark colour still shows on the dark
 /// background: a lit dot means "light here", and density already says how
 /// light.
-fn visible(r: u32, g: u32, b: u32) -> Color {
+fn lifted_color(r: u32, g: u32, b: u32) -> Color {
     const FLOOR: u32 = 130;
     let max = r.max(g).max(b).max(1);
     let lift = |c: u32| (c * max.max(FLOOR) / max).min(255) as u8;
@@ -484,7 +484,7 @@ mod tests {
     fn wait_ready(covers: &mut Covers, path: &Path, size: Size) -> bool {
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(10) {
-            covers.receive();
+            covers.collect_finished();
             match covers.show(path, &[], size) {
                 Cover::Image(_) | Cover::Dots(_) => return true,
                 Cover::Unreadable => return false,

@@ -3,16 +3,16 @@
 
 use std::{
     collections::HashMap,
-    fs::{self, File},
     io::{self, Cursor, Read},
     path::{Component, Path, PathBuf},
     time::{Duration, SystemTime},
 };
 
+use fs_err::{self as fs, File};
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
-use crate::{error::BaseError, files::write, platform::Platform};
+use crate::{error::BaseError, files::write_atomically, platform::Platform};
 
 /// The cores pocketeer installs, for now: each comes alone in its zip, which
 /// holds nothing it needs beyond `Cores/` and `Platforms/`, and neither ROMs,
@@ -56,7 +56,7 @@ pub struct InstalledCore {
 
 impl InstalledCore {
     /// Whether it is at `version`, however that is written.
-    pub(crate) fn is_at(&self, version: &str) -> bool {
+    pub(crate) fn is_at_version(&self, version: &str) -> bool {
         let plain = |v: &str| v.trim().trim_start_matches(['v', 'V']).to_lowercase();
         self.version.as_deref().map(plain) == Some(plain(version))
     }
@@ -109,9 +109,9 @@ impl CoreRow {
     }
 
     /// Whether the device has it at another version than the newest.
-    pub fn update_available(&self) -> bool {
+    pub fn has_update(&self) -> bool {
         match self {
-            CoreRow::Both { installed, latest } => !installed.is_at(&latest.version),
+            CoreRow::Both { installed, latest } => !installed.is_at_version(&latest.version),
             _ => false,
         }
     }
@@ -186,7 +186,7 @@ pub struct BiosRow {
 
 impl BiosRow {
     /// Whether a core can't run without it.
-    pub fn required(&self) -> bool {
+    pub fn is_required(&self) -> bool {
         self.needed_by.iter().any(|(_, required)| *required)
     }
 }
@@ -244,14 +244,14 @@ impl<S: RemoteCoreSource> CoreInventory<S> {
     /// The cores in [`SUPPORTED`] the inventory has, in that order. If it is
     /// old it is asked for again; if that fails what is known is used, and if
     /// nothing is that is the error.
-    pub fn supported(&mut self) -> Result<Vec<InventoryCore>, BaseError> {
+    pub fn supported_cores(&mut self) -> Result<Vec<InventoryCore>, BaseError> {
         let fresh = |asked: SystemTime| asked.elapsed().is_ok_and(|age| age < INVENTORY_AGE);
         if !self.asked.is_some_and(fresh) {
             self.asked = Some(SystemTime::now());
             match self.source.inventory() {
                 Ok(cores) => {
                     if let Ok(json) = serde_json::to_vec(&cores) {
-                        let _ = write(&self.path, &json, None);
+                        let _ = write_atomically(&self.path, &json, None);
                     }
                     self.cores = cores;
                 }
@@ -321,7 +321,7 @@ impl CoreZip {
             .read_to_end(&mut json)
             .map_err(|e| bad(e.to_string()))?;
         let (version, _) =
-            read_core_json(&json).ok_or_else(|| bad("its core.json can't be read".to_string()))?;
+            parse_core_json(&json).ok_or_else(|| bad("its core.json can't be read".to_string()))?;
         files.push((json_path, json_name));
         Ok(Self {
             version,
@@ -378,14 +378,14 @@ struct CoreMetadata {
 }
 
 /// A JSON file of a core, which may start with a byte order mark.
-fn read_json<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Option<T> {
+fn parse_json<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Option<T> {
     let text = std::str::from_utf8(bytes).ok()?;
     serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()
 }
 
 /// The version and platforms in the text of a `core.json`.
-pub(crate) fn read_core_json(bytes: &[u8]) -> Option<(String, Vec<Platform>)> {
-    let core: CoreJson = read_json(bytes)?;
+pub(crate) fn parse_core_json(bytes: &[u8]) -> Option<(String, Vec<Platform>)> {
+    let core: CoreJson = parse_json(bytes)?;
     let metadata = core.core.metadata;
     let platforms = metadata.platform_ids.iter();
     Some((
@@ -423,14 +423,14 @@ impl DataSlot {
     /// a third party's zip and make a path, so only a plain name and a named
     /// platform will do. Only a file in `common/` counts, not one in the core's
     /// own folder, which no core in [`SUPPORTED`] has.
-    fn file(&self, platforms: &[Platform]) -> Option<CoreFile> {
+    fn to_core_file(&self, platforms: &[Platform]) -> Option<CoreFile> {
         let name = self.filename.as_deref().filter(|_| !self.nonvolatile)?;
         let parameters = match &self.parameters {
             Some(parameters) => parameters.value()?,
             None => 0,
         };
-        // Bits 24 to 31 pick one of the core's platforms.
-        let platform = platforms.get((parameters >> 24 & 0xff) as usize)?;
+        // Bits 24 and 25 pick one of the core's platforms.
+        let platform = platforms.get((parameters >> 24 & 0b11) as usize)?;
         let mut parts = Path::new(name).components();
         let plain = matches!(parts.next(), Some(Component::Normal(_))) && parts.next().is_none();
         // Bit 1 says the file is the core's own.
@@ -472,10 +472,13 @@ impl Number {
 
 /// The files the `data.json` of a core for `platforms` says it loads; none if
 /// it can't be read.
-pub(crate) fn read_core_files(platforms: &[Platform], bytes: &[u8]) -> Vec<CoreFile> {
-    let data: Option<DataJson> = read_json(bytes);
+pub(crate) fn parse_core_files(platforms: &[Platform], bytes: &[u8]) -> Vec<CoreFile> {
+    let data: Option<DataJson> = parse_json(bytes);
     let slots = data.map_or(Vec::new(), |d| d.data.data_slots);
-    slots.iter().filter_map(|s| s.file(platforms)).collect()
+    slots
+        .iter()
+        .filter_map(|s| s.to_core_file(platforms))
+        .collect()
 }
 
 /// What the tests of the modules that install cores share.
@@ -535,7 +538,7 @@ mod tests {
 
         /// What these slots of a core for GBA declare.
         fn files(slots: &str) -> Vec<CoreFile> {
-            read_core_files(&[Platform::Gba], data_json(slots).as_bytes())
+            parse_core_files(&[Platform::Gba], data_json(slots).as_bytes())
         }
 
         fn paths(slots: &str) -> Vec<PathBuf> {
@@ -605,10 +608,14 @@ mod tests {
         #[test]
         fn the_platform_is_the_one_its_parameters_pick() {
             let json = data_json(r#"{"filename":"x.bin","parameters":16777216}"#);
-            let pick = |platforms: &[Platform]| read_core_files(platforms, json.as_bytes());
+            let pick = |platforms: &[Platform]| parse_core_files(platforms, json.as_bytes());
             let picked = pick(&[Platform::Gb, Platform::Gba]);
             assert_eq!(picked[0].platform, Platform::Gba);
             assert_eq!(pick(&[Platform::Gb]), []);
+            // The bits above those aren't the index.
+            let json = data_json(r#"{"filename":"x.bin","parameters":"0x4000000"}"#);
+            let files = parse_core_files(&[Platform::Gba], json.as_bytes());
+            assert_eq!(files[0].platform, Platform::Gba);
         }
 
         #[test]
@@ -619,19 +626,19 @@ mod tests {
             }
             let other = [Platform::Other("../Saves".into())];
             let json = data_json(r#"{"filename":"x.bin"}"#);
-            assert_eq!(read_core_files(&other, json.as_bytes()), []);
+            assert_eq!(parse_core_files(&other, json.as_bytes()), []);
         }
 
         #[test]
         fn a_file_that_cannot_be_read_declares_nothing() {
-            assert_eq!(read_core_files(&[Platform::Gba], b"{ not json"), []);
-            assert_eq!(read_core_files(&[Platform::Gba], b""), []);
+            assert_eq!(parse_core_files(&[Platform::Gba], b"{ not json"), []);
+            assert_eq!(parse_core_files(&[Platform::Gba], b""), []);
         }
 
         #[test]
         fn a_byte_order_mark_is_no_matter() {
             let json = format!("\u{feff}{}", data_json(r#"{"filename":"x.bin"}"#));
-            let files = read_core_files(&[Platform::Gba], json.as_bytes());
+            let files = parse_core_files(&[Platform::Gba], json.as_bytes());
             assert_eq!(files.len(), 1);
         }
     }
@@ -661,7 +668,7 @@ mod tests {
                 installed: installed(on_device),
                 latest: latest("a.B", newest),
             }
-            .update_available()
+            .has_update()
         }
 
         #[test]
@@ -685,8 +692,8 @@ mod tests {
 
         #[test]
         fn only_a_core_on_both_sides_can_have_one() {
-            assert!(!CoreRow::Installed(installed(Some("1.0"))).update_available());
-            assert!(!CoreRow::Available(latest("a.B", "1.0")).update_available());
+            assert!(!CoreRow::Installed(installed(Some("1.0"))).has_update());
+            assert!(!CoreRow::Available(latest("a.B", "1.0")).has_update());
         }
     }
 
@@ -817,7 +824,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("cores.json");
             let fake = Fake::at("2.0");
-            let got = CoreInventory::open(&path, &fake).supported().unwrap();
+            let got = CoreInventory::open(&path, &fake).supported_cores().unwrap();
             assert_eq!(got.len(), 1);
             assert_eq!(got[0].id, "Spiritualized.GB");
             let kept: Vec<InventoryCore> =
@@ -830,8 +837,8 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("cores.json");
             let fake = Fake::at("2.0");
-            CoreInventory::open(&path, &fake).supported().unwrap();
-            let again = CoreInventory::open(&path, &fake).supported().unwrap();
+            CoreInventory::open(&path, &fake).supported_cores().unwrap();
+            let again = CoreInventory::open(&path, &fake).supported_cores().unwrap();
             assert_eq!(versions(&again), ["2.0"]);
             assert_eq!(fake.asked.get(), 1);
         }
@@ -840,7 +847,7 @@ mod tests {
         fn once_old_it_is_asked_for_again() {
             let dir = tempfile::tempdir().unwrap();
             let fake = Fake::at("2.0");
-            let got = CoreInventory::open(&old_file(dir.path()), &fake).supported();
+            let got = CoreInventory::open(&old_file(dir.path()), &fake).supported_cores();
             assert_eq!(versions(&got.unwrap()), ["2.0"]);
             assert_eq!(fake.asked.get(), 1);
         }
@@ -850,8 +857,8 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let fake = Fake::failing();
             let mut inventory = CoreInventory::open(&old_file(dir.path()), &fake);
-            assert_eq!(versions(&inventory.supported().unwrap()), ["1.0"]);
-            assert_eq!(versions(&inventory.supported().unwrap()), ["1.0"]);
+            assert_eq!(versions(&inventory.supported_cores().unwrap()), ["1.0"]);
+            assert_eq!(versions(&inventory.supported_cores().unwrap()), ["1.0"]);
             assert_eq!(fake.asked.get(), 1);
         }
 
@@ -860,7 +867,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let fake = Fake::failing();
             let mut inventory = CoreInventory::open(&dir.path().join("cores.json"), &fake);
-            assert!(inventory.supported().is_err());
+            assert!(inventory.supported_cores().is_err());
         }
 
         #[test]
@@ -868,7 +875,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = put_at(dir.path(), "cores.json", b"{ not json", 1_000);
             let fake = Fake::at("2.0");
-            let got = CoreInventory::open(&path, &fake).supported().unwrap();
+            let got = CoreInventory::open(&path, &fake).supported_cores().unwrap();
             assert_eq!(versions(&got), ["2.0"]);
         }
     }

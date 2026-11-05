@@ -2,19 +2,21 @@
 
 use std::{
     collections::HashSet,
-    fs, io,
+    io,
     path::{Path, PathBuf},
     process::Command,
 };
 
+use fs_err as fs;
+
 use crate::{
     cores::{
         BiosRow, BiosStatus, CoreFile, CoreZip, InstalledCore, PutBiosError, RemoveCoreError,
-        read_core_files, read_core_json,
+        parse_core_files, parse_core_json,
     },
-    error::{BaseError, io_at},
-    files::{Cache, Listing, copy, list, write},
-    game::{Game, Save},
+    error::BaseError,
+    files::{Cache, copy_atomically, files_under, list_folder, safe_rename_all, write_atomically},
+    game::{Game, Save, is_valid_fat_name, renamed_file_name},
     platform::Platform,
 };
 
@@ -44,6 +46,31 @@ pub struct ScanReport {
     /// Copies of a game at a later path than its first copy. They are left
     /// out of everything else: only the first copy's save is synced.
     pub duplicates: Vec<DeviceEntry>,
+}
+
+/// Why a game on the device wasn't renamed. Nothing has changed, then.
+#[derive(Debug, thiserror::Error)]
+pub enum RenameOnDeviceError {
+    #[error("the device can't hold a game of that name")]
+    BadName,
+    #[error("it has that name already")]
+    SameName,
+    /// A file beside it has the name, whatever its extension or case: on the
+    /// device they would share a save.
+    #[error("another file on the device has that name")]
+    NameTaken,
+    /// The Pocket would give what is there to this game.
+    #[error("the device has a save under that name")]
+    LeftoversThere,
+    /// A file beside it has its name, and so its save: moving the save would
+    /// take it from that one.
+    #[error("another file beside it shares its save")]
+    SharesSave,
+    /// A core loads a file of that name, which is no game.
+    #[error("a core on the device loads a file of that name")]
+    BiosName,
+    #[error(transparent)]
+    Other(#[from] BaseError),
 }
 
 /// Where everything is on a device: every path pocketeer reads or writes on
@@ -147,8 +174,8 @@ pub struct Device {
 impl Device {
     /// The roots of the devices mounted now, sorted; there may be none, or
     /// more than one.
-    pub fn find() -> Vec<PathBuf> {
-        devices_among(volumes())
+    pub fn find_mounted() -> Vec<PathBuf> {
+        devices_among(mounted_volumes())
     }
 
     /// Whether the folder at `root` looks like a device. Reads no more than
@@ -186,13 +213,13 @@ impl Device {
         &self.entries
     }
 
-    pub(crate) fn scanned(&self) -> bool {
+    pub(crate) fn has_been_scanned(&self) -> bool {
         self.scanned
     }
 
     /// The game of `platform` at `path` under `common/`, as the last scan
     /// found it.
-    pub fn entry(&self, platform: &Platform, path: &Path) -> Option<&DeviceEntry> {
+    pub fn entry_at(&self, platform: &Platform, path: &Path) -> Option<&DeviceEntry> {
         self.entries.iter().find(|e| e.is_at(platform, path))
     }
 
@@ -204,7 +231,7 @@ impl Device {
     /// Deletes `entry`'s file for good. Its save stays.
     pub(crate) fn remove_game(&mut self, entry: &DeviceEntry) -> Result<(), BaseError> {
         let path = self.game_path(&entry.game.platform, &entry.path);
-        fs::remove_file(&path).map_err(io_at(&path))?;
+        fs::remove_file(&path)?;
         self.cache.forget(&path);
         self.cache.save();
         self.entries
@@ -218,7 +245,7 @@ impl Device {
         let removed = match fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Err(DeleteSaveError::NoSave),
-            Err(e) => return Err(io_at(&path)(e).into()),
+            Err(e) => return Err(BaseError::from(e).into()),
         };
         if let Some(e) = self.entry_mut(entry) {
             e.save = None;
@@ -240,7 +267,7 @@ impl Device {
             .layout
             .saves_common(&orphan.platform)
             .join(&orphan.path);
-        fs::remove_file(&path).map_err(io_at(&path))?;
+        fs::remove_file(&path).map_err(BaseError::from)?;
         Ok(())
     }
 
@@ -255,14 +282,14 @@ impl Device {
         let mut entries = Vec::new();
         let mut duplicates = Vec::new();
         let assets = layout.assets();
-        for id in list(&assets).map_err(io_at(&assets))?.dirs {
+        for id in list_folder(&assets)?.dirs {
             let platform = Platform::from_id(&id);
             for path in files_under(&layout.common(&platform))? {
                 let full = layout.game(&platform, &path);
                 if declared.contains(&full) {
                     continue;
                 }
-                let game = self.cache.read(&platform, &full).map_err(io_at(&full))?;
+                let game = self.cache.read_game(&platform, &full)?;
                 seen.insert(full);
                 let save = read_save(&layout.save(&platform, &path))?;
                 let entry = DeviceEntry { path, game, save };
@@ -296,22 +323,109 @@ impl Device {
         from: &Path,
     ) -> Result<DeviceEntry, BaseError> {
         let to = self.layout.game(&game.platform, path);
-        copy(from, &to)?;
-        self.cache.record(&to, game).map_err(io_at(&to))?;
+        copy_atomically(from, &to)?;
+        self.cache.record_game(&to, game)?;
         self.cache.save();
         let entry = DeviceEntry {
             path: path.to_path_buf(),
             game: game.clone(),
             save: read_save(&self.layout.save(&game.platform, path))?,
         };
+        self.insert(entry.clone());
+        Ok(entry)
+    }
+
+    /// Adds `entry` to the entries, in its place, in place of any at its path.
+    fn insert(&mut self, entry: DeviceEntry) {
         let place = self.entries.binary_search_by(|e| {
             (e.game.platform.id(), &e.path).cmp(&(entry.game.platform.id(), &entry.path))
         });
         match place {
-            Ok(at) => self.entries[at] = entry.clone(),
-            Err(at) => self.entries.insert(at, entry.clone()),
+            Ok(at) => self.entries[at] = entry,
+            Err(at) => self.entries.insert(at, entry),
         }
-        Ok(entry)
+    }
+
+    /// Calls `entry` `new` instead, in the same folder, keeping its extension,
+    /// with every file of its name beside its save: a core may keep more than
+    /// the save there. Its contents aren't read again.
+    pub(crate) fn rename_game(
+        &mut self,
+        entry: &DeviceEntry,
+        new: &str,
+    ) -> Result<DeviceEntry, RenameOnDeviceError> {
+        let platform = &entry.game.platform;
+        let file = entry.path.file_name().unwrap_or_default().to_string_lossy();
+        let new_name = renamed_file_name(&file, new);
+        if !is_valid_fat_name(&new_name) {
+            return Err(RenameOnDeviceError::BadName);
+        }
+        if new_name == file {
+            return Err(RenameOnDeviceError::SameName);
+        }
+        let new_path = entry.path.with_file_name(&new_name);
+        let (from, to) = (
+            self.layout.game(platform, &entry.path),
+            self.layout.game(platform, &new_path),
+        );
+        let declared = self.declared_files()?;
+        let lowercase_to = to.to_string_lossy().to_lowercase();
+        if declared
+            .iter()
+            .any(|f| f.to_string_lossy().to_lowercase() == lowercase_to)
+        {
+            return Err(RenameOnDeviceError::BiosName);
+        }
+        let stem_of = |name: &str| {
+            let stem = Path::new(name).file_stem().unwrap_or_default();
+            stem.to_string_lossy().to_lowercase()
+        };
+        let (old_stem, new_stem) = (stem_of(&file), stem_of(&new_name));
+        let folder = from.parent().expect("a game is in a folder");
+        let beside = list_folder(folder)?.files;
+        let others = || beside.iter().filter(|name| **name != *file);
+        if others().any(|name| stem_of(name) == new_stem) {
+            return Err(RenameOnDeviceError::NameTaken);
+        }
+        if others().any(|name| stem_of(name) == old_stem) {
+            return Err(RenameOnDeviceError::SharesSave);
+        }
+        let saves_folder = self
+            .layout
+            .saves_common(platform)
+            .join(entry.path.parent().unwrap_or(Path::new("")));
+        let saves = list_folder(&saves_folder)?.files;
+        // With only the case changed, those are the game's own.
+        if old_stem != new_stem && saves.iter().any(|name| stem_of(name) == new_stem) {
+            return Err(RenameOnDeviceError::LeftoversThere);
+        }
+        let new_file_stem = Path::new(&new_name).file_stem().unwrap_or_default();
+        let mut renames: Vec<(PathBuf, PathBuf)> = saves
+            .iter()
+            .filter(|name| stem_of(name) == old_stem)
+            .map(|name| {
+                let name = Path::new(name);
+                let mut renamed = new_file_stem.to_os_string();
+                if let Some(extension) = name.extension() {
+                    renamed.push(".");
+                    renamed.push(extension);
+                }
+                (saves_folder.join(name), saves_folder.join(renamed))
+            })
+            .collect();
+        renames.push((from.clone(), to.clone()));
+        safe_rename_all(&renames)?;
+        self.cache.forget(&from);
+        self.cache.record_game(&to, &entry.game)?;
+        self.cache.save();
+        self.entries.retain(|e| !e.is_at(platform, &entry.path));
+        let renamed = DeviceEntry {
+            path: new_path,
+            game: entry.game.clone(),
+            save: entry.save.clone(),
+        };
+        self.insert(renamed.clone());
+        Ok(renamed)
     }
 
     /// Where `entry`'s save is, whether or not it has one.
@@ -325,7 +439,7 @@ impl Device {
         let declared = self.declared_files()?;
         let saves = self.layout.saves();
         let mut orphans = Vec::new();
-        for id in list(&saves).map_err(io_at(&saves))?.dirs {
+        for id in list_folder(&saves)?.dirs {
             let platform = Platform::from_id(&id);
             let games = files_under(&self.layout.common(&platform))?;
             let games: Vec<PathBuf> = games
@@ -342,7 +456,7 @@ impl Device {
                 let full = folder.join(&path);
                 orphans.push(OrphanDeviceSave {
                     platform: platform.clone(),
-                    save: Save::read(&full).map_err(io_at(&full))?,
+                    save: Save::read(&full)?,
                     path,
                 });
             }
@@ -359,13 +473,11 @@ impl Device {
     /// Makes the file at `from` `entry`'s save, last written when `from`
     /// was, so that it is the same version as `from`.
     pub(crate) fn put_save(&mut self, entry: &DeviceEntry, from: &Path) -> Result<(), BaseError> {
-        let modified = fs::metadata(from)
-            .and_then(|m| m.modified())
-            .map_err(io_at(from))?;
-        let bytes = fs::read(from).map_err(io_at(from))?;
-        write(&self.save_path(entry), &bytes, Some(modified))?;
+        let modified = fs::metadata(from).and_then(|m| m.modified())?;
+        let bytes = fs::read(from)?;
+        write_atomically(&self.save_path(entry), &bytes, Some(modified))?;
         if let Some(e) = self.entry_mut(entry) {
-            e.save = Some(Save::of(&bytes, modified));
+            e.save = Some(Save::from_bytes(&bytes, modified));
         }
         Ok(())
     }
@@ -378,15 +490,15 @@ impl Device {
 
     /// The cores on the device, as the folders are now. One whose `core.json`
     /// can't be read has no version.
-    pub fn cores(&self) -> Result<Vec<InstalledCore>, BaseError> {
+    pub fn installed_cores(&self) -> Result<Vec<InstalledCore>, BaseError> {
         let folder = self.layout.cores();
-        let ids = list(&folder).map_err(io_at(&folder))?.dirs;
+        let ids = list_folder(&folder)?.dirs;
         Ok(ids
             .into_iter()
             .map(|id| {
                 let json = fs::read(self.layout.core(&id).join("core.json")).ok();
                 let (version, platforms) = json
-                    .and_then(|bytes| read_core_json(&bytes))
+                    .and_then(|bytes| parse_core_json(&bytes))
                     .map_or((None, Vec::new()), |(v, p)| (Some(v), p));
                 InstalledCore {
                     id,
@@ -405,7 +517,7 @@ impl Device {
     pub(crate) fn install_core(&self, zip: &mut CoreZip) -> Result<(), BaseError> {
         let staging = self.layout.staging();
         match fs::remove_dir_all(&staging) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(io_at(&staging)(e)),
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
             _ => {}
         }
         let installed = self.stage_and_place(zip, &staging);
@@ -417,18 +529,18 @@ impl Device {
         let files: Vec<_> = zip
             .files()
             .into_iter()
-            .filter(|(path, _)| self.takes(path))
+            .filter(|(path, _)| self.can_install_at(path))
             .collect();
         for (path, name) in &files {
             let staged = staging.join(path);
-            zip.extract(name, &staged).map_err(io_at(&staged))?;
+            zip.extract(name, &staged)?;
         }
         for (path, _) in &files {
             let to = self.root().join(path);
             if let Some(dir) = to.parent() {
-                fs::create_dir_all(dir).map_err(io_at(dir))?;
+                fs::create_dir_all(dir)?;
             }
-            fs::rename(staging.join(path), &to).map_err(io_at(&to))?;
+            fs::rename(staging.join(path), &to)?;
         }
         Ok(())
     }
@@ -436,7 +548,7 @@ impl Device {
     /// Whether a file of a core's zip is to be written at `path`. What the
     /// device has in `Platforms/` is kept: cores share it, and it may have
     /// been changed by hand. A platform set aside stays set aside.
-    fn takes(&self, path: &Path) -> bool {
+    fn can_install_at(&self, path: &Path) -> bool {
         let Ok(in_platforms) = path.strip_prefix("Platforms") else {
             return true;
         };
@@ -445,20 +557,20 @@ impl Device {
 
     /// Deletes the core's own folder for good; what else it uses stays.
     pub(crate) fn remove_core(&self, id: &str) -> Result<(), RemoveCoreError> {
-        if !self.cores()?.iter().any(|c| c.id == id) {
+        if !self.installed_cores()?.iter().any(|c| c.id == id) {
             return Err(RemoveCoreError::NotInstalled);
         }
         let path = self.layout.core(id);
-        fs::remove_dir_all(&path).map_err(io_at(&path))?;
+        fs::remove_dir_all(&path).map_err(BaseError::from)?;
         Ok(())
     }
 
     /// The files the cores on the device load, and the core that loads each.
     fn core_files(&self) -> Result<Vec<(String, CoreFile)>, BaseError> {
         let mut files = Vec::new();
-        for core in self.cores()? {
+        for core in self.installed_cores()? {
             let json = fs::read(self.layout.core(&core.id).join("data.json")).unwrap_or_default();
-            let declared = read_core_files(&core.platforms, &json);
+            let declared = parse_core_files(&core.platforms, &json);
             files.extend(declared.into_iter().map(|f| (core.id.clone(), f)));
         }
         Ok(files)
@@ -476,7 +588,7 @@ impl Device {
 
     /// The files the cores on the device load, by platform and path, as the
     /// folders are now.
-    pub fn bios(&self) -> Result<Vec<BiosRow>, BaseError> {
+    pub fn bios_rows(&self) -> Result<Vec<BiosRow>, BaseError> {
         let mut rows: Vec<BiosRow> = Vec::new();
         for (core, file) in self.core_files()? {
             let same = |r: &&mut BiosRow| r.platform == file.platform && r.path == file.path;
@@ -501,7 +613,7 @@ impl Device {
                 }
                 Ok(_) => BiosStatus::Present,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => BiosStatus::Missing,
-                Err(e) => return Err(io_at(&path)(e)),
+                Err(e) => return Err(e.into()),
             };
         }
         rows.sort_by(|a, b| (a.platform.id(), &a.path).cmp(&(b.platform.id(), &b.path)));
@@ -516,7 +628,7 @@ impl Device {
         path: &Path,
         from: &Path,
     ) -> Result<(), PutBiosError> {
-        let rows = self.bios()?;
+        let rows = self.bios_rows()?;
         let row = rows
             .iter()
             .find(|r| &r.platform == platform && r.path == path);
@@ -524,12 +636,12 @@ impl Device {
         if row.status != BiosStatus::Missing {
             return Err(PutBiosError::AlreadyThere);
         }
-        let actual = fs::metadata(from).map_err(io_at(from))?.len();
+        let actual = fs::metadata(from).map_err(BaseError::from)?.len();
         match row.size_exact {
             Some(expected) if expected != actual => {
                 Err(PutBiosError::WrongSize { expected, actual })
             }
-            _ => Ok(copy(from, &self.layout.game(platform, path))?),
+            _ => Ok(copy_atomically(from, &self.layout.game(platform, path))?),
         }
     }
 
@@ -537,14 +649,14 @@ impl Device {
     pub fn eject(&self) -> Result<(), BaseError> {
         let root = self.root();
         match std::env::consts::OS {
-            "macos" => run(Command::new("diskutil").arg("eject").arg(root)),
+            "macos" => run_command(Command::new("diskutil").arg("eject").arg(root)),
             "linux" => {
                 let mut findmnt = Command::new("findmnt");
                 findmnt.args(["-n", "-o", "SOURCE", "--target"]).arg(root);
-                let block = run(&mut findmnt)?;
+                let block = run_command(&mut findmnt)?;
                 let block = block.trim();
-                run(Command::new("udisksctl").args(["unmount", "-b", block]))?;
-                run(Command::new("udisksctl").args(["power-off", "-b", block]))
+                run_command(Command::new("udisksctl").args(["unmount", "-b", block]))?;
+                run_command(Command::new("udisksctl").args(["power-off", "-b", block]))
             }
             "windows" => {
                 // The drive, e.g. `E:`, as Explorer's Eject wants it.
@@ -553,7 +665,7 @@ impl Device {
                 let script = format!(
                     "(New-Object -ComObject Shell.Application).Namespace(17).ParseName('{drive}').InvokeVerb('Eject')"
                 );
-                run(Command::new("powershell").args(["-NoProfile", "-Command", &script]))
+                run_command(Command::new("powershell").args(["-NoProfile", "-Command", &script]))
             }
             os => Err(BaseError::Eject {
                 message: format!("ejecting a device is not supported on {os}"),
@@ -565,7 +677,7 @@ impl Device {
 
 /// Every volume mounted now, by the system's conventions: the folders in
 /// the folders volumes are mounted in, or on Windows the drives.
-fn volumes() -> Vec<PathBuf> {
+fn mounted_volumes() -> Vec<PathBuf> {
     let in_dirs = |dirs: &[PathBuf]| -> Vec<PathBuf> {
         dirs.iter()
             .filter_map(|dir| fs::read_dir(dir).ok())
@@ -611,7 +723,7 @@ fn missing_markers(root: &Path) -> Vec<&'static str> {
 }
 
 /// Runs `command`; what it printed, if it succeeded.
-fn run(command: &mut Command) -> Result<String, BaseError> {
+fn run_command(command: &mut Command) -> Result<String, BaseError> {
     let eject = |message: String| BaseError::Eject { message };
     let out = command.output().map_err(|e| eject(e.to_string()))?;
     if !out.status.success() {
@@ -626,21 +738,8 @@ fn read_save(path: &Path) -> Result<Option<Save>, BaseError> {
     match Save::read(path) {
         Ok(save) => Ok(Some(save)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(io_at(path)(e)),
+        Err(e) => Err(e.into()),
     }
-}
-
-/// Every visible file under `dir`, at any depth, as a path from `dir`.
-fn files_under(dir: &Path) -> Result<Vec<PathBuf>, BaseError> {
-    let Listing { dirs, files } = list(dir).map_err(io_at(dir))?;
-    let mut paths: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
-    for sub in dirs {
-        for path in files_under(&dir.join(&sub))? {
-            paths.push(Path::new(&sub).join(path));
-        }
-    }
-    paths.sort();
-    Ok(paths)
 }
 
 #[cfg(test)]
@@ -894,7 +993,7 @@ mod tests {
         }
 
         fn version(device: &Device) -> Option<String> {
-            device.cores().unwrap().remove(0).version
+            device.installed_cores().unwrap().remove(0).version
         }
 
         #[test]
@@ -906,7 +1005,7 @@ mod tests {
                 core_json("1.2").as_bytes(),
             );
             assert_eq!(
-                device.cores().unwrap(),
+                device.installed_cores().unwrap(),
                 [InstalledCore {
                     id: "a.B".into(),
                     version: Some("1.2".into()),
@@ -1034,6 +1133,165 @@ mod tests {
         }
     }
 
+    mod renaming {
+        use super::*;
+
+        /// A device with `RPG/Old.gba`, its save and clock, and others.
+        fn with_game() -> (tempfile::TempDir, Device, DeviceEntry) {
+            let (dir, mut device) = empty_device();
+            let root = dir.path();
+            put_at(root, "Assets/gba/common/RPG/Old.gba", b"old", 1_000);
+            put(root, "Assets/gba/common/Other.gba", b"other");
+            put_at(root, "Saves/gba/common/RPG/Old.sav", b"save", 1_000);
+            put(root, "Saves/gba/common/RPG/Old.rtc", b"clock");
+            put(root, "Saves/gba/common/Old.sav", b"another folder's");
+            let entry = scanned(&mut device)
+                .into_iter()
+                .find(|e| e.path == Path::new("RPG/Old.gba"))
+                .unwrap();
+            (dir, device, entry)
+        }
+
+        fn all_files(root: &Path) -> Vec<PathBuf> {
+            let mut files = files_under(&root.join("Assets")).unwrap();
+            files.extend(files_under(&root.join("Saves")).unwrap());
+            files
+        }
+
+        #[test]
+        fn the_files_of_its_name_beside_its_save_go_with_it_in_the_same_folder() {
+            let (dir, mut device, entry) = with_game();
+            let root = dir.path();
+            let renamed = device.rename_game(&entry, "New").unwrap();
+            assert_eq!(renamed.path, Path::new("RPG/New.gba"));
+            assert_eq!(renamed.save, entry.save);
+            assert_eq!(
+                all_files(root),
+                [
+                    PathBuf::from("gba/common/Other.gba"),
+                    PathBuf::from("gba/common/RPG/New.gba"),
+                    PathBuf::from("gba/common/Old.sav"),
+                    PathBuf::from("gba/common/RPG/New.rtc"),
+                    PathBuf::from("gba/common/RPG/New.sav"),
+                ]
+            );
+            assert_eq!(
+                fs::read(root.join("Saves/gba/common/RPG/New.rtc")).unwrap(),
+                b"clock"
+            );
+        }
+
+        #[test]
+        fn a_scan_finds_the_same() {
+            let (_dir, mut device, entry) = with_game();
+            let renamed = device.rename_game(&entry, "New").unwrap();
+            let listed = device.entries().to_vec();
+            assert_eq!(scanned(&mut device), listed);
+            assert!(listed.contains(&renamed));
+        }
+
+        #[test]
+        fn its_contents_are_not_read_again() {
+            let (dir, mut device, entry) = with_game();
+            device.rename_game(&entry, "New").unwrap();
+            // Same size and time, other contents: the cache answers.
+            put_at(dir.path(), "Assets/gba/common/RPG/New.gba", b"new", 1_000);
+            let found = scanned(&mut device);
+            let found = found.iter().find(|e| e.path == Path::new("RPG/New.gba"));
+            assert_eq!(found.unwrap().game, entry.game);
+        }
+
+        #[test]
+        fn only_the_case_can_change() {
+            let (dir, mut device, entry) = with_game();
+            let renamed = device.rename_game(&entry, "OLD").unwrap();
+            assert_eq!(renamed.path, Path::new("RPG/OLD.gba"));
+            let root = dir.path();
+            let saves = list_folder(&root.join("Saves/gba/common/RPG"))
+                .unwrap()
+                .files;
+            assert_eq!(saves, ["OLD.rtc", "OLD.sav"]);
+        }
+
+        #[test]
+        fn nothing_moves_when_it_is_refused() {
+            let core_json = r#"{"core":{"metadata":{"version":"1","platform_ids":["gba"]}}}"#;
+            let data = r#"{"data":{"data_slots":[{"filename":"Bios.gba"}]}}"#;
+            for (new, extra, refused) in [
+                ("../x", None, "bad"),
+                ("", None, "bad"),
+                ("a:b", None, "bad"),
+                ("Old", None, "same"),
+                (
+                    "Neighbour",
+                    Some("Assets/gba/common/RPG/Neighbour.gba"),
+                    "taken",
+                ),
+                (
+                    "neighbour",
+                    Some("Assets/gba/common/RPG/Neighbour.pce"),
+                    "taken",
+                ),
+                ("New", Some("Saves/gba/common/RPG/New.rtc"), "leftovers"),
+                ("New", Some("Assets/gba/common/RPG/Old.sgx"), "shares"),
+                ("Bios", None, "bios"),
+            ] {
+                let (dir, mut device, entry) = with_game();
+                let root = dir.path();
+                put(root, "Cores/a.B/core.json", core_json.as_bytes());
+                put(root, "Cores/a.B/data.json", data.as_bytes());
+                if let Some(extra) = extra {
+                    put(root, extra, b"in the way");
+                }
+                // A file a core loads sits at the top of `common/`.
+                let entry = match new {
+                    "Bios" => {
+                        put(root, "Assets/gba/common/Mine.gba", b"mine");
+                        scanned(&mut device)
+                            .into_iter()
+                            .find(|e| e.path == Path::new("Mine.gba"))
+                            .unwrap()
+                    }
+                    _ => entry,
+                };
+                let before = all_files(root);
+                let kind = match device.rename_game(&entry, new) {
+                    Err(RenameOnDeviceError::BadName) => "bad",
+                    Err(RenameOnDeviceError::SameName) => "same",
+                    Err(RenameOnDeviceError::NameTaken) => "taken",
+                    Err(RenameOnDeviceError::LeftoversThere) => "leftovers",
+                    Err(RenameOnDeviceError::SharesSave) => "shares",
+                    Err(RenameOnDeviceError::BiosName) => "bios",
+                    other => panic!("{new}: {other:?}"),
+                };
+                assert_eq!(kind, refused, "{new}");
+                assert_eq!(all_files(root), before, "{new}");
+            }
+        }
+
+        #[test]
+        fn a_failure_on_the_way_puts_everything_back() {
+            let (dir, mut device, entry) = with_game();
+            let root = dir.path();
+            let before = all_files(root);
+            // Too long to be a file's name with a longer extension than `.a`,
+            // which goes first.
+            put(root, "Saves/gba/common/RPG/Old.a", b"short");
+            let new = "x".repeat(253);
+            assert!(matches!(
+                device.rename_game(&entry, &new),
+                Err(RenameOnDeviceError::Other(_))
+            ));
+            let mut expected = before;
+            expected.push(PathBuf::from("gba/common/RPG/Old.a"));
+            expected.sort();
+            let mut after = all_files(root);
+            after.sort();
+            assert_eq!(after, expected);
+            assert!(device.entries().contains(&entry));
+        }
+    }
+
     mod bios {
         use super::*;
         use crate::cores::testing::data_json;
@@ -1052,7 +1310,7 @@ mod tests {
         }
 
         fn status(device: &Device) -> BiosStatus {
-            device.bios().unwrap().remove(0).status
+            device.bios_rows().unwrap().remove(0).status
         }
 
         #[test]
@@ -1068,7 +1326,7 @@ mod tests {
             core(&device, "a.GB", "gb", r#"{"filename":"gb_bios.bin"}"#);
             core(&device, "a.GG", "gg", r#"{"name":"Cartridge"}"#);
             assert_eq!(
-                device.bios().unwrap(),
+                device.bios_rows().unwrap(),
                 [
                     BiosRow {
                         platform: Platform::Gb,
@@ -1096,7 +1354,7 @@ mod tests {
                     let slot = format!(r#"{{"filename":"x.bin","size_exact":{size}}}"#);
                     core(&device, core_id, "gba", &slot);
                 }
-                assert_eq!(device.bios().unwrap()[0].size_exact, None, "{sizes:?}");
+                assert_eq!(device.bios_rows().unwrap()[0].size_exact, None, "{sizes:?}");
             }
         }
 
@@ -1107,7 +1365,7 @@ mod tests {
             put(device.root(), "Cores/broken.A/core.json", b"{ not json");
             core(&device, "broken.B", "gba", BIOS);
             put(device.root(), "Cores/broken.B/data.json", b"{ not json");
-            let rows = device.bios().unwrap();
+            let rows = device.bios_rows().unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].needed_by, [("a.GBA".to_string(), true)]);
         }

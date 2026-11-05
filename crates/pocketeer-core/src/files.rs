@@ -4,15 +4,16 @@
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
-    fs, io,
+    io,
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
+use fs_err as fs;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    error::{BaseError, io_at},
+    error::BaseError,
     game::{Files, Game, Rom},
     platform::Platform,
 };
@@ -26,11 +27,11 @@ pub(crate) struct Listing {
 
 /// What is in `dir`; nothing if it doesn't exist. Hidden entries (macOS
 /// leaves `._` files on devices) and symlinks are left out.
-pub(crate) fn list(dir: &Path) -> io::Result<Listing> {
+pub(crate) fn list_folder(dir: &Path) -> Result<Listing, BaseError> {
     let read = match fs::read_dir(dir) {
         Ok(read) => read,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Listing::default()),
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     };
     let (mut dirs, mut files) = (Vec::new(), Vec::new());
     for entry in read {
@@ -51,41 +52,62 @@ pub(crate) fn list(dir: &Path) -> io::Result<Listing> {
     Ok(Listing { dirs, files })
 }
 
+/// Every visible file under `dir`, at any depth, as a path from `dir`.
+pub(crate) fn files_under(dir: &Path) -> Result<Vec<PathBuf>, BaseError> {
+    let Listing { dirs, files } = list_folder(dir)?;
+    let mut paths: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
+    for sub in dirs {
+        for path in files_under(&dir.join(&sub))? {
+            paths.push(Path::new(&sub).join(path));
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
 /// Replaces the file at `path` with `bytes`, last written at `modified` if
 /// given.
-pub(crate) fn write(
+pub(crate) fn write_atomically(
     path: &Path,
     bytes: &[u8],
     modified: Option<SystemTime>,
 ) -> Result<(), BaseError> {
-    replace(
-        path,
-        |tmp| fs::write(tmp, bytes).map_err(io_at(tmp)),
-        modified,
-    )
+    replace_atomically(path, |tmp| fs::write(tmp, bytes), modified)
 }
 
 /// Replaces the file at `to` with a copy of `from`, without holding all of
 /// it in memory.
-pub(crate) fn copy(from: &Path, to: &Path) -> Result<(), BaseError> {
-    replace(
-        to,
-        |tmp| fs::copy(from, tmp).map(drop).map_err(io_at(from)),
-        None,
-    )
+pub(crate) fn copy_atomically(from: &Path, to: &Path) -> Result<(), BaseError> {
+    replace_atomically(to, |tmp| fs::copy(from, tmp).map(drop), None)
+}
+
+/// Renames each of `renames`, pairs of the old path and the new, in turn; if one
+/// can't be, those before it are put back, so that all are renamed or none,
+/// unless the process dies on the way. What is renamed stays in its volume:
+/// nothing is copied.
+pub(crate) fn safe_rename_all(renames: &[(PathBuf, PathBuf)]) -> Result<(), BaseError> {
+    for (i, (from, to)) in renames.iter().enumerate() {
+        if let Err(e) = fs::rename(from, to) {
+            for (from, to) in renames[..i].iter().rev() {
+                let _ = fs::rename(to, from);
+            }
+            return Err(e.into());
+        }
+    }
+    Ok(())
 }
 
 /// Replaces the file at `path` with what `fill` writes to a hidden file beside
 /// it, so that `path` is never half written. If this fails the hidden file is
-/// removed; if the process dies first, [`list`] doesn't see it and the next
-/// write to `path` replaces it.
-fn replace(
+/// removed; if the process dies first, [`list_folder`] doesn't see it and the
+/// next write to `path` replaces it.
+fn replace_atomically(
     path: &Path,
-    fill: impl FnOnce(&Path) -> Result<(), BaseError>,
+    fill: impl FnOnce(&Path) -> io::Result<()>,
     modified: Option<SystemTime>,
 ) -> Result<(), BaseError> {
     let dir = path.parent().expect("files are written into a folder");
-    fs::create_dir_all(dir).map_err(io_at(dir))?;
+    fs::create_dir_all(dir)?;
     let mut name = OsString::from(".");
     name.push(path.file_name().expect("files have a name"));
     name.push(".part");
@@ -95,15 +117,14 @@ fn replace(
             Some(modified) => fs::File::options()
                 .write(true)
                 .open(&tmp)
-                .and_then(|f| f.set_modified(modified))
-                .map_err(io_at(&tmp)),
+                .and_then(|f| f.set_modified(modified)),
             None => Ok(()),
         })
-        .and_then(|()| fs::rename(&tmp, path).map_err(io_at(path)));
+        .and_then(|()| fs::rename(&tmp, path));
     if replaced.is_err() {
         let _ = fs::remove_file(&tmp);
     }
-    replaced
+    Ok(replaced?)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,13 +165,17 @@ impl Cache {
 
     pub(crate) fn save(&self) {
         if let Ok(json) = serde_json::to_vec(&self.files) {
-            let _ = write(&self.path, &json, None);
+            let _ = write_atomically(&self.path, &json, None);
         }
     }
 
     /// The game at `path`: from this cache if its size and time are what they
     /// were, otherwise read, and then noted here.
-    pub(crate) fn read(&mut self, platform: &Platform, path: &Path) -> io::Result<Game> {
+    pub(crate) fn read_game(
+        &mut self,
+        platform: &Platform,
+        path: &Path,
+    ) -> Result<Game, BaseError> {
         let meta = fs::metadata(path)?;
         let (size, modified) = (meta.len(), meta.modified()?);
         let key = key(&self.root, path);
@@ -170,7 +195,7 @@ impl Cache {
 
     /// Notes that the file at `path` holds `game` as it is now: for a file
     /// just written from a game whose hash is known.
-    pub(crate) fn record(&mut self, path: &Path, game: &Game) -> io::Result<()> {
+    pub(crate) fn record_game(&mut self, path: &Path, game: &Game) -> Result<(), BaseError> {
         let meta = fs::metadata(path)?;
         let Files::Single(rom) = game.files;
         self.insert(key(&self.root, path), meta.len(), meta.modified()?, rom);
@@ -253,8 +278,8 @@ mod tests {
     fn a_replaced_file_leaves_nothing_beside_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Foo.gba");
-        write(&path, b"old", None).unwrap();
-        write(&path, b"new", None).unwrap();
+        write_atomically(&path, b"old", None).unwrap();
+        write_atomically(&path, b"new", None).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"new");
         assert_eq!(all_in(dir.path()), ["Foo.gba"]);
     }
@@ -263,8 +288,8 @@ mod tests {
     fn a_file_left_by_a_dead_process_is_not_listed_and_is_replaced() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(".Foo.gba.part"), b"half").unwrap();
-        assert_eq!(list(dir.path()).unwrap().files, Vec::<String>::new());
-        write(&dir.path().join("Foo.gba"), b"whole", None).unwrap();
+        assert_eq!(list_folder(dir.path()).unwrap().files, Vec::<String>::new());
+        write_atomically(&dir.path().join("Foo.gba"), b"whole", None).unwrap();
         assert_eq!(all_in(dir.path()), ["Foo.gba"]);
     }
 
@@ -273,15 +298,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Foo.gba");
         fs::write(&path, b"old").unwrap();
-        let failed = replace(
+        let failed = replace_atomically(
             &path,
             |tmp| {
                 fs::write(tmp, b"half").unwrap();
-                Err(BaseError::NoDevice)
+                Err(io::Error::other("full"))
             },
             None,
         );
-        assert!(matches!(failed, Err(BaseError::NoDevice)));
+        assert!(matches!(failed, Err(BaseError::Io(_))));
         assert_eq!(fs::read(&path).unwrap(), b"old");
         assert_eq!(all_in(dir.path()), ["Foo.gba"]);
     }
@@ -293,7 +318,7 @@ mod tests {
         let path = dir.path().join("Foo.gba");
         fs::create_dir(&path).unwrap();
         fs::write(path.join("inside"), b"x").unwrap();
-        assert!(write(&path, b"new", None).is_err());
+        assert!(write_atomically(&path, b"new", None).is_err());
         assert_eq!(all_in(dir.path()), ["Foo.gba"]);
     }
 }

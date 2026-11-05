@@ -2,14 +2,14 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     path::{Path, PathBuf},
 };
 
+use fs_err as fs;
 use image::ImageFormat;
 use serde::{Deserialize, Serialize};
 
-use crate::{error::BaseError, files::write, platform::Platform};
+use crate::{error::BaseError, files::write_atomically, platform::Platform};
 
 /// The formats a cover can be in, in the order a game's cover is looked for.
 pub const COVER_FORMATS: [ImageFormat; 3] =
@@ -106,7 +106,7 @@ impl<S: RemoteCoverSource> CoverIndex<S> {
     ) -> Result<Option<Cover>, BaseError> {
         let cover_name = self.source.cover_name(game_name);
         for &system in self.source.systems(platform) {
-            self.check(system)?;
+            self.update_list_of(system)?;
             if self.systems[system].names.contains(&cover_name) {
                 return self.source.fetch(system, &cover_name).map(Some);
             }
@@ -115,7 +115,7 @@ impl<S: RemoteCoverSource> CoverIndex<S> {
     }
 
     /// Brings `system`'s list up to date, if it wasn't since this was opened.
-    fn check(&mut self, system: &'static str) -> Result<(), BaseError> {
+    fn update_list_of(&mut self, system: &'static str) -> Result<(), BaseError> {
         if self.checked.contains(system) {
             return Ok(());
         }
@@ -132,7 +132,7 @@ impl<S: RemoteCoverSource> CoverIndex<S> {
             };
             self.systems.insert(system.to_string(), listed);
             if let Ok(json) = serde_json::to_vec(&self.systems) {
-                let _ = write(&self.path, &json, None);
+                let _ = write_atomically(&self.path, &json, None);
             }
         }
         self.checked.insert(system);

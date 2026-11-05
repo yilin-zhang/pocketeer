@@ -1,11 +1,7 @@
 //! The errors any operation can run into; what only one operation can run
 //! into is beside that operation.
 
-use std::{
-    io,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{io, path::PathBuf, sync::Arc};
 
 use strum::IntoStaticStr;
 
@@ -14,11 +10,9 @@ use strum::IntoStaticStr;
 #[derive(Debug, Clone, thiserror::Error, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum BaseError {
-    #[error("{}: {source}", .path.display())]
-    Io {
-        path: PathBuf,
-        source: Arc<io::Error>,
-    },
+    /// What went wrong and at which path, as `fs_err` writes it.
+    #[error(transparent)]
+    Io(Arc<io::Error>),
     /// What was done went well, but can't be noted in the log.
     #[error("couldn't write the log: {source}")]
     LogFailed { source: Arc<io::Error> },
@@ -42,7 +36,7 @@ pub enum BaseError {
     #[error("no device is open")]
     NoDevice,
     /// More than one device is mounted, at `found`.
-    #[error("more than one device is mounted: {}", joined(.found))]
+    #[error("more than one device is mounted: {}", joined_paths(.found))]
     ManyDevices { found: Vec<PathBuf> },
     /// The device doesn't have the game given, not any more.
     #[error("the device doesn't have the game")]
@@ -81,7 +75,7 @@ impl BaseError {
     }
 }
 
-fn joined(paths: &[PathBuf]) -> String {
+fn joined_paths(paths: &[PathBuf]) -> String {
     let paths: Vec<_> = paths.iter().map(|p| p.display().to_string()).collect();
     paths.join(", ")
 }
@@ -94,11 +88,9 @@ fn copies_text(copies: &[(PathBuf, PathBuf)]) -> String {
     copies.join("; ")
 }
 
-/// `io::Error` → [`BaseError::Io`] at `path`.
-pub(crate) fn io_at(path: &Path) -> impl FnOnce(io::Error) -> BaseError + '_ {
-    move |source| BaseError::Io {
-        path: path.to_path_buf(),
-        source: Arc::new(source),
+impl From<io::Error> for BaseError {
+    fn from(source: io::Error) -> Self {
+        BaseError::Io(Arc::new(source))
     }
 }
 
@@ -111,6 +103,19 @@ pub(crate) fn trash_failed(source: trash::Error) -> BaseError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_io_error_says_what_was_done_where() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Gone.gba");
+        let error = super::BaseError::from(fs_err::remove_file(&path).unwrap_err());
+        let text = error.to_string();
+        assert!(
+            text.starts_with(&format!("failed to remove file `{}`: ", path.display())),
+            "{text}"
+        );
+        assert_eq!(error.code(), "io");
+    }
+
     use super::*;
 
     /// Programs go by these, so changing a variant's name mustn't change them.

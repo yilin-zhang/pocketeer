@@ -152,14 +152,14 @@ pub(crate) fn push_save(
     let Some(entry) = library.entry_for(&on_device.game) else {
         return Err(BaseError::NotInLibrary.into());
     };
-    let Some(file) = library.save_file(entry, version)? else {
+    let Some(file) = library.file_of_save(entry, version)? else {
         return Err(PushSaveError::NoSuchVersion);
     };
     if let Some(there) = device.read_save(on_device)? {
-        if there.same_contents(version) {
+        if there.has_same_contents_as(version) {
             return Ok(PushSaveOutcome::AlreadyThere);
         }
-        if !entry.save.as_ref().is_some_and(|h| h.has(&there)) {
+        if !entry.save.as_ref().is_some_and(|h| h.contains(&there)) {
             return Err(PushSaveError::NotBackedUp);
         }
     }
@@ -299,7 +299,7 @@ mod tests {
         #[test]
         fn a_version_the_library_does_not_have_is_not_pushed() {
             let mut s = setup(Some(b"a"), None);
-            let unknown = Save::of(b"zzz", at(5));
+            let unknown = Save::from_bytes(b"zzz", at(5));
             let pushed = push_save(&s.library, &mut s.device, &s.on_device, &unknown);
             assert!(matches!(pushed, Err(PushSaveError::NoSuchVersion)));
         }

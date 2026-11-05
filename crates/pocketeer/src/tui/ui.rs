@@ -25,7 +25,7 @@ use ratatui_image::{StatefulImage, protocol::StatefulProtocol};
 use strum::IntoEnumIterator;
 
 use super::{
-    app::{App, Importing, Message, Page, name_of},
+    app::{App, Importing, Message, Page, Renaming, name_of},
     covers::{self, Cover},
     path_input::{PathEntry, PathInput},
     worker::Row,
@@ -110,7 +110,7 @@ fn platform_cell(platform: &Platform) -> Cell<'static> {
 
 /// The selected row and the focused button: one solid white bar, like a
 /// hardware menu.
-fn selected() -> Style {
+fn selected_style() -> Style {
     Style::new()
         .bg(Palette::Ink.color())
         .fg(Palette::Paper.color())
@@ -119,12 +119,12 @@ fn selected() -> Style {
 
 /// The selected row when it is marked too: a dimmer bar, to tell it from one
 /// that isn't.
-fn selected_and_marked() -> Style {
-    selected().bg(Palette::Muted.color())
+fn selected_and_marked_style() -> Style {
+    selected_style().bg(Palette::Muted.color())
 }
 
 /// A panel: rounded hairline border, small muted title.
-fn panel(title: impl Into<String>) -> Block<'static> {
+fn panel_block(title: impl Into<String>) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Palette::Rule.style())
@@ -139,8 +139,8 @@ fn panel(title: impl Into<String>) -> Block<'static> {
 /// removes; the rest are grey.
 fn keycap(key: &str) -> Span<'static> {
     let tint = match key {
-        "i" | "b" | "I" => Palette::KeyLibrary,
-        "s" | "p" | "E" | "u" | "U" => Palette::KeyDevice,
+        "i" | "b" | "I" | "n" => Palette::KeyLibrary,
+        "s" | "p" | "E" | "u" | "U" | "N" => Palette::KeyDevice,
         "f" | "d" => Palette::KeyEdit,
         "x" | "X" => Palette::KeyRemove,
         _ => Palette::Keycap,
@@ -155,7 +155,7 @@ fn keycap(key: &str) -> Span<'static> {
 }
 
 /// One of four frames, by the clock, for "something is running".
-fn spinner() -> &'static str {
+fn spinner_frame() -> &'static str {
     const FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -163,12 +163,12 @@ fn spinner() -> &'static str {
     FRAMES[((ms / 150) % 4) as usize]
 }
 
-fn kv(label: &str, value: Span<'static>) -> Line<'static> {
+fn labelled(label: &str, value: Span<'static>) -> Line<'static> {
     Line::from(vec![Palette::Faint.span(format!("{label:<LABEL$}")), value])
 }
 
-fn kv_text(label: &str, value: impl Into<String>) -> Line<'static> {
-    kv(label, Span::raw(value.into()))
+fn labelled_text(label: &str, value: impl Into<String>) -> Line<'static> {
+    labelled(label, Span::raw(value.into()))
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -186,10 +186,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else if app.page() == Page::Bios {
         draw_bios_status(frame, app, search);
         draw_bios(frame, app, body);
-    } else if !app.loaded() {
+    } else if !app.is_loaded() {
         draw_search(frame, app, search);
         frame.render_widget(
-            Paragraph::new(Palette::Muted.span(format!(" {} reading the library…", spinner()))),
+            Paragraph::new(
+                Palette::Muted.span(format!(" {} reading the library…", spinner_frame())),
+            ),
             body,
         );
     } else {
@@ -202,6 +204,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if app.platform_choice().is_some() {
         draw_platform_choice(frame, app);
+    }
+    if app.rename().is_some() {
+        draw_rename(frame, app);
     }
     if app.dialog().is_some() {
         draw_dialog(frame, app);
@@ -233,11 +238,13 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         name.to_string_lossy().into_owned()
     };
     let device = match (app.reading_device(), app.device_root()) {
-        (Some(root), _) => Palette::Muted.span(format!("{} reading {}…", spinner(), name_of(root))),
+        (Some(root), _) => {
+            Palette::Muted.span(format!("{} reading {}…", spinner_frame(), name_of(root)))
+        }
         (None, Some(root)) => Palette::Ink.span(format!("● {}", name_of(root))),
         (None, None) => Palette::Faint.span("○ no device"),
     };
-    let (games, orphans) = app.counts();
+    let (games, orphans) = app.game_and_orphan_counts();
     let mut chips = vec![device, Palette::Faint.span("  ·  ")];
     chips.push(Palette::Muted.span(format!("{games} games")));
     if orphans > 0 {
@@ -252,7 +259,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Text being typed, with the cursor showing.
-fn typed(before: String, after: &str) -> [Span<'static>; 3] {
+fn typed_spans(before: String, after: &str) -> [Span<'static>; 3] {
     let mut after = after.chars();
     let at_cursor = after.next().unwrap_or(' ');
     [
@@ -266,10 +273,10 @@ fn typed(before: String, after: &str) -> [Span<'static>; 3] {
 }
 
 fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
-    let mut line = if app.typing() {
-        let (before, after) = app.query_split();
+    let mut line = if app.is_typing() {
+        let (before, after) = app.query_around_cursor();
         let mut line = Line::from(Palette::Ink.span(" / "));
-        line.extend(typed(before, &after));
+        line.extend(typed_spans(before, &after));
         line
     } else if app.query().is_empty() {
         Line::from(Palette::Faint.span(" / search"))
@@ -283,7 +290,7 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
 /// The width of the column naming what is in the rows: as wide as the longest
 /// name, and the first to give way in a narrow terminal. The other columns follow
 /// right after it.
-fn names_column(header: &str, names: impl Iterator<Item = String>) -> Constraint {
+fn names_column_width(header: &str, names: impl Iterator<Item = String>) -> Constraint {
     let longest = names.map(|name| Span::raw(name).width()).max();
     let width = longest.unwrap_or(0).max(header.len());
     Constraint::Max(width as u16)
@@ -299,10 +306,10 @@ fn page_table<'a>(
 ) -> Table<'a> {
     Table::new(rows, widths)
         .header(TableRow::new(header).style(Palette::Faint.style()))
-        .row_highlight_style(selected())
+        .row_highlight_style(selected_style())
         .highlight_symbol("▸ ")
         .highlight_spacing(HighlightSpacing::Always)
-        .block(panel(title))
+        .block(panel_block(title))
 }
 
 /// How many updates there are, or why the inventory can't be had.
@@ -310,7 +317,7 @@ fn draw_cores_status(frame: &mut Frame, app: &App, area: Rect) {
     let Some(cores) = app.cores() else {
         return;
     };
-    let updates = cores.rows.iter().filter(|r| r.update_available()).count();
+    let updates = cores.rows.iter().filter(|r| r.has_update()).count();
     let line = match (&cores.failure, updates) {
         (Some(failure), _) => {
             Palette::Warn.span(format!(" couldn't get the cores to install: {failure}"))
@@ -325,7 +332,7 @@ fn draw_cores_status(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
     let Some(cores) = app.cores() else {
         let reading = Palette::Muted.span(" reading the cores…");
-        frame.render_widget(Paragraph::new(reading).block(panel("CORES")), area);
+        frame.render_widget(Paragraph::new(reading).block(panel_block("CORES")), area);
         return;
     };
     let rows: Vec<TableRow> = cores.rows.iter().map(core_table_row).collect();
@@ -335,7 +342,7 @@ fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
         rows,
         [
             Constraint::Length(9),
-            names_column("CORE", cores.rows.iter().map(|r| r.id().to_string())),
+            names_column_width("CORE", cores.rows.iter().map(|r| r.id().to_string())),
             Constraint::Length(14),
             Constraint::Length(10),
         ],
@@ -353,9 +360,7 @@ fn core_table_row(row: &CoreRow) -> TableRow<'static> {
     let on_device = match row.installed().map(|i| i.version.clone()) {
         None => Cell::from("–").style(Palette::Muted.style()),
         Some(None) => Cell::from("unknown").style(Palette::Warn.style()),
-        Some(Some(version)) if row.update_available() => {
-            Cell::from(version).style(Palette::Warn.style())
-        }
+        Some(Some(version)) if row.has_update() => Cell::from(version).style(Palette::Warn.style()),
         Some(Some(version)) => Cell::from(version).style(Palette::Good.style()),
     };
     let latest = row.latest().map_or(String::new(), |l| l.version.clone());
@@ -380,7 +385,7 @@ fn draw_bios_status(frame: &mut Frame, app: &App, area: Rect) {
     } else if rows.iter().all(|r| r.status == BiosStatus::Present) {
         Palette::Faint.span(" every file is there")
     } else {
-        let palette = if wrong > 0 || rows.iter().filter(missing).any(|r| r.required()) {
+        let palette = if wrong > 0 || rows.iter().filter(missing).any(|r| r.is_required()) {
             Palette::Bad
         } else {
             Palette::Warn
@@ -400,7 +405,7 @@ fn draw_bios(frame: &mut Frame, app: &mut App, area: Rect) {
         rows,
         [
             Constraint::Length(9),
-            names_column("FILE", files),
+            names_column_width("FILE", files),
             Constraint::Length(11),
             Constraint::Min(16),
         ],
@@ -412,7 +417,7 @@ fn bios_table_row(row: &BiosRow) -> TableRow<'static> {
     let (status, palette) = match row.status {
         BiosStatus::Present => ("present", Palette::Good),
         BiosStatus::WrongSize { .. } => ("wrong size", Palette::Bad),
-        BiosStatus::Missing if row.required() => ("missing", Palette::Bad),
+        BiosStatus::Missing if row.is_required() => ("missing", Palette::Bad),
         BiosStatus::Missing => ("missing", Palette::Warn),
     };
     let cores: Vec<&str> = row
@@ -432,7 +437,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
     draw_table(frame, app, left);
-    match app.panel() {
+    match app.selected_version() {
         Some(selected) => draw_saves(frame, app, right, selected),
         None => {
             let [cover, details] =
@@ -448,7 +453,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let compact = area.width < 60;
     let rows: Vec<TableRow> = app
         .visible_rows()
-        .map(|r| table_row(app, r, compact))
+        .map(|r| game_table_row(app, r, compact))
         .collect();
     let table = if compact {
         page_table(
@@ -464,7 +469,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             rows,
             vec![
                 Constraint::Length(9),
-                names_column("GAME", app.rows().iter().map(name_of)),
+                names_column_width("GAME", app.rows().iter().map(name_of)),
                 Constraint::Length(12),
                 Constraint::Length(3),
                 Constraint::Length(4),
@@ -472,18 +477,18 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         )
     };
     let table = match app.selected_row() {
-        Some(row) if app.is_marked(row) => table.row_highlight_style(selected_and_marked()),
+        Some(row) if app.is_marked(row) => table.row_highlight_style(selected_and_marked_style()),
         _ => table,
     };
     frame.render_stateful_widget(table, area, &mut app.table);
 }
 
 /// A column's only symbol, in the middle of it.
-fn symbol(text: &'static str) -> Cell<'static> {
+fn centered_cell(text: &'static str) -> Cell<'static> {
     Cell::from(Text::from(text).centered())
 }
 
-fn table_row(app: &App, row: &Row, compact: bool) -> TableRow<'static> {
+fn game_table_row(app: &App, row: &Row, compact: bool) -> TableRow<'static> {
     let name = Cell::from(name_of(row));
     let mut cells = match row {
         Row::Game { row, .. } => {
@@ -492,18 +497,20 @@ fn table_row(app: &App, row: &Row, compact: bool) -> TableRow<'static> {
                 GameRow::InLibrary(_) => Cell::from("lib"),
                 GameRow::OnDevice(_) => Cell::from("device"),
             };
-            let art = match row.local() {
-                Some(l) if l.cover_path.is_some() => symbol("✓").style(Palette::Good.style()),
-                Some(_) => symbol("–").style(Palette::Muted.style()),
+            let art = match row.local_entry() {
+                Some(l) if l.cover_path.is_some() => {
+                    centered_cell("✓").style(Palette::Good.style())
+                }
+                Some(_) => centered_cell("–").style(Palette::Muted.style()),
                 None => Cell::from(""),
             };
-            let has_device_save = row.on_device().is_some_and(|d| d.save.is_some());
-            let save = if row.new_save_on_device() {
-                symbol("←").style(Palette::Warn.style())
+            let has_device_save = row.device_entry().is_some_and(|d| d.save.is_some());
+            let save = if row.has_new_save_on_device() {
+                centered_cell("←").style(Palette::Warn.style())
             } else if has_device_save {
-                symbol("✓").style(Palette::Good.style())
+                centered_cell("✓").style(Palette::Good.style())
             } else if row.saves_kept() > 0 {
-                symbol("·").style(Palette::Muted.style())
+                centered_cell("·").style(Palette::Muted.style())
             } else {
                 Cell::from("")
             };
@@ -515,14 +522,14 @@ fn table_row(app: &App, row: &Row, compact: bool) -> TableRow<'static> {
             name,
             Cell::from("lib save"),
             Cell::from(""),
-            symbol("?"),
+            centered_cell("?"),
         ],
         Row::OrphanOnDevice(o) => vec![
             platform_cell(&o.platform),
             name,
             Cell::from("device save"),
             Cell::from(""),
-            symbol("?"),
+            centered_cell("?"),
         ],
     };
     if compact {
@@ -541,10 +548,10 @@ fn table_row(app: &App, row: &Row, compact: bool) -> TableRow<'static> {
 }
 
 fn draw_cover(frame: &mut Frame, app: &mut App, area: Rect) {
-    let local = app.selected_row().and_then(Row::local);
+    let local = app.selected_row().and_then(Row::local_entry);
     let path = local.and_then(|l| l.cover_path.clone());
     let around = app.covers_around();
-    let block = panel("COVER");
+    let block = panel_block("COVER");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(path) = path else {
@@ -557,7 +564,7 @@ fn draw_cover(frame: &mut Frame, app: &mut App, area: Rect) {
             Some(_) => "a save with no game",
             None => "no games",
         };
-        placeholder(frame, inner, what);
+        draw_cover_placeholder(frame, inner, what);
         return;
     };
     match app.covers.show(&path, &around, inner.as_size()) {
@@ -580,7 +587,7 @@ fn draw_cover(frame: &mut Frame, app: &mut App, area: Rect) {
 
 /// Where a cover would be: a dot-matrix field, the Pocket's screen, with a
 /// short line in the middle.
-fn placeholder(frame: &mut Frame, area: Rect, what: &str) {
+fn draw_cover_placeholder(frame: &mut Frame, area: Rect, what: &str) {
     let dots: Vec<Line> = (0..area.height)
         .map(|y| {
             let row: String = (0..area.width)
@@ -607,24 +614,27 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
         Some(Row::Game {
             row, standard_name, ..
         }) => {
-            if let Some(local) = row.local() {
-                lines.push(kv_text("Library", local.name.clone()));
+            if let Some(local) = row.local_entry() {
+                lines.push(labelled_text("Library", local.name.clone()));
             }
-            if let Some(on_device) = row.on_device() {
-                lines.push(kv_text("Device", on_device.path.display().to_string()));
+            if let Some(on_device) = row.device_entry() {
+                lines.push(labelled_text(
+                    "Device",
+                    on_device.path.display().to_string(),
+                ));
             }
             if let Some(name) = standard_name {
-                lines.push(kv_text("Standard", name.clone()));
+                lines.push(labelled_text("Standard", name.clone()));
             }
             let Files::Single(rom) = row.game().files;
-            lines.push(kv_text("Size", format!("{} bytes", rom.size)));
-            lines.push(kv(
+            lines.push(labelled_text("Size", format!("{} bytes", rom.size)));
+            lines.push(labelled(
                 "crc32",
                 Palette::Muted.span(format!("{:08x}", rom.crc32)),
             ));
-            lines.push(kv_text(
+            lines.push(labelled_text(
                 "Save",
-                match (row.saves_kept(), row.new_save_on_device()) {
+                match (row.saves_kept(), row.has_new_save_on_device()) {
                     (0, false) => "none".to_string(),
                     (0, true) => "on the device, not backed up".to_string(),
                     (n, false) => format!("{n} kept"),
@@ -633,18 +643,18 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
             ));
         }
         Some(Row::OrphanInLibrary(o)) => {
-            lines.push(kv_text("Saves of", o.stem.clone()));
-            lines.push(kv_text("Kept", o.save.iter().count().to_string()));
-            lines.push(kv_text("Newest", o.save.current.timestamp()));
+            lines.push(labelled_text("Saves of", o.stem.clone()));
+            lines.push(labelled_text("Kept", o.save.iter().count().to_string()));
+            lines.push(labelled_text("Newest", o.save.current.timestamp()));
             lines.push(Line::default());
             lines.push(Line::from(Palette::Muted.span(
                 "The library has no game of this name. A game put there under it has them again.",
             )));
         }
         Some(Row::OrphanOnDevice(o)) => {
-            lines.push(kv_text("Save", o.path.display().to_string()));
-            lines.push(kv_text("Size", format!("{} bytes", o.save.size)));
-            lines.push(kv_text("Written", o.save.timestamp()));
+            lines.push(labelled_text("Save", o.path.display().to_string()));
+            lines.push(labelled_text("Size", format!("{} bytes", o.save.size)));
+            lines.push(labelled_text("Written", o.save.timestamp()));
             lines.push(Line::default());
             lines.push(Line::from(Palette::Muted.span(
                 "The device has no game at this path. The Pocket gives it to any game put there.",
@@ -655,16 +665,16 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .block(panel("DETAILS")),
+            .block(panel_block("DETAILS")),
         area,
     );
 }
 
 fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize) {
-    let versions = app.versions();
-    let on_device = app.selected_row().and_then(Row::on_device);
+    let versions = app.selected_save_versions();
+    let on_device = app.selected_row().and_then(Row::device_entry);
     let on_device = on_device.and_then(|d| d.save.clone());
-    let block = panel(match app.selected_row() {
+    let block = panel_block(match app.selected_row() {
         Some(row) => format!("SAVES OF {}", name_of(row)),
         None => "SAVES".to_string(),
     });
@@ -673,7 +683,7 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize)
     let [top, list] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
     let device_line = match &on_device {
         Some(save) => {
-            let kept = versions.iter().any(|v| v.same_contents(save));
+            let kept = versions.iter().any(|v| v.has_same_contents_as(save));
             let state = if kept {
                 Palette::Good.span("  backed up")
             } else {
@@ -685,7 +695,7 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize)
                 state,
             ])
         }
-        None => kv("Device", Palette::Muted.span("no save")),
+        None => labelled("Device", Palette::Muted.span("no save")),
     };
     frame.render_widget(Paragraph::new(device_line), top);
     if versions.is_empty() {
@@ -699,7 +709,9 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize)
         .iter()
         .enumerate()
         .map(|(i, v)| {
-            let on_it = on_device.as_ref().is_some_and(|d| d.same_contents(v));
+            let on_it = on_device
+                .as_ref()
+                .is_some_and(|d| d.has_same_contents_as(v));
             let note = match (i, on_it) {
                 (0, true) => "newest, on the device",
                 (0, false) => "newest",
@@ -729,7 +741,7 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize)
         ])
         .style(Palette::Faint.style()),
     )
-    .row_highlight_style(selected())
+    .row_highlight_style(selected_style())
     .highlight_symbol("▸ ");
     let mut state =
         TableState::default().with_selected(Some(selected_version.min(versions.len() - 1)));
@@ -749,7 +761,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             let stop = if job.cancelling { "  stopping…" } else { "" };
             Line::from(Palette::Ink.span(format!(
                 " {} {}{progress}  {game}{stop}",
-                spinner(),
+                spinner_frame(),
                 job.label
             )))
         }
@@ -769,8 +781,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         (None, None) => Line::default(),
     };
-    if app.marked() > 0 {
-        line.push_span(Palette::Warn.span(format!("   {} marked", app.marked())));
+    if app.marked_count() > 0 {
+        line.push_span(Palette::Warn.span(format!("   {} marked", app.marked_count())));
     }
     frame.render_widget(Paragraph::new(line), status);
     frame.render_widget(
@@ -783,7 +795,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 /// and their tints form runs: open or back, library, device, covers, remove,
 /// then search, help and quit. Keep new keys in this order.
 fn legend(app: &App) -> Vec<(&'static str, &'static str)> {
-    if app.typing() {
+    if app.is_typing() {
         return vec![("Enter", "done"), ("Esc", "clear")];
     }
     if let Some(import) = app.import() {
@@ -801,13 +813,16 @@ fn legend(app: &App) -> Vec<(&'static str, &'static str)> {
     if app.platform_choice().is_some() {
         return vec![("Enter", "import"), ("Esc", "cancel"), ("↑↓", "pick")];
     }
+    if app.rename().is_some() {
+        return vec![("Enter", "rename"), ("Esc", "cancel")];
+    }
     if app.page() == Page::Cores {
         return cores_legend(app);
     }
     if app.page() == Page::Bios {
         return bios_legend(app);
     }
-    if app.panel().is_some() {
+    if app.selected_version().is_some() {
         return vec![
             ("Esc", "back"),
             ("b", "back up"),
@@ -824,7 +839,7 @@ fn legend(app: &App) -> Vec<(&'static str, &'static str)> {
         keys.push(("Esc", "stop"));
     }
     if let Some(Row::Game { row, .. }) = app.selected_row() {
-        let (local, on_device) = (row.local(), row.on_device());
+        let (local, on_device) = (row.local_entry(), row.device_entry());
         keys.push(("Enter", "saves"));
         if on_device.is_some() {
             if local.is_none() {
@@ -834,6 +849,7 @@ fn legend(app: &App) -> Vec<(&'static str, &'static str)> {
         }
         keys.push(("I", "import"));
         if local.is_some() {
+            keys.push(("n", "rename"));
             if on_device.is_none() && app.device_root().is_some() {
                 keys.push(("s", "push"));
             }
@@ -844,6 +860,7 @@ fn legend(app: &App) -> Vec<(&'static str, &'static str)> {
             keys.push(("x", "trash"));
         }
         if on_device.is_some() {
+            keys.push(("N", "rename on device"));
             keys.push(("X", "delete on device"));
         }
     }
@@ -869,11 +886,11 @@ fn cores_legend(app: &App) -> Vec<(&'static str, &'static str)> {
     }
     match app.selected_core() {
         Some(CoreRow::Available(_)) => keys.push(("u", "install")),
-        Some(row) if row.update_available() => keys.push(("u", "update")),
+        Some(row) if row.has_update() => keys.push(("u", "update")),
         _ => {}
     }
     let rows = app.cores().map_or(&[][..], |c| &c.rows);
-    if rows.iter().any(CoreRow::update_available) {
+    if rows.iter().any(CoreRow::has_update) {
         keys.push(("U", "update all"));
     }
     if app.selected_core().is_some_and(|r| r.installed().is_some()) {
@@ -907,23 +924,23 @@ fn bios_legend(app: &App) -> Vec<(&'static str, &'static str)> {
 /// out from the end rather than cut mid-word; help and quit always stay,
 /// since `?` lists the rest.
 fn key_line(keys: &[(&str, &str)], width: usize) -> Line<'static> {
-    fn entry(key: &str, what: &str) -> [Span<'static>; 2] {
+    fn key_entry(key: &str, what: &str) -> [Span<'static>; 2] {
         [keycap(key), Palette::Muted.span(format!(" {what}  "))]
     }
-    fn entry_width(e: &[Span<'static>; 2]) -> usize {
+    fn key_entry_width(e: &[Span<'static>; 2]) -> usize {
         e.iter().map(Span::width).sum()
     }
     let kept = |key: &str| matches!(key, "?" | "q");
     let reserved: usize = keys
         .iter()
         .filter(|(k, _)| kept(k))
-        .map(|(k, w)| entry_width(&entry(k, w)))
+        .map(|(k, w)| key_entry_width(&key_entry(k, w)))
         .sum();
     let mut room = width.saturating_sub(1 + reserved);
     let mut spans = vec![Span::raw(" ")];
     for (k, what) in keys.iter().filter(|(k, _)| !kept(k)) {
-        let e = entry(k, what);
-        let w = entry_width(&e);
+        let e = key_entry(k, what);
+        let w = key_entry_width(&e);
         if w > room {
             break;
         }
@@ -931,13 +948,13 @@ fn key_line(keys: &[(&str, &str)], width: usize) -> Line<'static> {
         spans.extend(e);
     }
     for (k, what) in keys.iter().filter(|(k, _)| kept(k)) {
-        spans.extend(entry(k, what));
+        spans.extend(key_entry(k, what));
     }
     Line::from(spans)
 }
 
 /// A rectangle of at most this size in the middle of `area`.
-fn centred(area: Rect, width: u16, height: u16) -> Rect {
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
     let (width, height) = (width.min(area.width), height.min(area.height));
     Rect {
         x: area.x + (area.width - width) / 2,
@@ -949,8 +966,8 @@ fn centred(area: Rect, width: u16, height: u16) -> Rect {
 
 /// A window of at most this size in the middle of the screen; what goes inside
 /// it.
-fn window(frame: &mut Frame, width: u16, height: u16, title: &str, border: Palette) -> Rect {
-    let rect = centred(frame.area(), width, height);
+fn draw_window(frame: &mut Frame, width: u16, height: u16, title: &str, border: Palette) -> Rect {
+    let rect = centered_rect(frame.area(), width, height);
     frame.render_widget(Clear, rect);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -968,7 +985,7 @@ fn window(frame: &mut Frame, width: u16, height: u16, title: &str, border: Palet
 fn import_buttons(action: &str) -> Paragraph<'static> {
     Paragraph::new(Line::from(vec![
         Span::raw(" "),
-        Span::styled(format!(" {action} "), selected()),
+        Span::styled(format!(" {action} "), selected_style()),
         Span::raw("  "),
         Span::styled(
             " Cancel ",
@@ -982,14 +999,14 @@ fn draw_import(frame: &mut Frame, app: &App) {
         return;
     };
     let (title, action) = match &import.importing {
-        Importing::Game => ("Import a game".to_string(), "Import"),
+        Importing::Game => ("Import a game or a folder".to_string(), "Import"),
         Importing::Save(local) => (format!("Import a save for {}", local.name), "Import"),
         Importing::Bios(row) => {
             let name = row.path.file_name().unwrap_or_default().to_string_lossy();
             (format!("Your {name}, to put on the device"), "Put")
         }
     };
-    let inner = window(frame, 64, 16, &title, Palette::Muted);
+    let inner = draw_window(frame, 64, 16, &title, Palette::Muted);
     let [path, list, buttons] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(0),
@@ -1004,6 +1021,38 @@ fn draw_import(frame: &mut Frame, app: &App) {
     frame.render_widget(import_buttons(action), buttons);
 }
 
+fn draw_rename(frame: &mut Frame, app: &App) {
+    let Some(rename) = app.rename() else {
+        return;
+    };
+    let (title, note) = match &rename.renaming {
+        Renaming::InLibrary(_) => ("Rename in the library", None),
+        Renaming::OnDevice(_) => (
+            "Rename on the device",
+            Some(" The Pocket's recent games and a game put to sleep keep the old name."),
+        ),
+    };
+    let inner = draw_window(frame, 76, 7, title, Palette::Muted);
+    let [name, note_area, buttons] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let (before, after) = rename.text_around_cursor();
+    frame.render_widget(
+        Paragraph::new(typed_line(before, &after, name.width as usize)),
+        name,
+    );
+    if let Some(note) = note {
+        frame.render_widget(
+            Paragraph::new(Palette::Muted.span(note)).wrap(Wrap { trim: false }),
+            note_area,
+        );
+    }
+    frame.render_widget(import_buttons("Rename"), buttons);
+}
+
 fn draw_platform_choice(frame: &mut Frame, app: &App) {
     let Some(choice) = app.platform_choice() else {
         return;
@@ -1015,7 +1064,7 @@ fn draw_platform_choice(frame: &mut Frame, app: &App) {
         .to_string_lossy();
     let platforms = Platform::iter().count() as u16;
     let title = format!("Which platform is {name} for?");
-    let inner = window(frame, 48, platforms + 4, &title, Palette::Muted);
+    let inner = draw_window(frame, 48, platforms + 4, &title, Palette::Muted);
     let [list, buttons] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
     // Keeps the one selected in view when the window is cut short.
@@ -1027,7 +1076,7 @@ fn draw_platform_choice(frame: &mut Frame, app: &App) {
         .map(|(i, platform)| {
             let picked = i == choice.selected;
             let style = if picked {
-                selected()
+                selected_style()
             } else {
                 Palette::Muted.style()
             };
@@ -1043,12 +1092,18 @@ fn draw_platform_choice(frame: &mut Frame, app: &App) {
 /// ` > path`, with the cursor showing, and the text before it cut from the
 /// left when it doesn't fit.
 fn path_line(input: &PathInput, width: usize) -> Line<'static> {
-    let (before, after) = input.split();
+    let (before, after) = input.text_around_cursor();
+    typed_line(before, &after, width)
+}
+
+/// ` > text`, with the cursor showing, and what is before it cut from the left
+/// when it doesn't fit.
+fn typed_line(before: String, after: &str, width: usize) -> Line<'static> {
     let room = width.saturating_sub(4);
     let shown = before.chars().count().saturating_sub(room);
     let before: String = before.chars().skip(shown).collect();
     let mut line = Line::from(Palette::Faint.span(" > "));
-    line.extend(typed(before, &after));
+    line.extend(typed_spans(before, after));
     line
 }
 
@@ -1087,7 +1142,10 @@ fn match_lines(input: &PathInput, area: Rect) -> Vec<Line<'static>> {
 /// selection bar, all the way across `width`.
 fn match_line(entry: &PathEntry, typed: &str, picked: bool, width: usize) -> Line<'static> {
     let (base, hit) = if picked {
-        (selected(), selected().add_modifier(Modifier::UNDERLINED))
+        (
+            selected_style(),
+            selected_style().add_modifier(Modifier::UNDERLINED),
+        )
     } else {
         (
             Palette::Muted.style(),
@@ -1096,7 +1154,7 @@ fn match_line(entry: &PathEntry, typed: &str, picked: bool, width: usize) -> Lin
     };
     let name = &entry.name;
     let mut spans = vec![Span::styled(if picked { " ▸ " } else { "   " }, base)];
-    let hits = entry.matched(typed);
+    let hits = entry.matched_positions(typed);
     for (i, c) in name.chars().enumerate() {
         let style = if hits.contains(&i) { hit } else { base };
         spans.push(Span::styled(c.to_string(), style));
@@ -1121,7 +1179,7 @@ fn draw_dialog(frame: &mut Frame, app: &App) {
     } else {
         Palette::Muted
     };
-    let inner = window(frame, width, height, &dialog.title, border);
+    let inner = draw_window(frame, width, height, &dialog.title, border);
     let [text, buttons] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
     let lines: Vec<Line> = dialog
@@ -1133,7 +1191,7 @@ fn draw_dialog(frame: &mut Frame, app: &App) {
     let mut spans = vec![Span::raw(" ")];
     for (i, button) in dialog.buttons.iter().enumerate() {
         let style = if i == dialog.focus {
-            selected()
+            selected_style()
         } else {
             Palette::Muted.style().bg(Palette::Keycap.color())
         };

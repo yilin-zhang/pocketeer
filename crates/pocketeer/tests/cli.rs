@@ -79,10 +79,10 @@ impl Setup {
 
     /// `pocketeer --library … --device … <args>`.
     fn run(&self, args: &[&str]) -> Ran {
-        let mut command = bin();
+        let mut command = pocketeer_command();
         command.arg("--library").arg(self.library());
         command.arg("--device").arg(self.device());
-        ran(command.args(args))
+        run_and_capture(command.args(args))
     }
 
     fn log_lines(&self) -> Vec<Value> {
@@ -99,11 +99,11 @@ impl Setup {
     }
 }
 
-fn bin() -> Command {
+fn pocketeer_command() -> Command {
     Command::new(env!("CARGO_BIN_EXE_pocketeer"))
 }
 
-fn ran(command: &mut Command) -> Ran {
+fn run_and_capture(command: &mut Command) -> Ran {
     let output = command.output().unwrap();
     Ran {
         code: output.status.code().unwrap(),
@@ -119,7 +119,7 @@ fn put(root: &Path, path: &str, bytes: &[u8]) -> PathBuf {
     full
 }
 
-fn written_at(path: &Path, secs: u64) {
+fn set_written_at(path: &Path, secs: u64) {
     fs::File::options()
         .write(true)
         .open(path)
@@ -152,9 +152,11 @@ fn assert_json_could_not_start(ran: &Ran, code: &str) {
 #[test]
 fn the_default_library_is_made_in_the_home_folder() {
     let home = tempfile::tempdir().unwrap();
-    let ran = ran(bin()
-        .env("HOME", home.path())
-        .args(["orphan-saves", "library"]));
+    let ran = run_and_capture(
+        pocketeer_command()
+            .env("HOME", home.path())
+            .args(["orphan-saves", "library"]),
+    );
     assert_eq!(ran.code, 0, "{}", ran.stderr);
     assert!(home.path().join("Pocketeer Library/roms").is_dir());
 }
@@ -224,9 +226,9 @@ mod printing {
         let s = Setup::new();
         s.in_library("roms/gba/Mine.gba", b"game");
         let old = s.in_library("saves/gba/Mine/old.sav", b"old");
-        written_at(&old, 1_600_000_000);
+        set_written_at(&old, 1_600_000_000);
         let new = s.in_library("saves/gba/Mine/new.sav", b"newer");
-        written_at(&new, 1_650_000_000);
+        set_written_at(&new, 1_650_000_000);
         let ran = s.run(&["--json", "saves", "gba/Mine.gba"]);
         assert_eq!(
             ran.json()["data"],
@@ -241,9 +243,9 @@ mod printing {
     fn orphan_saves_have_this_shape_as_json() {
         let s = Setup::new();
         let on_device = s.on_device("Saves/gba/common/RPG/Gone.sav", b"save");
-        written_at(&on_device, 1_600_000_000);
+        set_written_at(&on_device, 1_600_000_000);
         let in_library = s.in_library("saves/gba/Gone/a.sav", b"save");
-        written_at(&in_library, 1_600_000_000);
+        set_written_at(&in_library, 1_600_000_000);
         assert_eq!(
             s.run(&["--json", "orphan-saves", "device"]).json()["data"],
             json!([{
@@ -368,11 +370,13 @@ mod could_not_start {
     fn a_library_that_does_not_exist_and_it_is_not_made() {
         let s = Setup::new();
         let typo = s.dir.path().join("typo");
-        let ran = ran(bin()
-            .arg("--json")
-            .arg("--library")
-            .arg(&typo)
-            .args(["orphan-saves", "library"]));
+        let ran = run_and_capture(
+            pocketeer_command()
+                .arg("--json")
+                .arg("--library")
+                .arg(&typo)
+                .args(["orphan-saves", "library"]),
+        );
         assert_json_could_not_start(&ran, "no_library");
         assert!(!typo.exists());
     }
@@ -380,13 +384,15 @@ mod could_not_start {
     #[test]
     fn a_folder_that_is_not_a_device() {
         let s = Setup::new();
-        let ran = ran(bin()
-            .arg("--json")
-            .arg("--library")
-            .arg(s.library())
-            .arg("--device")
-            .arg(s.library())
-            .arg("games"));
+        let ran = run_and_capture(
+            pocketeer_command()
+                .arg("--json")
+                .arg("--library")
+                .arg(s.library())
+                .arg("--device")
+                .arg(s.library())
+                .arg("games"),
+        );
         assert_json_could_not_start(&ran, "not_a_device");
     }
 
@@ -471,7 +477,7 @@ mod versions {
         let s = Setup::new();
         s.in_library("roms/gba/Mine.gba", b"mine");
         let kept = s.in_library("saves/gba/Mine/a.sav", b"kept");
-        written_at(&kept, 1_600_000_000);
+        set_written_at(&kept, 1_600_000_000);
         s.on_device("Assets/gba/common/Mine.gba", b"mine");
         s
     }
@@ -517,13 +523,33 @@ mod importing {
         let s = Setup::new();
         s.in_library("roms/gba/Mine.gba", b"mine");
         let file = s.elsewhere("Mine.sav", b"save");
-        written_at(&file, 1_600_000_000);
+        set_written_at(&file, 1_600_000_000);
         (s, file)
     }
 
     /// `pocketeer --library … <args>`: importing needs no device.
     fn without_a_device(s: &Setup, args: &[&str]) -> Ran {
-        ran(bin().arg("--library").arg(s.library()).args(args))
+        run_and_capture(
+            pocketeer_command()
+                .arg("--library")
+                .arg(s.library())
+                .args(args),
+        )
+    }
+
+    #[test]
+    fn a_folder_brings_in_the_games_under_it() {
+        let s = Setup::new();
+        s.elsewhere("roms/old/Deep.gb", b"deep");
+        s.elsewhere("roms/README.txt", b"read me");
+        let folder = s.elsewhere("roms/Mine.gba", b"mine");
+        let folder = folder.parent().unwrap().to_str().unwrap();
+        let ran = without_a_device(&s, &["import", "game", folder]);
+        assert_eq!(ran.code, 0, "{}", ran.stderr);
+        assert_eq!(
+            ran.stdout,
+            "Mine.gba: imported as gba/Mine.gba\nDeep.gb: imported as gb/Deep.gb\n"
+        );
     }
 
     #[test]
@@ -652,11 +678,13 @@ mod importing {
         let folder = file.parent().unwrap();
         let game = put(folder, "mine.gba", b"game");
         let in_folder = |args: &[&str]| {
-            ran(bin()
-                .current_dir(folder)
-                .arg("--library")
-                .arg(s.library())
-                .args(args))
+            run_and_capture(
+                pocketeer_command()
+                    .current_dir(folder)
+                    .arg("--library")
+                    .arg(s.library())
+                    .args(args),
+            )
         };
         in_folder(&["import", "save", "gba/Mine.gba", "Mine.sav"]);
         in_folder(&["import", "game", "mine.gba"]);
@@ -762,6 +790,70 @@ fn sizes_are_aligned_to_the_right() {
     let ran = s.run(&["orphan-saves", "device"]);
     let sizes: Vec<&str> = ran.stdout.lines().map(|l| &l[11..19]).collect();
     assert_eq!(sizes, ["    SIZE", "12 bytes", " 3 bytes"]);
+}
+
+mod rename {
+    use super::*;
+
+    #[test]
+    fn a_game_in_the_library_is_renamed_as_json() {
+        let s = Setup::new();
+        s.in_library("roms/gba/Old.gba", b"hello");
+        s.in_library("saves/gba/Old/x.sav", b"save");
+        let ran = s.run(&["--json", "rename", "library", "gba/Old.gba", "New"]);
+        assert_eq!(ran.code, 0, "{}", ran.stderr);
+        assert_eq!(
+            ran.json(),
+            json!({
+                "schema_version": 1,
+                "ok": true,
+                "data": [{
+                    "front_end": "cli",
+                    "game": "gba/Old.gba",
+                    "ok": true,
+                    "message": "renamed to gba/New.gba",
+                    "library": "gba/New.gba",
+                }],
+            })
+        );
+        assert!(s.library().join("saves/gba/New/x.sav").exists());
+    }
+
+    #[test]
+    fn a_game_on_the_device_is_renamed_with_its_save() {
+        let s = Setup::new();
+        s.on_device("Assets/gba/common/RPG/Old.gba", b"hello");
+        s.on_device("Saves/gba/common/RPG/Old.sav", b"save");
+        let ran = s.run(&["rename", "device", "gba/RPG/Old.gba", "New"]);
+        assert_eq!(ran.code, 0, "{}", ran.stderr);
+        assert_eq!(ran.stdout, "gba/RPG/Old.gba: renamed to gba/RPG/New.gba\n");
+        assert!(s.device().join("Saves/gba/common/RPG/New.sav").exists());
+    }
+
+    #[test]
+    fn a_game_not_there_is_refused_at_the_start() {
+        let s = Setup::new();
+        let ran = s.run(&["--json", "rename", "library", "gba/Gone.gba", "New"]);
+        assert_eq!(ran.code, 2);
+        assert_eq!(ran.json()["error"]["code"], "not_in_library");
+        let ran = s.run(&["--json", "rename", "device", "gba/Gone.gba", "New"]);
+        assert_eq!(ran.code, 2);
+        assert_eq!(ran.json()["error"]["code"], "not_on_device");
+    }
+
+    #[test]
+    fn a_name_refused_is_a_failure() {
+        let s = Setup::new();
+        s.in_library("roms/gba/Old.gba", b"hello");
+        s.in_library("roms/gba/Other.gba", b"other");
+        let ran = s.run(&["rename", "library", "gba/Old.gba", "Other"]);
+        assert_eq!(ran.code, 1);
+        assert_eq!(
+            ran.stdout,
+            "gba/Old.gba: not renamed: another game in the library has that name\n"
+        );
+        assert!(s.library().join("roms/gba/Old.gba").exists());
+    }
 }
 
 mod bios {
@@ -995,14 +1087,16 @@ mod cores {
     #[test]
     fn installing_needs_a_device() {
         let s = with_inventory(&serve_release("2.0"));
-        let ran = ran(bin()
-            .env("HOME", s.dir.path())
-            .arg("--json")
-            .arg("--library")
-            .arg(s.library())
-            .arg("--device")
-            .arg(s.dir.path().join("nowhere"))
-            .args(["cores", "install", GB]));
+        let ran = run_and_capture(
+            pocketeer_command()
+                .env("HOME", s.dir.path())
+                .arg("--json")
+                .arg("--library")
+                .arg(s.library())
+                .arg("--device")
+                .arg(s.dir.path().join("nowhere"))
+                .args(["cores", "install", GB]),
+        );
         assert_json_could_not_start(&ran, "not_a_device");
     }
 

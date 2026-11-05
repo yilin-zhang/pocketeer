@@ -95,6 +95,12 @@ enum Command {
         #[command(subcommand)]
         what: Dat,
     },
+    /// Give a game another name, keeping its extension; its saves and cover go
+    /// with it, and the other side keeps its own name
+    Rename {
+        #[command(subcommand)]
+        what: Rename,
+    },
     /// Bring things from the computer into the library
     Import {
         #[command(subcommand)]
@@ -124,6 +130,25 @@ enum Command {
     Bios {
         #[command(subcommand)]
         what: Bios,
+    },
+}
+
+#[derive(Subcommand)]
+enum Rename {
+    /// A game in the library
+    Library {
+        /// The game, as <platform>/<name>
+        game: String,
+        /// The new name
+        name: String,
+    },
+    /// A game on the device; it stays in its folder. The Pocket's list of
+    /// recent games and any game put to sleep still have the old name
+    Device {
+        /// The game, as <platform>/<path>
+        game: String,
+        /// The new name
+        name: String,
     },
 }
 
@@ -256,11 +281,12 @@ enum DeleteOnDevice {
 
 #[derive(Subcommand)]
 enum Import {
-    /// Games from files, each under its name in the DATs if they know it and
-    /// its file name if not; the files stay
+    /// Games from files, or from folders with games in them at any depth, each
+    /// under its name in the DATs if they know it and its file name if not; the
+    /// files stay
     Game {
         #[arg(required = true)]
-        files: Vec<PathBuf>,
+        paths: Vec<PathBuf>,
         /// The platform they are for [default: what each file's extension says]
         #[arg(long)]
         platform: Option<String>,
@@ -326,14 +352,14 @@ type CliResult<T> = Result<T, CliError>;
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let Some(command) = &cli.command else {
-        return terminal_ui(&cli);
+        return run_terminal_ui(&cli);
     };
     let format = if cli.json {
         PrintFormat::Json
     } else {
         PrintFormat::Text
     };
-    match run(&cli, command, format) {
+    match run_command(&cli, command, format) {
         Ok(()) => ExitCode::SUCCESS,
         Err(CliError::SomeFailed) => ExitCode::from(1),
         Err(CliError::CouldNotStart { code, message }) => {
@@ -359,7 +385,7 @@ fn print_envelope(mut out: Value) {
 }
 
 /// With no command, the terminal UI, if this is a terminal.
-fn terminal_ui(cli: &Cli) -> ExitCode {
+fn run_terminal_ui(cli: &Cli) -> ExitCode {
     if cli.json || !io::stdout().is_terminal() {
         eprintln!("error: the terminal UI needs a terminal; give a command, or see --help");
         return ExitCode::from(2);
@@ -377,19 +403,19 @@ fn terminal_ui(cli: &Cli) -> ExitCode {
 fn library_path(cli: &Cli) -> Result<PathBuf, BaseError> {
     match &cli.library {
         Some(library) => Ok(library.clone()),
-        None => Pocketeer::default_library(),
+        None => Pocketeer::default_library_path(),
     }
 }
 
-fn run(cli: &Cli, command: &Command, format: PrintFormat) -> CliResult<()> {
+fn run_command(cli: &Cli, command: &Command, format: PrintFormat) -> CliResult<()> {
     let open = |device_use| CliSession::open(cli, device_use, format);
     match command {
-        Command::Device => device(format),
-        Command::Games => open(DeviceUse::IfMounted)?.games(),
-        Command::Saves { game } => open(DeviceUse::None)?.saves(game),
+        Command::Device => print_devices(format),
+        Command::Games => open(DeviceUse::IfMounted)?.print_games(),
+        Command::Saves { game } => open(DeviceUse::None)?.print_saves(game),
         Command::OrphanSaves { place } => match place {
-            OrphanSaves::Library => open(DeviceUse::None)?.orphan_saves_in_library(),
-            OrphanSaves::Device => open(DeviceUse::Unscanned)?.orphan_saves_on_device(),
+            OrphanSaves::Library => open(DeviceUse::None)?.print_orphan_saves_in_library(),
+            OrphanSaves::Device => open(DeviceUse::Unscanned)?.print_orphan_saves_on_device(),
         },
         Command::Pull { what } => match what {
             Pull::Game { games } => open(DeviceUse::Scanned)?.pull_games(games),
@@ -400,8 +426,8 @@ fn run(cli: &Cli, command: &Command, format: PrintFormat) -> CliResult<()> {
             Push::Save { games, at } => open(DeviceUse::Scanned)?.push_saves(games, at.as_deref()),
         },
         Command::Import { what } => match what {
-            Import::Game { files, platform } => {
-                open(DeviceUse::None)?.import_games(files, platform.as_deref())
+            Import::Game { paths, platform } => {
+                open(DeviceUse::None)?.import_games(paths, platform.as_deref())
             }
             Import::Save { game, file } => open(DeviceUse::None)?.import_save(game, file),
         },
@@ -418,13 +444,21 @@ fn run(cli: &Cli, command: &Command, format: PrintFormat) -> CliResult<()> {
             }
         },
         Command::Cores { what } => match what {
-            Cores::List => open(DeviceUse::IfMountedUnscanned)?.cores(),
+            Cores::List => open(DeviceUse::IfMountedUnscanned)?.print_cores(),
             Cores::Install { ids } => open(DeviceUse::Unscanned)?.install_cores(ids),
             Cores::Update { ids } => open(DeviceUse::Unscanned)?.update_cores(ids),
             Cores::Remove { ids } => open(DeviceUse::Unscanned)?.remove_cores(ids),
         },
+        Command::Rename { what } => match what {
+            Rename::Library { game, name } => {
+                open(DeviceUse::None)?.rename_game_in_library(game, name)
+            }
+            Rename::Device { game, name } => {
+                open(DeviceUse::Scanned)?.rename_game_on_device(game, name)
+            }
+        },
         Command::Bios { what } => match what {
-            Bios::List => open(DeviceUse::Unscanned)?.bios(),
+            Bios::List => open(DeviceUse::Unscanned)?.print_bios(),
             Bios::Put { bios, file } => open(DeviceUse::Unscanned)?.put_bios(bios, file),
         },
         Command::Eject => open(DeviceUse::Unscanned)?.eject(),
@@ -449,8 +483,8 @@ enum DeviceUse {
     IfMountedUnscanned,
 }
 
-fn device(format: PrintFormat) -> CliResult<()> {
-    let found: Vec<String> = Device::find()
+fn print_devices(format: PrintFormat) -> CliResult<()> {
+    let found: Vec<String> = Device::find_mounted()
         .iter()
         .map(|p| p.display().to_string())
         .collect();
@@ -518,7 +552,7 @@ impl CliSession {
         first.expect("the scan keeps a copy of each game")
     }
 
-    fn games(&self) -> CliResult<()> {
+    fn print_games(&self) -> CliResult<()> {
         #[derive(Serialize)]
         struct Row {
             platform: String,
@@ -533,22 +567,22 @@ impl CliSession {
         }
         let rows: Vec<Row> = self
             .p
-            .games()
+            .game_rows()
             .iter()
             .map(|r| {
                 let id = r.game().platform.id();
                 let pulls_as = match r {
-                    GameRow::OnDevice(d) => Some(format!("{id}/{}", self.p.pull_name(d))),
+                    GameRow::OnDevice(d) => Some(format!("{id}/{}", self.p.name_for_pull(d))),
                     _ => None,
                 };
                 Row {
                     platform: id.to_string(),
-                    library: r.local().map(library_ref),
-                    device: r.on_device().map(device_ref),
+                    library: r.local_entry().map(library_ref),
+                    device: r.device_entry().map(device_ref),
                     saves_kept: r.saves_kept(),
-                    new_save_on_device: r.new_save_on_device(),
+                    new_save_on_device: r.has_new_save_on_device(),
                     pulls_as,
-                    cover: r.local().and_then(|l| l.cover_path.clone()),
+                    cover: r.local_entry().and_then(|l| l.cover_path.clone()),
                 }
             })
             .collect();
@@ -598,14 +632,14 @@ impl CliSession {
         Ok(())
     }
 
-    fn saves(&self, game: &str) -> CliResult<()> {
+    fn print_saves(&self, game: &str) -> CliResult<()> {
         #[derive(Serialize)]
         struct Version {
             version: String,
             size: u64,
             newest: bool,
         }
-        let history = self.local(game)?.save.as_ref();
+        let history = self.local_entry(game)?.save.as_ref();
         let versions: Vec<Version> = history
             .into_iter()
             .flat_map(|h| h.iter())
@@ -627,13 +661,16 @@ impl CliSession {
                         [v.version.clone(), format!("{} bytes", v.size), note.into()]
                     })
                     .collect();
-                print!("{}", table_right(&["VERSION", "SIZE", ""], &cells, 1));
+                print!(
+                    "{}",
+                    table_right_aligned(&["VERSION", "SIZE", ""], &cells, 1)
+                );
             }
         }
         Ok(())
     }
 
-    fn orphan_saves_in_library(&self) -> CliResult<()> {
+    fn print_orphan_saves_in_library(&self) -> CliResult<()> {
         #[derive(Serialize)]
         struct Orphan {
             save: String,
@@ -664,7 +701,7 @@ impl CliSession {
         Ok(())
     }
 
-    fn orphan_saves_on_device(&self) -> CliResult<()> {
+    fn print_orphan_saves_on_device(&self) -> CliResult<()> {
         #[derive(Serialize)]
         struct Orphan {
             save: String,
@@ -695,7 +732,10 @@ impl CliSession {
                         ]
                     })
                     .collect();
-                print!("{}", table_right(&["SAVE", "SIZE", "WRITTEN"], &cells, 1));
+                print!(
+                    "{}",
+                    table_right_aligned(&["SAVE", "SIZE", "WRITTEN"], &cells, 1)
+                );
             }
         }
         Ok(())
@@ -704,17 +744,17 @@ impl CliSession {
     fn pull_games(&mut self, refs: &[String]) -> CliResult<()> {
         let games = match refs {
             [] => self.p.games_only_on_device(),
-            refs => self.on_device(refs)?,
+            refs => self.entries_on_device(refs)?,
         };
-        self.batch(|p, each| p.pull_games(&games, each))
+        self.run_batch(|p, each| p.pull_games(&games, each))
     }
 
     fn pull_saves(&mut self, refs: &[String]) -> CliResult<()> {
         let games = match refs {
             [] => self.games_with_saves_to_pull(),
-            refs => self.on_device(refs)?,
+            refs => self.entries_on_device(refs)?,
         };
-        self.batch(|p, each| p.pull_saves(&games, each))
+        self.run_batch(|p, each| p.pull_saves(&games, each))
     }
 
     /// The games on the device the library has: nobody asked for the others
@@ -736,12 +776,12 @@ impl CliSession {
     }
 
     fn push_games(&mut self, refs: &[String]) -> CliResult<()> {
-        let games = self.in_library(refs)?;
-        self.batch(|p, each| p.push_games(&games, each))
+        let games = self.entries_in_library(refs)?;
+        self.run_batch(|p, each| p.push_games(&games, each))
     }
 
     fn push_saves(&mut self, refs: &[String], at: Option<&str>) -> CliResult<()> {
-        let games = self.in_library(refs)?;
+        let games = self.entries_in_library(refs)?;
         let device = self.p.device().expect("the device is open");
         let copies = refs
             .iter()
@@ -751,30 +791,31 @@ impl CliSession {
                 copy.ok_or_else(|| not_on_device(r))
             })
             .collect::<CliResult<Vec<DeviceEntry>>>()?;
-        self.batch(|p, each| match at {
+        self.run_batch(|p, each| match at {
             Some(at) => p.push_saves_at(&copies, at, each),
             None => p.push_saves(&copies, each),
         })
     }
 
-    fn import_games(&mut self, files: &[PathBuf], platform: Option<&str>) -> CliResult<()> {
-        let platform = platform.map(named_platform).transpose()?;
-        self.batch(|p, each| p.import_games(files, platform.as_ref(), each))
+    fn import_games(&mut self, paths: &[PathBuf], platform: Option<&str>) -> CliResult<()> {
+        let platform = platform.map(parse_platform).transpose()?;
+        let files = self.p.files_to_import(paths)?;
+        self.run_batch(|p, each| p.import_games(&files, platform.as_ref(), each))
     }
 
     fn import_save(&mut self, game: &str, file: &Path) -> CliResult<()> {
-        let saves = [(self.local(game)?.clone(), file.to_path_buf())];
-        self.batch(|p, each| p.import_saves(&saves, each))
+        let saves = [(self.local_entry(game)?.clone(), file.to_path_buf())];
+        self.run_batch(|p, each| p.import_saves(&saves, each))
     }
 
     fn trash_games(&mut self, refs: &[String]) -> CliResult<()> {
-        let games = self.in_library(refs)?;
-        self.batch(|p, each| p.trash_games_in_library(&games, each))
+        let games = self.entries_in_library(refs)?;
+        self.run_batch(|p, each| p.trash_games_in_library(&games, each))
     }
 
     fn trash_saves(&mut self, refs: &[String], at: Option<&str>) -> CliResult<()> {
-        let games = self.in_library(refs)?;
-        self.batch(|p, each| match at {
+        let games = self.entries_in_library(refs)?;
+        self.run_batch(|p, each| match at {
             Some(at) => p.trash_saves_at(&games, at, each),
             None => p.trash_saves_in_library(&games, each),
         })
@@ -782,38 +823,38 @@ impl CliSession {
 
     fn trash_orphan_saves(&mut self, refs: &[String]) -> CliResult<()> {
         let orphans = self.p.orphan_saves_in_library()?;
-        let orphans = picked(refs, &orphans, library_orphan_ref)?;
-        self.batch(|p, each| p.trash_orphan_saves_in_library(&orphans, each))
+        let orphans = pick_orphans(refs, &orphans, library_orphan_ref)?;
+        self.run_batch(|p, each| p.trash_orphan_saves_in_library(&orphans, each))
     }
 
     fn delete_games(&mut self, refs: &[String]) -> CliResult<()> {
-        let games = self.on_device(refs)?;
-        self.batch(|p, each| p.delete_games_on_device(&games, each))
+        let games = self.entries_on_device(refs)?;
+        self.run_batch(|p, each| p.delete_games_on_device(&games, each))
     }
 
     fn delete_saves(&mut self, refs: &[String]) -> CliResult<()> {
-        let games = self.on_device(refs)?;
-        self.batch(|p, each| p.delete_saves_on_device(&games, each))
+        let games = self.entries_on_device(refs)?;
+        self.run_batch(|p, each| p.delete_saves_on_device(&games, each))
     }
 
     fn delete_orphan_saves(&mut self, refs: &[String]) -> CliResult<()> {
         let orphans = self.p.orphan_saves_on_device()?;
-        let orphans = picked(refs, &orphans, device_orphan_ref)?;
-        self.batch(|p, each| p.delete_orphan_saves_on_device(&orphans, each))
+        let orphans = pick_orphans(refs, &orphans, device_orphan_ref)?;
+        self.run_batch(|p, each| p.delete_orphan_saves_on_device(&orphans, each))
     }
 
     fn fetch_covers(&mut self, refs: &[String]) -> CliResult<()> {
         let games = match refs {
             [] => self.p.games_without_covers(),
-            refs => self.in_library(refs)?,
+            refs => self.entries_in_library(refs)?,
         };
-        self.batch(|p, each| p.fetch_covers(&games, each))
+        self.run_batch(|p, each| p.fetch_covers(&games, each))
     }
 
     /// Runs a command going through games. As text each is printed as it is
     /// done, since a device is slow and that shows that something is happening;
     /// as JSON they all are at the end.
-    fn batch(
+    fn run_batch(
         &mut self,
         run: impl FnOnce(
             &mut Pocketeer,
@@ -823,7 +864,7 @@ impl CliSession {
         let (format, entries) = (self.format, &mut self.entries);
         let done = run(&mut self.p, &mut |_, entry| {
             if matches!(format, PrintFormat::Text) {
-                println!("{}", entry.event.line());
+                println!("{}", entry.event.to_line());
             }
             entries.push(entry);
             ControlFlow::Continue(())
@@ -837,7 +878,7 @@ impl CliSession {
         if let Err(e) = &done {
             eprintln!("error: {e}");
         }
-        let ok = done.is_ok() && self.entries.iter().all(|e| e.event.ok());
+        let ok = done.is_ok() && self.entries.iter().all(|e| e.event.is_ok());
         if matches!(self.format, PrintFormat::Json) {
             let lines: Vec<Value> = self.entries.iter().map(LogEntry::to_json).collect();
             print_json(ok, json!(lines));
@@ -849,7 +890,7 @@ impl CliSession {
         }
     }
 
-    fn cores(&mut self) -> CliResult<()> {
+    fn print_cores(&mut self) -> CliResult<()> {
         #[derive(Serialize)]
         struct Row {
             id: String,
@@ -878,7 +919,7 @@ impl CliSession {
                     installed: r.installed().is_some(),
                     version: r.installed().and_then(|i| i.version.clone()),
                     latest: r.latest().map(|l| l.version.clone()),
-                    update_available: r.update_available(),
+                    update_available: r.has_update(),
                 }
             })
             .collect();
@@ -914,32 +955,32 @@ impl CliSession {
             let message = format!("{id}: not a core that can be installed, as `cores list` shows");
             return Err(CliError::could_not_start("unsupported_core", message));
         }
-        self.batch(|p, each| p.install_cores(ids, each))
+        self.run_batch(|p, each| p.install_cores(ids, each))
     }
 
     fn update_cores(&mut self, ids: &[String]) -> CliResult<()> {
         let ids = match ids {
             [] => self.p.cores_with_updates()?,
             ids => {
-                self.check_on_device(ids)?;
+                self.ensure_cores_on_device(ids)?;
                 ids.to_vec()
             }
         };
         if ids.is_empty() && matches!(self.format, PrintFormat::Text) {
             println!("every core is up to date");
         }
-        self.batch(|p, each| p.install_cores(&ids, each))
+        self.run_batch(|p, each| p.install_cores(&ids, each))
     }
 
     fn remove_cores(&mut self, ids: &[String]) -> CliResult<()> {
-        self.check_on_device(ids)?;
-        self.batch(|p, each| p.remove_cores(ids, each))
+        self.ensure_cores_on_device(ids)?;
+        self.run_batch(|p, each| p.remove_cores(ids, each))
     }
 
     /// Refuses cores the device doesn't have.
-    fn check_on_device(&self, ids: &[String]) -> CliResult<()> {
+    fn ensure_cores_on_device(&self, ids: &[String]) -> CliResult<()> {
         let device = self.p.device().expect("the device is open");
-        let cores = device.cores()?;
+        let cores = device.installed_cores()?;
         match ids.iter().find(|id| !cores.iter().any(|c| c.id == **id)) {
             Some(id) => Err(CliError::could_not_start(
                 "core_not_on_device",
@@ -949,7 +990,18 @@ impl CliSession {
         }
     }
 
-    fn bios(&self) -> CliResult<()> {
+    fn rename_game_in_library(&mut self, game: &str, name: &str) -> CliResult<()> {
+        let games = [(self.local_entry(game)?.clone(), name.to_string())];
+        self.run_batch(|p, each| p.rename_games_in_library(&games, each))
+    }
+
+    fn rename_game_on_device(&mut self, game: &str, name: &str) -> CliResult<()> {
+        let on_device = self.entries_on_device(&[game.to_string()])?.remove(0);
+        let games = [(on_device, name.to_string())];
+        self.run_batch(|p, each| p.rename_games_on_device(&games, each))
+    }
+
+    fn print_bios(&self) -> CliResult<()> {
         #[derive(Serialize)]
         struct NeededBy {
             core: String,
@@ -984,7 +1036,7 @@ impl CliSession {
                     status,
                     size,
                     size_exact: r.size_exact,
-                    required: r.required(),
+                    required: r.is_required(),
                     needed_by: needed_by.collect(),
                 }
             })
@@ -1023,7 +1075,7 @@ impl CliSession {
             return Err(CliError::could_not_start("not_a_bios_file", message));
         };
         let files = [(row, from.to_path_buf())];
-        self.batch(|p, each| p.put_bios(&files, each))
+        self.run_batch(|p, each| p.put_bios_files(&files, each))
     }
 
     fn eject(&mut self) -> CliResult<()> {
@@ -1063,11 +1115,11 @@ impl CliSession {
 
     /// The device's games written in `refs`. A copy the scan left out is
     /// refused: what is asked of a file must not be done to another.
-    fn on_device(&self, refs: &[String]) -> CliResult<Vec<DeviceEntry>> {
+    fn entries_on_device(&self, refs: &[String]) -> CliResult<Vec<DeviceEntry>> {
         let device = self.p.device().expect("the device is open");
         refs.iter()
             .map(|r| {
-                let (platform, path) = split(r)?;
+                let (platform, path) = split_ref(r)?;
                 let path = Path::new(path);
                 let is_it = |d: &&DeviceEntry| d.game.platform == platform && d.path == path;
                 if let Some(duplicate) = self.duplicates.iter().find(is_it) {
@@ -1075,24 +1127,24 @@ impl CliSession {
                     let message = format!("{r}: the same game as {first}, the copy that is used");
                     return Err(CliError::could_not_start("duplicate_on_device", message));
                 }
-                let found = device.entry(&platform, path);
+                let found = device.entry_at(&platform, path);
                 found.cloned().ok_or_else(|| not_on_device(r))
             })
             .collect()
     }
 
     /// The library's games written in `refs`.
-    fn in_library(&self, refs: &[String]) -> CliResult<Vec<LocalEntry>> {
-        refs.iter().map(|r| self.local(r).cloned()).collect()
+    fn entries_in_library(&self, refs: &[String]) -> CliResult<Vec<LocalEntry>> {
+        refs.iter().map(|r| self.local_entry(r).cloned()).collect()
     }
 
-    fn local(&self, r: &str) -> CliResult<&LocalEntry> {
-        let (platform, name) = split(r)?;
+    fn local_entry(&self, r: &str) -> CliResult<&LocalEntry> {
+        let (platform, name) = split_ref(r)?;
         let not_there =
             || CliError::could_not_start("not_in_library", format!("{r}: not in the library"));
         self.p
             .library()
-            .entry(&platform, name)
+            .entry_named(&platform, name)
             .ok_or_else(not_there)
     }
 }
@@ -1103,7 +1155,11 @@ fn not_on_device(r: &str) -> CliError {
 
 /// The orphan saves written in `refs`, as `orphan-saves` shows them: they name
 /// nothing else, so no save of a game is taken for one.
-fn picked<T: Clone>(refs: &[String], orphans: &[T], ref_of: fn(&T) -> String) -> CliResult<Vec<T>> {
+fn pick_orphans<T: Clone>(
+    refs: &[String],
+    orphans: &[T],
+    ref_of: fn(&T) -> String,
+) -> CliResult<Vec<T>> {
     refs.iter()
         .map(|r| {
             let found = orphans.iter().find(|o| ref_of(o) == *r).cloned();
@@ -1116,7 +1172,7 @@ fn picked<T: Clone>(refs: &[String], orphans: &[T], ref_of: fn(&T) -> String) ->
 }
 
 /// The platform with this id, of those games can be imported for.
-fn named_platform(id: &str) -> CliResult<Platform> {
+fn parse_platform(id: &str) -> CliResult<Platform> {
     Platform::iter().find(|p| p.id() == id).ok_or_else(|| {
         let ids: Vec<String> = Platform::iter().map(|p| p.id().to_string()).collect();
         let message = format!("{id}: not a platform; these are: {}", ids.join(", "));
@@ -1125,7 +1181,7 @@ fn named_platform(id: &str) -> CliResult<Platform> {
 }
 
 /// `<platform>/<rest>` as the platform and the rest.
-fn split(r: &str) -> CliResult<(Platform, &str)> {
+fn split_ref(r: &str) -> CliResult<(Platform, &str)> {
     let (id, rest) = r.split_once('/').ok_or_else(|| {
         let how = "write a game as <platform>/<name>, as `pocketeer games` shows it";
         CliError::could_not_start("bad_game", format!("{r}: {how}"))
@@ -1135,12 +1191,16 @@ fn split(r: &str) -> CliResult<(Platform, &str)> {
 
 /// `rows` under `header`, in columns.
 fn table<const N: usize>(header: &[&str; N], rows: &[[String; N]]) -> String {
-    table_right(header, rows, N)
+    table_right_aligned(header, rows, N)
 }
 
 /// `rows` under `header`, in columns, with the one at index `right` aligned to
 /// the right, for numbers.
-fn table_right<const N: usize>(header: &[&str; N], rows: &[[String; N]], right: usize) -> String {
+fn table_right_aligned<const N: usize>(
+    header: &[&str; N],
+    rows: &[[String; N]],
+    right: usize,
+) -> String {
     let mut widths = header.map(|h| h.chars().count());
     for row in rows {
         for (w, cell) in widths.iter_mut().zip(row) {

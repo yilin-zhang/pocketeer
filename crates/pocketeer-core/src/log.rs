@@ -3,21 +3,21 @@
 
 use std::{
     fmt,
-    fs::OpenOptions,
     io::{self, Write},
     path::PathBuf,
     sync::Arc,
 };
 
+use fs_err::OpenOptions;
 use jiff::Timestamp;
 use serde_json::{Value, json};
 
 use crate::{
     cores::{BiosRow, InstallCoreError, InstallCoreOutcome, PutBiosError, RemoveCoreError},
     dat::SyncReport,
-    device::{DeleteSaveError, DeviceEntry, OrphanDeviceSave},
+    device::{DeleteSaveError, DeviceEntry, OrphanDeviceSave, RenameOnDeviceError},
     error::BaseError,
-    library::{AddGameError, LocalEntry, OrphanLocalSave},
+    library::{AddGameError, LocalEntry, OrphanLocalSave, RenameInLibraryError},
     pocketeer::{
         FetchCoverError, FetchCoverOutcome, ImportGameError, ImportGameOutcome, ImportSaveOutcome,
         TrashSaveError,
@@ -51,6 +51,8 @@ pub enum LogEvent {
     InstallCore(String, Result<InstallCoreOutcome, InstallCoreError>),
     /// The core's id.
     RemoveCore(String, Result<(), RemoveCoreError>),
+    RenameInLibrary(LocalEntry, Result<LocalEntry, RenameInLibraryError>),
+    RenameOnDevice(DeviceEntry, Result<DeviceEntry, RenameOnDeviceError>),
     /// The file it was copied from.
     PutBios(BiosRow, PathBuf, Result<(), PutBiosError>),
     SyncDats(Result<SyncReport, BaseError>),
@@ -62,7 +64,7 @@ pub enum LogEvent {
 impl LogEvent {
     /// Whether it went well. Finding nothing to do is not a failure, unless
     /// something in particular was asked for.
-    pub fn ok(&self) -> bool {
+    pub fn is_ok(&self) -> bool {
         match self {
             LogEvent::PullSave(_, Err(PullSaveError::NoSave))
             | LogEvent::FetchCover(_, Err(FetchCoverError::NoCover))
@@ -86,6 +88,8 @@ impl LogEvent {
             LogEvent::InstallCore(_, done) => done.is_ok(),
             LogEvent::RemoveCore(_, done) => done.is_ok(),
             LogEvent::PutBios(_, _, done) => done.is_ok(),
+            LogEvent::RenameInLibrary(_, done) => done.is_ok(),
+            LogEvent::RenameOnDevice(_, done) => done.is_ok(),
             LogEvent::SyncDats(done) => done.is_ok(),
         }
     }
@@ -97,13 +101,15 @@ impl LogEvent {
             | LogEvent::PullSave(on_device, _)
             | LogEvent::PushSave(on_device, _)
             | LogEvent::DeleteGame(on_device, _)
-            | LogEvent::DeleteSave(on_device, _) => device_ref(on_device),
+            | LogEvent::DeleteSave(on_device, _)
+            | LogEvent::RenameOnDevice(on_device, _) => device_ref(on_device),
             LogEvent::PushGame(local, _)
             | LogEvent::FetchCover(local, _)
             | LogEvent::ImportSave(local, ..)
             | LogEvent::TrashGame(local, _)
             | LogEvent::TrashSaveAll(local, _)
-            | LogEvent::TrashSaveVersion(local, ..) => library_ref(local),
+            | LogEvent::TrashSaveVersion(local, ..)
+            | LogEvent::RenameInLibrary(local, _) => library_ref(local),
             LogEvent::TrashOrphanSave(orphan, _) => library_orphan_ref(orphan),
             LogEvent::DeleteOrphanSave(orphan, _) => device_orphan_ref(orphan),
             // Its path is in `to_json`: it would crowd out what comes after.
@@ -120,7 +126,7 @@ impl LogEvent {
     }
 
     /// `<subject>: <message>`.
-    pub fn line(&self) -> String {
+    pub fn to_line(&self) -> String {
         format!("{}: {self}", self.subject())
     }
 }
@@ -250,6 +256,20 @@ impl fmt::Display for LogEvent {
             LogEvent::RemoveCore(_, Ok(())) => write!(f, "removed from the device"),
             LogEvent::RemoveCore(_, Err(RemoveCoreError::Other(e))) => write!(f, "error: {e}"),
             LogEvent::RemoveCore(_, Err(e)) => write!(f, "{e}"),
+            LogEvent::RenameInLibrary(_, Ok(entry)) => {
+                write!(f, "renamed to {}", library_ref(entry))
+            }
+            LogEvent::RenameInLibrary(_, Err(RenameInLibraryError::Other(e))) => {
+                write!(f, "error: {e}")
+            }
+            LogEvent::RenameInLibrary(_, Err(e)) => write!(f, "not renamed: {e}"),
+            LogEvent::RenameOnDevice(_, Ok(entry)) => {
+                write!(f, "renamed to {}", device_ref(entry))
+            }
+            LogEvent::RenameOnDevice(_, Err(RenameOnDeviceError::Other(e))) => {
+                write!(f, "error: {e}")
+            }
+            LogEvent::RenameOnDevice(_, Err(e)) => write!(f, "not renamed: {e}"),
             LogEvent::PutBios(_, _, Ok(())) => write!(f, "put on the device"),
             LogEvent::PutBios(_, _, Err(PutBiosError::Other(e))) => write!(f, "error: {e}"),
             LogEvent::PutBios(_, _, Err(e)) => write!(f, "{e}"),
@@ -296,7 +316,7 @@ impl LogEntry {
             "time": self.time.to_string(),
             "front_end": front_end,
             "game": self.event.subject(),
-            "ok": self.event.ok(),
+            "ok": self.event.is_ok(),
             "message": self.event.to_string(),
         });
         match &self.event {
@@ -317,6 +337,12 @@ impl LogEntry {
             }
             LogEvent::InstallCore(_, Ok(InstallCoreOutcome::Installed { version })) => {
                 json["version"] = json!(version);
+            }
+            LogEvent::RenameInLibrary(_, Ok(entry)) => {
+                json["library"] = json!(library_ref(entry));
+            }
+            LogEvent::RenameOnDevice(_, Ok(entry)) => {
+                json["device"] = json!(device_ref(entry));
             }
             LogEvent::PutBios(_, from, _) => {
                 json["from"] = json!(from.display().to_string());
@@ -441,9 +467,9 @@ mod tests {
     #[test]
     fn it_reads_as_what_was_done_to_what() {
         let pulled = LogEvent::PullGame(on_device(), Ok(PullGameOutcome::Pulled(local())));
-        assert_eq!(pulled.line(), "gba/RPG/Foo.gba: pulled as gba/Foo.gba");
+        assert_eq!(pulled.to_line(), "gba/RPG/Foo.gba: pulled as gba/Foo.gba");
         let synced = LogEvent::SyncDats(Ok(SyncReport::default()));
-        assert_eq!(synced.line(), "the DATs: 0 platforms updated");
+        assert_eq!(synced.to_line(), "the DATs: 0 platforms updated");
         let failed = LogEvent::DeleteGame(on_device(), Err(BaseError::NoDevice));
         assert_eq!(failed.to_string(), "error: no device is open");
     }
@@ -480,7 +506,7 @@ mod tests {
                 false,
             ),
         ] {
-            assert_eq!(event.ok(), ok, "{}", event.line());
+            assert_eq!(event.is_ok(), ok, "{}", event.to_line());
         }
     }
 

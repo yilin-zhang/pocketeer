@@ -54,6 +54,10 @@ pub enum Command {
     RemoveCores(Vec<String>),
     /// The file to copy to where the row says.
     PutBios(BiosRow, PathBuf),
+    /// The game in the library, and what to call it.
+    RenameInLibrary(LocalEntry, String),
+    /// The game on the device, and what to call it.
+    RenameOnDevice(DeviceEntry, String),
 }
 
 /// One line of the games table.
@@ -72,17 +76,17 @@ pub enum Row {
 
 impl Row {
     /// The game's copy in the library, if this is a game and it has one.
-    pub fn local(&self) -> Option<&LocalEntry> {
+    pub fn local_entry(&self) -> Option<&LocalEntry> {
         match self {
-            Row::Game { row, .. } => row.local(),
+            Row::Game { row, .. } => row.local_entry(),
             _ => None,
         }
     }
 
     /// The game's copy on the device, if this is a game and it has one.
-    pub fn on_device(&self) -> Option<&DeviceEntry> {
+    pub fn device_entry(&self) -> Option<&DeviceEntry> {
         match self {
-            Row::Game { row, .. } => row.on_device(),
+            Row::Game { row, .. } => row.device_entry(),
             _ => None,
         }
     }
@@ -235,16 +239,16 @@ fn run(library: &Path, pinned: Option<PathBuf>, rx: &mpsc::Receiver<Sent>, send:
         cores_wanted: false,
     };
     state.refresh_orphans(&p);
-    state.snapshot(&p);
-    state.watch(&mut p);
+    state.send_snapshot(&p);
+    state.sync_mounted_device(&mut p);
     loop {
         match rx.recv_timeout(WATCH) {
             Ok((cancel_token, command)) => {
                 if !cancel_token.load(Ordering::Relaxed) {
-                    state.command(&mut p, command, &cancel_token);
+                    state.run_command(&mut p, command, &cancel_token);
                 }
             }
-            Err(RecvTimeoutError::Timeout) => state.watch(&mut p),
+            Err(RecvTimeoutError::Timeout) => state.sync_mounted_device(&mut p),
             Err(RecvTimeoutError::Disconnected) => return,
         }
     }
@@ -269,7 +273,7 @@ struct State<'a> {
 }
 
 impl State<'_> {
-    fn snapshot(&self, p: &Pocketeer) {
+    fn send_snapshot(&self, p: &Pocketeer) {
         (self.send)(Update::Snapshot(snapshot(p, &self.orphans)));
     }
 
@@ -280,7 +284,7 @@ impl State<'_> {
         self.orphans.on_device = p.orphan_saves_on_device().unwrap_or_default();
     }
 
-    fn tell_cores(&self, p: &mut Pocketeer) {
+    fn send_cores(&self, p: &mut Pocketeer) {
         if !self.cores_wanted {
             return;
         }
@@ -291,16 +295,16 @@ impl State<'_> {
         (self.send)(Update::Cores { rows, failure });
     }
 
-    fn tell_bios(&self, p: &Pocketeer) {
+    fn send_bios(&self, p: &Pocketeer) {
         (self.send)(Update::Bios(p.bios_rows().unwrap_or_default()));
     }
 
     /// Opens a device that came, closes one that went.
-    fn watch(&mut self, p: &mut Pocketeer) {
+    fn sync_mounted_device(&mut self, p: &mut Pocketeer) {
         let found = match &self.pinned {
             Some(path) if Device::is_device(path) => vec![path.clone()],
             Some(_) => Vec::new(),
-            None => Device::find(),
+            None => Device::find_mounted(),
         };
         let open = p.device().map(|d| d.root().to_path_buf());
         if found == self.seen && open.as_ref().is_none_or(|o| found.contains(o)) {
@@ -313,13 +317,13 @@ impl State<'_> {
         p.close_device();
         match &found[..] {
             [] => {
-                self.finished_refresh(p, "device gone".to_string(), false);
+                self.finish_with_refresh(p, "device gone".to_string(), false);
             }
             [root] => self.open_device(p, root),
             many => {
                 let list: Vec<_> = many.iter().map(|d| d.display().to_string()).collect();
                 let summary = format!("more than one device mounted: {}", list.join(", "));
-                self.finished_refresh(p, summary, true);
+                self.finish_with_refresh(p, summary, true);
             }
         }
     }
@@ -329,7 +333,7 @@ impl State<'_> {
         let opened = p.open_device(root).and_then(|()| p.scan_device());
         let failure = match opened {
             Ok(report) => {
-                tell_duplicates(self.send, p, &report.duplicates);
+                send_duplicates(self.send, p, &report.duplicates);
                 None
             }
             Err(e) => {
@@ -338,9 +342,9 @@ impl State<'_> {
             }
         };
         self.refresh_orphans(p);
-        self.snapshot(p);
-        self.tell_cores(p);
-        self.tell_bios(p);
+        self.send_snapshot(p);
+        self.send_cores(p);
+        self.send_bios(p);
         (self.send)(Update::DeviceRead);
         if let Some(summary) = failure {
             (self.send)(Update::Finished {
@@ -350,28 +354,28 @@ impl State<'_> {
         }
     }
 
-    fn finished_refresh(&mut self, p: &mut Pocketeer, summary: String, failed: bool) {
+    fn finish_with_refresh(&mut self, p: &mut Pocketeer, summary: String, failed: bool) {
         self.refresh_orphans(p);
-        self.snapshot(p);
-        self.tell_cores(p);
-        self.tell_bios(p);
+        self.send_snapshot(p);
+        self.send_cores(p);
+        self.send_bios(p);
         (self.send)(Update::Finished { summary, failed });
     }
 
-    fn command(&mut self, p: &mut Pocketeer, command: Command, cancel_token: &AtomicBool) {
+    fn run_command(&mut self, p: &mut Pocketeer, command: Command, cancel_token: &AtomicBool) {
         if command == Command::ShowCores {
             self.cores_wanted = true;
-            self.tell_cores(p);
+            self.send_cores(p);
             return;
         }
         let mut batch = Batch {
             send: self.send,
             orphans: &self.orphans,
             cancel_token,
-            total: command_size(&command),
+            total: target_count(&command),
             events: Vec::new(),
         };
-        let label = label(&command);
+        let label = job_label(&command);
         (self.send)(Update::Started {
             label: label.to_string(),
             total: batch.total,
@@ -379,62 +383,74 @@ impl State<'_> {
         // A command for one game goes through `batch` by hand; it has no entry
         // to go by, only what came of it.
         let done = match command {
-            Command::PullGames(games) => p.pull_games(&games, |p, e| batch.step(p, e.event)),
-            Command::PullSaves(games) => p.pull_saves(&games, |p, e| batch.step(p, e.event)),
-            Command::PushGames(games) => p.push_games(&games, |p, e| batch.step(p, e.event)),
-            Command::PushSaves(games) => p.push_saves(&games, |p, e| batch.step(p, e.event)),
+            Command::PullGames(games) => p.pull_games(&games, |p, e| batch.report_step(p, e.event)),
+            Command::PullSaves(games) => p.pull_saves(&games, |p, e| batch.report_step(p, e.event)),
+            Command::PushGames(games) => p.push_games(&games, |p, e| batch.report_step(p, e.event)),
+            Command::PushSaves(games) => p.push_saves(&games, |p, e| batch.report_step(p, e.event)),
             Command::PushSaveVersion(game, version) => {
                 let done = p.push_save_version(&game, &version);
-                Ok(batch.step(p, LogEvent::PushSave(game, done)))
+                Ok(batch.report_step(p, LogEvent::PushSave(game, done)))
             }
-            Command::FetchCovers(games) => p.fetch_covers(&games, |p, e| batch.step(p, e.event)),
-            Command::ImportGame(file, platform) => {
-                let files = [file];
-                p.import_games(&files, platform.as_ref(), |p, e| batch.step(p, e.event))
+            Command::FetchCovers(games) => {
+                p.fetch_covers(&games, |p, e| batch.report_step(p, e.event))
             }
+            Command::ImportGame(path, platform) => p.files_to_import(&[path]).and_then(|files| {
+                batch.total = files.len();
+                p.import_games(&files, platform.as_ref(), |p, e| {
+                    batch.report_step(p, e.event)
+                })
+            }),
             Command::ImportSave(game, from) => {
-                p.import_saves(&[(game, from)], |p, e| batch.step(p, e.event))
+                p.import_saves(&[(game, from)], |p, e| batch.report_step(p, e.event))
             }
             Command::TrashGames(games) => {
-                p.trash_games_in_library(&games, |p, e| batch.step(p, e.event))
+                p.trash_games_in_library(&games, |p, e| batch.report_step(p, e.event))
             }
             Command::TrashSaveVersion(game, version) => {
                 let done = p.trash_save_version_in_library(&game, &version);
                 let event = LogEvent::TrashSaveVersion(game, version.timestamp(), done);
-                Ok(batch.step(p, event))
+                Ok(batch.report_step(p, event))
             }
             Command::TrashOrphanSaves(orphans) => {
-                p.trash_orphan_saves_in_library(&orphans, |p, e| batch.step(p, e.event))
+                p.trash_orphan_saves_in_library(&orphans, |p, e| batch.report_step(p, e.event))
             }
             Command::DeleteGames(games) => {
-                p.delete_games_on_device(&games, |p, e| batch.step(p, e.event))
+                p.delete_games_on_device(&games, |p, e| batch.report_step(p, e.event))
             }
             Command::DeleteSaves(games) => {
-                p.delete_saves_on_device(&games, |p, e| batch.step(p, e.event))
+                p.delete_saves_on_device(&games, |p, e| batch.report_step(p, e.event))
             }
             Command::DeleteOrphanSaves(orphans) => {
-                p.delete_orphan_saves_on_device(&orphans, |p, e| batch.step(p, e.event))
+                p.delete_orphan_saves_on_device(&orphans, |p, e| batch.report_step(p, e.event))
             }
             // Taken care of above: it is no job to report on.
             Command::ShowCores => Ok(ControlFlow::Continue(())),
-            Command::InstallCores(ids) => p.install_cores(&ids, |p, e| batch.step(p, e.event)),
-            Command::RemoveCores(ids) => p.remove_cores(&ids, |p, e| batch.step(p, e.event)),
+            Command::InstallCores(ids) => {
+                p.install_cores(&ids, |p, e| batch.report_step(p, e.event))
+            }
+            Command::RemoveCores(ids) => p.remove_cores(&ids, |p, e| batch.report_step(p, e.event)),
             Command::PutBios(row, from) => {
-                p.put_bios(&[(row, from)], |p, e| batch.step(p, e.event))
+                p.put_bios_files(&[(row, from)], |p, e| batch.report_step(p, e.event))
+            }
+            Command::RenameInLibrary(game, new) => {
+                p.rename_games_in_library(&[(game, new)], |p, e| batch.report_step(p, e.event))
+            }
+            Command::RenameOnDevice(game, new) => {
+                p.rename_games_on_device(&[(game, new)], |p, e| batch.report_step(p, e.event))
             }
             Command::SyncDats => {
                 let synced = p.sync_dats();
-                Ok(batch.step(p, LogEvent::SyncDats(synced)))
+                Ok(batch.report_step(p, LogEvent::SyncDats(synced)))
             }
             Command::Reload => {
                 let read = p.reload();
-                let read = read.map(|report| tell_duplicates(self.send, p, &report.duplicates));
-                Ok(batch.step(p, LogEvent::Reload(read)))
+                let read = read.map(|report| send_duplicates(self.send, p, &report.duplicates));
+                Ok(batch.report_step(p, LogEvent::Reload(read)))
             }
             Command::Eject => {
                 let root = p.device().map(|d| d.root().to_path_buf());
                 let ejected = p.eject_device();
-                Ok(batch.step(p, LogEvent::Eject(root, ejected)))
+                Ok(batch.report_step(p, LogEvent::Eject(root, ejected)))
             }
         };
         let (mut summary, mut failed) = summary(label, batch.total, &batch.events);
@@ -442,7 +458,7 @@ impl State<'_> {
             summary.push_str(&format!("; {e}"));
             failed = true;
         }
-        self.finished_refresh(p, summary, failed);
+        self.finish_with_refresh(p, summary, failed);
     }
 }
 
@@ -459,7 +475,7 @@ struct Batch<'a> {
 impl Batch<'_> {
     /// Notes how one game went and sends how things stand; breaks if the
     /// command was cancelled.
-    fn step(&mut self, p: &Pocketeer, event: LogEvent) -> ControlFlow<()> {
+    fn report_step(&mut self, p: &Pocketeer, event: LogEvent) -> ControlFlow<()> {
         let game = event.subject();
         self.events.push(event);
         (self.send)(Update::Snapshot(snapshot(p, self.orphans)));
@@ -480,13 +496,13 @@ impl Batch<'_> {
 /// any of it failed.
 fn summary(label: &str, total: usize, events: &[LogEvent]) -> (String, bool) {
     let done = events.len();
-    let failed = events.iter().filter(|e| !e.ok()).count();
-    let first_failure = events.iter().find(|e| !e.ok());
+    let failed = events.iter().filter(|e| !e.is_ok()).count();
+    let first_failure = events.iter().find(|e| !e.is_ok());
     let summary = match (total, first_failure, events.last()) {
-        (1, _, Some(last)) => last.line(),
+        (1, _, Some(last)) => last.to_line(),
         (_, Some(first), _) => format!(
             "{label}: {done} of {total} done, {failed} failed; first: {}",
-            first.line()
+            first.to_line()
         ),
         _ if done < total => format!("{label}: stopped after {done} of {total}"),
         _ => format!("{label}: {done} done"),
@@ -496,11 +512,13 @@ fn summary(label: &str, total: usize, events: &[LogEvent]) -> (String, bool) {
 
 fn snapshot(p: &Pocketeer, orphans: &Orphans) -> Snapshot {
     let mut rows: Vec<Row> = p
-        .games()
+        .game_rows()
         .into_iter()
         .map(|row| Row::Game {
-            standard_name: p.dat_entry(row.game()).map(|d| d.name.clone()),
-            files: row.local().map_or(Vec::new(), |l| p.library().files_of(l)),
+            standard_name: p.dat_entry_for(row.game()).map(|d| d.name.clone()),
+            files: row
+                .local_entry()
+                .map_or(Vec::new(), |l| p.library().files_of(l)),
             row,
         })
         .collect();
@@ -513,7 +531,7 @@ fn snapshot(p: &Pocketeer, orphans: &Orphans) -> Snapshot {
 }
 
 /// Tells the UI of `duplicates`, the copies a scan left out, if there are any.
-fn tell_duplicates(send: &dyn Fn(Update), p: &Pocketeer, duplicates: &[DeviceEntry]) {
+fn send_duplicates(send: &dyn Fn(Update), p: &Pocketeer, duplicates: &[DeviceEntry]) {
     if duplicates.is_empty() {
         return;
     }
@@ -525,7 +543,7 @@ fn tell_duplicates(send: &dyn Fn(Update), p: &Pocketeer, duplicates: &[DeviceEnt
     send(Update::Duplicates(lines.collect()));
 }
 
-fn label(command: &Command) -> &'static str {
+fn job_label(command: &Command) -> &'static str {
     match command {
         Command::PullGames(_) => "pulling games",
         Command::PullSaves(_) => "backing up saves",
@@ -533,7 +551,7 @@ fn label(command: &Command) -> &'static str {
         Command::PushSaves(_) => "pushing saves",
         Command::PushSaveVersion(..) => "pushing a save",
         Command::FetchCovers(_) => "downloading covers",
-        Command::ImportGame(..) => "importing a game",
+        Command::ImportGame(..) => "importing games",
         Command::ImportSave(..) => "importing a save",
         Command::TrashGames(_) => "putting games in the trash",
         Command::TrashSaveVersion(..) => "putting a save in the trash",
@@ -547,10 +565,11 @@ fn label(command: &Command) -> &'static str {
         Command::InstallCores(_) => "installing cores",
         Command::RemoveCores(_) => "removing cores",
         Command::PutBios(..) => "putting a file on the device",
+        Command::RenameInLibrary(..) | Command::RenameOnDevice(..) => "renaming a game",
     }
 }
 
-fn command_size(command: &Command) -> usize {
+fn target_count(command: &Command) -> usize {
     match command {
         Command::PullGames(g)
         | Command::PullSaves(g)
@@ -564,6 +583,8 @@ fn command_size(command: &Command) -> usize {
         Command::DeleteOrphanSaves(o) => o.len(),
         Command::PushSaveVersion(..)
         | Command::PutBios(..)
+        | Command::RenameInLibrary(..)
+        | Command::RenameOnDevice(..)
         | Command::ImportGame(..)
         | Command::ImportSave(..)
         | Command::TrashSaveVersion(..)
@@ -660,7 +681,7 @@ mod tests {
         snapshot
             .rows
             .iter()
-            .filter_map(Row::local)
+            .filter_map(Row::local_entry)
             .cloned()
             .collect()
     }
@@ -755,14 +776,20 @@ mod tests {
     fn once_the_first_copy_is_deleted_the_next_is_shown_without_telling() {
         let (_dir, mut worker, rx) = started_with_two_copies();
         let opening = until_device_read(&rx);
-        let first = last_snapshot(&opening).rows[0].on_device().unwrap().clone();
+        let first = last_snapshot(&opening).rows[0]
+            .device_entry()
+            .unwrap()
+            .clone();
         assert_eq!(first.path, Path::new("One.gba"));
         worker.send(Command::DeleteGames(vec![first]));
         let updates = until_finished(&rx);
         assert_eq!(duplicates(&updates), Vec::<&[String]>::new());
         let rows = &last_snapshot(&updates).rows;
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].on_device().unwrap().path, Path::new("RPG/Two.gba"));
+        assert_eq!(
+            rows[0].device_entry().unwrap().path,
+            Path::new("RPG/Two.gba")
+        );
     }
 
     #[test]
@@ -827,7 +854,7 @@ mod tests {
         assert_eq!(progress, [(1, 2, "gba/A.gba"), (2, 2, "gba/B.gba")]);
         assert_eq!(finished(&updates), ("pushing games: 2 done", false));
         let snapshot = last_snapshot(&updates);
-        let on_device = snapshot.rows.iter().filter(|r| r.on_device().is_some());
+        let on_device = snapshot.rows.iter().filter(|r| r.device_entry().is_some());
         assert_eq!(on_device.count(), 3);
     }
 
@@ -866,6 +893,17 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_imported_counts_the_games_in_it() {
+        let (dir, mut worker, rx) = started();
+        until_device_read(&rx);
+        put(dir.path(), "elsewhere/New.gb", b"new");
+        put(dir.path(), "elsewhere/deep/Other.gb", b"other");
+        worker.send(Command::ImportGame(dir.path().join("elsewhere"), None));
+        let updates = until_finished(&rx);
+        assert_eq!(finished(&updates), ("importing games: 2 done", false));
+    }
+
+    #[test]
     fn an_orphan_save_is_deleted_from_the_device() {
         let (_dir, mut worker, rx) = started();
         let opening = until_device_read(&rx);
@@ -879,6 +917,24 @@ mod tests {
             ("gba/Gone.sav: save deleted from the device", false)
         );
         assert_eq!(last_snapshot(&updates).rows.len(), 3);
+    }
+
+    #[test]
+    fn a_game_renamed_is_told_of_under_its_new_name() {
+        let (_dir, mut worker, rx) = started();
+        let opening = until_device_read(&rx);
+        let local = locals(last_snapshot(&opening)).remove(0);
+        worker.send(Command::RenameInLibrary(local, "Renamed".to_string()));
+        let updates = until_finished(&rx);
+        assert_eq!(
+            finished(&updates),
+            ("gba/A.gba: renamed to gba/Renamed.gba", false)
+        );
+        let names: Vec<String> = locals(last_snapshot(&updates))
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        assert_eq!(names, ["B.gba", "Renamed.gba"]);
     }
 
     #[test]

@@ -1,16 +1,44 @@
 //! A game and its saves.
 
 use std::{
-    fs::{self, File},
     io::{self, Read, Seek},
     path::Path,
     time::SystemTime,
 };
 
+use fs_err::{self as fs, File};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::platform::Platform;
+
+/// Whether a game can be called `name` in a folder: it would otherwise be put
+/// elsewhere, or be hidden and so not found again.
+pub(crate) fn is_valid_file_name(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with('.') && !name.contains(['/', '\\'])
+}
+
+/// Whether a game can be given `name` and be the same on a device: FAT file
+/// systems don't take these characters, and macOS writes them as something else
+/// rather than refusing them.
+pub(crate) fn is_valid_fat_name(name: &str) -> bool {
+    is_valid_file_name(name) && !name.contains([':', '?', '*', '"', '<', '>', '|'])
+}
+
+/// What the file `name` is called once renamed to `new`: it keeps its extension,
+/// whether or not `new` has it already.
+pub(crate) fn renamed_file_name(name: &str, new: &str) -> String {
+    let new = new.trim();
+    let Some(extension) = Path::new(name).extension().and_then(|e| e.to_str()) else {
+        return new.to_string();
+    };
+    let dotted = format!(".{extension}").to_lowercase();
+    let without = match new.to_lowercase().ends_with(&dotted) {
+        true => &new[..new.len() - dotted.len()],
+        false => new,
+    };
+    format!("{without}.{extension}")
+}
 
 /// One file's contents, as ROM catalogues (No-Intro and Redump DATs) list
 /// them.
@@ -44,7 +72,7 @@ impl Game {
         if platform == Platform::Nes && !skip_ines_header(&mut file)? {
             file.rewind()?;
         }
-        let rom = hash(file)?;
+        let rom = hash_rom(file)?;
         Ok(Self {
             platform,
             files: Files::Single(rom),
@@ -64,11 +92,11 @@ impl Save {
     /// Reads the save at `path`. Saves are small, so this reads all of it.
     pub fn read(path: &Path) -> io::Result<Self> {
         let bytes = fs::read(path)?;
-        Ok(Save::of(&bytes, fs::metadata(path)?.modified()?))
+        Ok(Save::from_bytes(&bytes, fs::metadata(path)?.modified()?))
     }
 
     /// A save with these contents, written at `modified`.
-    pub fn of(bytes: &[u8], modified: SystemTime) -> Self {
+    pub fn from_bytes(bytes: &[u8], modified: SystemTime) -> Self {
         Self {
             size: bytes.len() as u64,
             crc32: crc32fast::hash(bytes),
@@ -84,7 +112,7 @@ impl Save {
     }
 
     /// Whether the two hold the same save, whenever each was written.
-    pub fn same_contents(&self, other: &Self) -> bool {
+    pub fn has_same_contents_as(&self, other: &Self) -> bool {
         (self.size, self.crc32) == (other.size, other.crc32)
     }
 }
@@ -121,8 +149,8 @@ impl SaveHistory {
     }
 
     /// Whether some version holds the same save as `save`.
-    pub fn has(&self, save: &Save) -> bool {
-        self.iter().any(|s| s.same_contents(save))
+    pub fn contains(&self, save: &Save) -> bool {
+        self.iter().any(|s| s.has_same_contents_as(save))
     }
 }
 
@@ -134,7 +162,7 @@ fn skip_ines_header(file: &mut File) -> io::Result<bool> {
 }
 
 /// The rest of `file`.
-fn hash(mut file: File) -> io::Result<Rom> {
+fn hash_rom(mut file: File) -> io::Result<Rom> {
     let mut crc = crc32fast::Hasher::new();
     let mut size = 0;
     let mut buf = vec![0u8; 256 * 1024];
@@ -156,6 +184,64 @@ fn hash(mut file: File) -> io::Result<Rom> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod renaming {
+        use super::*;
+
+        #[test]
+        fn the_extension_stays() {
+            assert_eq!(renamed_file_name("Old.gba", "New"), "New.gba");
+            assert_eq!(renamed_file_name("Old", "New"), "New");
+        }
+
+        #[test]
+        fn an_extension_given_is_not_doubled() {
+            assert_eq!(renamed_file_name("Old.gba", "New.gba"), "New.gba");
+            assert_eq!(renamed_file_name("Old.gba", "New.GBA"), "New.gba");
+        }
+
+        #[test]
+        fn the_dots_of_a_name_are_kept() {
+            assert_eq!(renamed_file_name("Old.gb", "Dr. Mario"), "Dr. Mario.gb");
+            assert_eq!(renamed_file_name("Old.gb", "Dr. Mario.gb"), "Dr. Mario.gb");
+        }
+
+        #[test]
+        fn spaces_around_it_go() {
+            assert_eq!(renamed_file_name("Old.gba", "  New  "), "New.gba");
+        }
+
+        #[test]
+        fn nothing_left_is_not_a_plain_name() {
+            for new in ["", "  ", ".gba", ".GBA"] {
+                assert!(
+                    !is_valid_file_name(&renamed_file_name("Old.gba", new)),
+                    "{new}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_name_leading_elsewhere_or_hidden_is_not_plain() {
+            for name in ["../x.gba", "a/x.gba", "a\\x.gba", ".x.gba", ""] {
+                assert!(!is_valid_file_name(name), "{name}");
+            }
+            assert!(is_valid_file_name("Dr. Mario.gb"));
+        }
+
+        #[test]
+        fn a_name_a_device_would_not_keep_is_not_given() {
+            for name in [
+                "a:b.gba", "a?.gba", "a*.gba", "a\".gba", "a<.gba", "a>.gba", "a|.gba",
+            ] {
+                assert!(!is_valid_fat_name(name), "{name}");
+            }
+            assert!(!is_valid_fat_name("../x.gba"));
+            assert!(is_valid_fat_name(
+                "Legend of Zelda, The - It's (USA) [!].gba"
+            ));
+        }
+    }
     use crate::files::testing::at;
 
     fn file(bytes: &[u8]) -> tempfile::NamedTempFile {
@@ -205,14 +291,14 @@ mod tests {
     #[test]
     fn versions_are_found_by_when_they_were_written() {
         let history = SaveHistory::from_saves(vec![
-            Save::of(b"a", at(1)),
-            Save::of(b"b", at(2)),
-            Save::of(b"c", at(2)),
+            Save::from_bytes(b"a", at(1)),
+            Save::from_bytes(b"b", at(2)),
+            Save::from_bytes(b"c", at(2)),
         ])
         .unwrap();
         assert_eq!(
             history.written_at("1970-01-01T00-00-01"),
-            [&Save::of(b"a", at(1))]
+            [&Save::from_bytes(b"a", at(1))]
         );
         assert_eq!(history.written_at("1970-01-01T00-00-02").len(), 2);
         assert_eq!(
@@ -224,21 +310,21 @@ mod tests {
     #[test]
     fn a_history_is_newest_first() {
         let history = SaveHistory::from_saves(vec![
-            Save::of(b"a", at(1)),
-            Save::of(b"b", at(3)),
-            Save::of(b"c", at(2)),
+            Save::from_bytes(b"a", at(1)),
+            Save::from_bytes(b"b", at(3)),
+            Save::from_bytes(b"c", at(2)),
         ])
         .unwrap();
         let times: Vec<_> = history.iter().map(|s| s.modified).collect();
         assert_eq!(times, [at(3), at(2), at(1)]);
-        assert!(history.has(&Save::of(b"c", at(9))));
-        assert!(!history.has(&Save::of(b"d", at(2))));
+        assert!(history.contains(&Save::from_bytes(b"c", at(9))));
+        assert!(!history.contains(&Save::from_bytes(b"d", at(2))));
         assert_eq!(SaveHistory::from_saves(Vec::new()), None);
     }
 
     #[test]
     fn a_save_time_is_written_in_utc() {
-        let save = Save::of(b"", at(1_762_179_605));
+        let save = Save::from_bytes(b"", at(1_762_179_605));
         assert_eq!(save.timestamp(), "2025-11-03T14-20-05");
     }
 }

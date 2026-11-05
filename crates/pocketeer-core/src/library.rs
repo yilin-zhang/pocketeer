@@ -3,17 +3,17 @@
 
 use std::{
     collections::{HashMap, HashSet, hash_map},
-    fs,
     path::{Path, PathBuf},
 };
 
+use fs_err as fs;
 use image::ImageFormat;
 
 use crate::{
     cover::{COVER_FORMATS, Cover},
-    error::{BaseError, io_at},
-    files::{Cache, copy, list, write},
-    game::{Game, Save, SaveHistory},
+    error::BaseError,
+    files::{Cache, copy_atomically, list_folder, safe_rename_all, write_atomically},
+    game::{Game, Save, SaveHistory, is_valid_fat_name, is_valid_file_name, renamed_file_name},
     platform::Platform,
 };
 
@@ -65,6 +65,25 @@ pub enum AddGameError {
     /// or hidden and so not found again.
     #[error("the library can't hold a game of that name")]
     BadName,
+    #[error(transparent)]
+    Other(#[from] BaseError),
+}
+
+/// Why a game in the library wasn't renamed. Nothing has changed, then.
+#[derive(Debug, thiserror::Error)]
+pub enum RenameInLibraryError {
+    #[error("the library can't hold a game of that name")]
+    BadName,
+    #[error("it has that name already")]
+    SameName,
+    /// Another game of the platform has the name, whatever its extension or
+    /// case: saves and covers are kept by the name without the extension.
+    #[error("another game in the library has that name")]
+    NameTaken,
+    /// Saves or a cover with no game have the name, and would become this
+    /// game's.
+    #[error("the library has saves or a cover under that name")]
+    LeftoversThere,
     #[error(transparent)]
     Other(#[from] BaseError),
 }
@@ -165,7 +184,7 @@ impl Library {
             root: root.to_path_buf(),
         };
         let roms = layout.roms();
-        fs::create_dir_all(&roms).map_err(io_at(&roms))?;
+        fs::create_dir_all(&roms)?;
         let cache = Cache::load(&layout.root, &layout.cache());
         let mut library = Self {
             layout,
@@ -185,7 +204,7 @@ impl Library {
     }
 
     /// The game of `platform` called `name`.
-    pub fn entry(&self, platform: &Platform, name: &str) -> Option<&LocalEntry> {
+    pub fn entry_named(&self, platform: &Platform, name: &str) -> Option<&LocalEntry> {
         self.entries.iter().find(|e| e.is_called(platform, name))
     }
 
@@ -223,15 +242,15 @@ impl Library {
     pub fn orphan_saves(&self) -> Result<Vec<OrphanLocalSave>, BaseError> {
         let all = self.layout.all_saves();
         let mut orphans = Vec::new();
-        for id in list(&all).map_err(io_at(&all))?.dirs {
+        for id in list_folder(&all)?.dirs {
             let platform = Platform::from_id(&id);
             let folder = self.layout.platform_saves(&platform);
-            for name in list(&folder).map_err(io_at(&folder))?.dirs {
+            for name in list_folder(&folder)?.dirs {
                 let has_game = |e: &LocalEntry| e.game.platform == platform && e.stem() == name;
                 if self.entries.iter().any(has_game) {
                     continue;
                 }
-                if let Some(save) = self.saves(&platform, &name)? {
+                if let Some(save) = self.read_save_history(&platform, &name)? {
                     orphans.push(OrphanLocalSave {
                         platform: platform.clone(),
                         stem: name,
@@ -244,14 +263,14 @@ impl Library {
     }
 
     /// The file of every version of `entry`'s save.
-    pub fn all_save_files(&self, entry: &LocalEntry) -> Result<Vec<PathBuf>, BaseError> {
-        let files = self.save_files(&entry.game.platform, entry.stem())?;
+    pub fn files_of_all_saves(&self, entry: &LocalEntry) -> Result<Vec<PathBuf>, BaseError> {
+        let files = self.files_of_saves(&entry.game.platform, entry.stem())?;
         Ok(files.into_iter().map(|(path, _)| path).collect())
     }
 
     /// The file of every version of `orphan`'s save, if it is still an orphan:
     /// a game may have been put under its name since. None if it isn't.
-    pub(crate) fn orphan_save_files(
+    pub(crate) fn files_of_orphan_save(
         &self,
         orphan: &OrphanLocalSave,
     ) -> Result<Vec<PathBuf>, BaseError> {
@@ -259,7 +278,7 @@ impl Library {
         if !self.orphan_saves()?.iter().any(is_it) {
             return Ok(Vec::new());
         }
-        let files = self.save_files(&orphan.platform, &orphan.stem)?;
+        let files = self.files_of_saves(&orphan.platform, &orphan.stem)?;
         Ok(files.into_iter().map(|(path, _)| path).collect())
     }
 
@@ -269,7 +288,7 @@ impl Library {
         platform: &Platform,
         name: &str,
     ) -> Result<(), BaseError> {
-        let saves = self.saves(platform, stem(name))?;
+        let saves = self.read_save_history(platform, stem(name))?;
         let i = self.index_of(platform, name)?;
         self.entries[i].save = saves;
         Ok(())
@@ -285,7 +304,7 @@ impl Library {
         name: &str,
         from: &Path,
     ) -> Result<LocalEntry, AddGameError> {
-        if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\']) {
+        if !is_valid_file_name(name) {
             return Err(AddGameError::BadName);
         }
         let platform = &game.platform;
@@ -296,20 +315,87 @@ impl Library {
         if self.entries.iter().any(taken) || to.exists() {
             return Err(AddGameError::NameTaken);
         }
-        copy(from, &to)?;
-        self.cache.record(&to, game).map_err(io_at(&to))?;
+        copy_atomically(from, &to)?;
+        self.cache.record_game(&to, game)?;
         self.cache.save();
         let entry = LocalEntry {
             name: name.into(),
             cover_path: self.cover_path(platform, stem(name)),
-            save: self.saves(platform, stem(name))?,
+            save: self.read_save_history(platform, stem(name))?,
             game: game.clone(),
         };
+        self.insert(entry.clone());
+        Ok(entry)
+    }
+
+    /// Adds `entry` to the entries, in its place.
+    fn insert(&mut self, entry: LocalEntry) {
         let place = self.entries.binary_search_by(|e| {
             (e.game.platform.id(), &e.name).cmp(&(entry.game.platform.id(), &entry.name))
         });
         let (Ok(at) | Err(at)) = place;
-        self.entries.insert(at, entry.clone());
+        self.entries.insert(at, entry);
+    }
+
+    /// Calls the game called `name` `new` instead, keeping its extension, with
+    /// its saves and its cover. Its contents aren't read again.
+    pub(crate) fn rename_game(
+        &mut self,
+        platform: &Platform,
+        name: &str,
+        new: &str,
+    ) -> Result<LocalEntry, RenameInLibraryError> {
+        let i = self.index_of(platform, name)?;
+        let new_name = renamed_file_name(name, new);
+        if !is_valid_fat_name(&new_name) {
+            return Err(RenameInLibraryError::BadName);
+        }
+        if new_name == name {
+            return Err(RenameInLibraryError::SameName);
+        }
+        let (old_stem, new_stem) = (stem(name), stem(&new_name));
+        let lowercase = new_stem.to_lowercase();
+        let taken = |(j, e): (usize, &LocalEntry)| {
+            j != i && &e.game.platform == platform && e.stem().to_lowercase() == lowercase
+        };
+        if self.entries.iter().enumerate().any(taken) {
+            return Err(RenameInLibraryError::NameTaken);
+        }
+        let (from, to) = (
+            self.layout.rom(platform, name),
+            self.layout.rom(platform, &new_name),
+        );
+        let saves = self.layout.saves(platform, old_stem);
+        let new_saves = self.layout.saves(platform, new_stem);
+        // With only the case changed, what is at the new name on a file system
+        // that doesn't tell cases apart is the game's own.
+        if old_stem.to_lowercase() != lowercase {
+            if to.exists() {
+                return Err(RenameInLibraryError::NameTaken);
+            }
+            if new_saves.exists() || self.cover_path(platform, new_stem).is_some() {
+                return Err(RenameInLibraryError::LeftoversThere);
+            }
+        }
+        let mut renames = Vec::new();
+        if saves.exists() {
+            renames.push((saves, new_saves));
+        }
+        if let Some(cover) = &self.entries[i].cover_path {
+            let extension = cover.extension().unwrap_or_default().to_string_lossy();
+            let file = format!("{new_stem}.{extension}");
+            renames.push((cover.clone(), cover.with_file_name(file)));
+        }
+        renames.push((from.clone(), to.clone()));
+        safe_rename_all(&renames)?;
+        let cover_path = self.cover_path(platform, new_stem);
+        let mut entry = self.entries.remove(i);
+        entry.name = new_name;
+        entry.cover_path = cover_path;
+        self.cache.forget(&from);
+        self.cache.record_game(&to, &entry.game)?;
+        self.cache.save();
+        self.insert(entry.clone());
         Ok(entry)
     }
 
@@ -322,19 +408,21 @@ impl Library {
         from: &Path,
     ) -> Result<Option<Save>, BaseError> {
         let i = self.index_of(platform, name)?;
-        let modified = fs::metadata(from)
-            .and_then(|m| m.modified())
-            .map_err(io_at(from))?;
-        let bytes = fs::read(from).map_err(io_at(from))?;
-        let save = Save::of(&bytes, modified);
-        if self.entries[i].save.as_ref().is_some_and(|h| h.has(&save)) {
+        let modified = fs::metadata(from).and_then(|m| m.modified())?;
+        let bytes = fs::read(from)?;
+        let save = Save::from_bytes(&bytes, modified);
+        if self.entries[i]
+            .save
+            .as_ref()
+            .is_some_and(|h| h.contains(&save))
+        {
             return Ok(None);
         }
         let path = (1..)
             .map(|n| self.layout.save_version(platform, stem(name), &save, n))
             .find(|path| !path.exists())
             .expect("some name is free");
-        write(&path, &bytes, Some(modified))?;
+        write_atomically(&path, &bytes, Some(modified))?;
         let entry = &mut self.entries[i];
         let mut saves: Vec<Save> = entry.save.iter().flat_map(|h| h.iter().cloned()).collect();
         saves.push(save.clone());
@@ -344,7 +432,7 @@ impl Library {
 
     /// Leaves the game called `name` out of the entries and the cache, once
     /// its files are gone.
-    pub(crate) fn forget(&mut self, platform: &Platform, name: &str) {
+    pub(crate) fn forget_game(&mut self, platform: &Platform, name: &str) {
         self.cache.forget(&self.layout.rom(platform, name));
         self.cache.save();
         self.entries.retain(|e| !e.is_called(platform, name));
@@ -359,16 +447,20 @@ impl Library {
     ) -> Result<(), BaseError> {
         let i = self.index_of(platform, name)?;
         let path = self.layout.cover(platform, stem(name), cover.format());
-        write(&path, cover.bytes(), None)?;
+        write_atomically(&path, cover.bytes(), None)?;
         self.entries[i].cover_path = Some(path);
         Ok(())
     }
 
     /// The file of a version of `entry`'s save; none if it has no such
     /// version.
-    pub fn save_file(&self, entry: &LocalEntry, save: &Save) -> Result<Option<PathBuf>, BaseError> {
+    pub fn file_of_save(
+        &self,
+        entry: &LocalEntry,
+        save: &Save,
+    ) -> Result<Option<PathBuf>, BaseError> {
         Ok(self
-            .save_files(&entry.game.platform, entry.stem())?
+            .files_of_saves(&entry.game.platform, entry.stem())?
             .into_iter()
             .find(|(_, s)| s == save)
             .map(|(path, _)| path))
@@ -385,15 +477,15 @@ impl Library {
         let mut seen = HashSet::new();
         let mut entries = Vec::new();
         let roms = self.layout.roms();
-        for id in list(&roms).map_err(io_at(&roms))?.dirs {
+        for id in list_folder(&roms)?.dirs {
             let platform = Platform::from_id(&id);
             let dir = self.layout.platform_roms(&platform);
-            for name in list(&dir).map_err(io_at(&dir))?.files {
+            for name in list_folder(&dir)?.files {
                 let path = self.layout.rom(&platform, &name);
-                let game = self.cache.read(&platform, &path).map_err(io_at(&path))?;
+                let game = self.cache.read_game(&platform, &path)?;
                 seen.insert(path);
                 let cover_path = self.cover_path(&platform, stem(&name));
-                let save = self.saves(&platform, stem(&name))?;
+                let save = self.read_save_history(&platform, stem(&name))?;
                 entries.push(LocalEntry {
                     name,
                     game,
@@ -437,23 +529,30 @@ impl Library {
     }
 
     /// Every version of the game's save, newest first; none if it has none.
-    fn saves(&self, platform: &Platform, stem: &str) -> Result<Option<SaveHistory>, BaseError> {
-        let saves = self.save_files(platform, stem)?.into_iter().map(|(_, s)| s);
+    fn read_save_history(
+        &self,
+        platform: &Platform,
+        stem: &str,
+    ) -> Result<Option<SaveHistory>, BaseError> {
+        let saves = self
+            .files_of_saves(platform, stem)?
+            .into_iter()
+            .map(|(_, s)| s);
         Ok(SaveHistory::from_saves(saves.collect()))
     }
 
     /// The game's save files, each with what it holds.
-    fn save_files(
+    fn files_of_saves(
         &self,
         platform: &Platform,
         stem: &str,
     ) -> Result<Vec<(PathBuf, Save)>, BaseError> {
         let dir = self.layout.saves(platform, stem);
         let mut files = Vec::new();
-        for name in list(&dir).map_err(io_at(&dir))?.files {
+        for name in list_folder(&dir)?.files {
             if Path::new(&name).extension().is_some_and(|e| e == "sav") {
                 let path = dir.join(&name);
-                let save = Save::read(&path).map_err(io_at(&path))?;
+                let save = Save::read(&path)?;
                 files.push((path, save));
             }
         }
@@ -472,6 +571,172 @@ fn stem(name: &str) -> &str {
 mod tests {
     use super::*;
     use crate::files::testing::{at, put, put_at};
+
+    mod renaming {
+        use super::*;
+
+        /// A library with `Old.gba`, its cover, two versions of its save, and
+        /// `Other.gba`.
+        fn with_game() -> (tempfile::TempDir, Library) {
+            let (dir, mut library) = library();
+            let root = dir.path();
+            put_at(root, "roms/gba/Old.gba", b"old", 1_000);
+            put(root, "roms/gba/Other.gba", b"other");
+            put(root, "covers/gba/Old.png", b"cover");
+            put_at(root, "saves/gba/Old/a.sav", b"one", 1_000);
+            put_at(root, "saves/gba/Old/b.sav", b"two", 2_000);
+            library.reload().unwrap();
+            (dir, library)
+        }
+
+        fn rename(library: &mut Library, new: &str) -> Result<LocalEntry, RenameInLibraryError> {
+            library.rename_game(&Platform::Gba, "Old.gba", new)
+        }
+
+        fn names(library: &Library) -> Vec<&str> {
+            library.entries().iter().map(|e| e.name.as_str()).collect()
+        }
+
+        /// What is under the library's `roms`, `covers` and `saves`.
+        fn all_files(root: &Path) -> Vec<String> {
+            let mut files = Vec::new();
+            for folder in [
+                "roms/gba",
+                "covers/gba",
+                "saves/gba",
+                "saves/gba/Old",
+                "saves/gba/New",
+            ] {
+                for file in list_folder(&root.join(folder)).unwrap().files {
+                    files.push(format!("{folder}/{file}"));
+                }
+            }
+            files.sort();
+            files
+        }
+
+        #[test]
+        fn its_file_cover_and_saves_go_with_it() {
+            let (dir, mut library) = with_game();
+            let root = dir.path();
+            let entry = rename(&mut library, "New").unwrap();
+            assert_eq!(entry.name, "New.gba");
+            assert_eq!(entry.cover_path, Some(root.join("covers/gba/New.png")));
+            assert_eq!(entry.save.as_ref().unwrap().iter().count(), 2);
+            assert_eq!(
+                all_files(root),
+                [
+                    "covers/gba/New.png",
+                    "roms/gba/New.gba",
+                    "roms/gba/Other.gba",
+                    "saves/gba/New/a.sav",
+                    "saves/gba/New/b.sav",
+                ]
+            );
+            assert_eq!(fs::read(root.join("roms/gba/New.gba")).unwrap(), b"old");
+            let save = fs::metadata(root.join("saves/gba/New/a.sav")).unwrap();
+            assert_eq!(save.modified().unwrap(), at(1_000));
+        }
+
+        #[test]
+        fn reading_the_folder_again_finds_the_same() {
+            let (_dir, mut library) = with_game();
+            let entry = rename(&mut library, "New").unwrap();
+            library.reload().unwrap();
+            assert_eq!(library.entry_named(&Platform::Gba, "New.gba"), Some(&entry));
+            assert_eq!(library.entry_named(&Platform::Gba, "Old.gba"), None);
+        }
+
+        #[test]
+        fn a_game_with_no_cover_or_saves_is_renamed_too() {
+            let (dir, mut library) = library();
+            put(dir.path(), "roms/gba/Old.gba", b"old");
+            library.reload().unwrap();
+            let entry = rename(&mut library, "New").unwrap();
+            assert_eq!((entry.cover_path, entry.save), (None, None));
+            assert!(dir.path().join("roms/gba/New.gba").exists());
+        }
+
+        #[test]
+        fn the_entries_stay_in_order() {
+            let (_dir, mut library) = with_game();
+            rename(&mut library, "Zzz").unwrap();
+            assert_eq!(names(&library), ["Other.gba", "Zzz.gba"]);
+            library
+                .rename_game(&Platform::Gba, "Zzz.gba", "Aaa")
+                .unwrap();
+            assert_eq!(names(&library), ["Aaa.gba", "Other.gba"]);
+        }
+
+        #[test]
+        fn its_contents_are_not_read_again() {
+            let (dir, mut library) = with_game();
+            let before = library.entries()[0].game.clone();
+            rename(&mut library, "New").unwrap();
+            // Same size and time, other contents: the cache answers.
+            put_at(dir.path(), "roms/gba/New.gba", b"new", 1_000);
+            library.reload().unwrap();
+            assert_eq!(library.entries()[0].game, before);
+        }
+
+        #[test]
+        fn only_the_case_can_change() {
+            let (dir, mut library) = with_game();
+            let entry = rename(&mut library, "OLD").unwrap();
+            assert_eq!(entry.name, "OLD.gba");
+            assert_eq!(entry.save.unwrap().iter().count(), 2);
+            let names = list_folder(&dir.path().join("roms/gba")).unwrap().files;
+            assert!(names.contains(&"OLD.gba".to_string()), "{names:?}");
+        }
+
+        #[test]
+        fn nothing_moves_when_it_is_refused() {
+            for (new, leftover, refused) in [
+                ("../x", None, "bad"),
+                ("", None, "bad"),
+                (".hidden", None, "bad"),
+                ("a:b", None, "bad"),
+                ("Old", None, "same"),
+                ("Other", None, "taken"),
+                ("other", None, "taken"),
+                ("New", Some("saves/gba/New/x.sav"), "leftovers"),
+                ("New", Some("covers/gba/New.jpg"), "leftovers"),
+            ] {
+                let (dir, mut library) = with_game();
+                if let Some(leftover) = leftover {
+                    put(dir.path(), leftover, b"not its own");
+                }
+                let before = all_files(dir.path());
+                let done = rename(&mut library, new);
+                let kind = match done {
+                    Err(RenameInLibraryError::BadName) => "bad",
+                    Err(RenameInLibraryError::SameName) => "same",
+                    Err(RenameInLibraryError::NameTaken) => "taken",
+                    Err(RenameInLibraryError::LeftoversThere) => "leftovers",
+                    other => panic!("{new}: {other:?}"),
+                };
+                assert_eq!(kind, refused, "{new}");
+                assert_eq!(all_files(dir.path()), before, "{new}");
+                assert_eq!(names(&library), ["Old.gba", "Other.gba"]);
+            }
+        }
+
+        #[test]
+        fn a_failure_on_the_way_puts_everything_back() {
+            let (dir, mut library) = with_game();
+            let root = dir.path();
+            // With its extension, too long to be a file's name: its save folder,
+            // with none, is renamed before its cover can't be.
+            let new = "x".repeat(252);
+            let before = all_files(root);
+            assert!(matches!(
+                rename(&mut library, &new),
+                Err(RenameInLibraryError::Other(_))
+            ));
+            assert_eq!(all_files(root), before);
+            assert_eq!(library.entries()[0].name, "Old.gba");
+        }
+    }
     use crate::game::{Files, Rom};
 
     /// An empty library; tests put files in it and then reload.
@@ -595,7 +860,7 @@ mod tests {
             let file = put_at(library.root(), path, b"hello", 1_000_000);
             library.reload().unwrap();
             fs::remove_file(&file).unwrap();
-            library.forget(&Platform::Gba, "Tetris.gba");
+            library.forget_game(&Platform::Gba, "Tetris.gba");
             assert_eq!(library.entries(), []);
             // The same size and time as the file removed.
             put_at(library.root(), path, b"jello", 1_000_000);
@@ -796,15 +1061,15 @@ mod tests {
             let save = add_save(&mut library, b"save", 1_000).unwrap().unwrap();
             let entry = &library.entries()[0];
             assert_eq!(
-                library.save_file(entry, &save).unwrap(),
+                library.file_of_save(entry, &save).unwrap(),
                 Some(
                     library
                         .root()
                         .join("saves/gba/Tetris/1970-01-01T00-16-40.sav")
                 )
             );
-            let other = Save::of(b"other", at(0));
-            assert_eq!(library.save_file(entry, &other).unwrap(), None);
+            let other = Save::from_bytes(b"other", at(0));
+            assert_eq!(library.file_of_save(entry, &other).unwrap(), None);
         }
     }
 
@@ -857,7 +1122,7 @@ mod tests {
             put(library.root(), "saves/gba/Tetris/notes.txt", b"x");
             library.reload().unwrap();
             let entry = library.entries()[0].clone();
-            assert_eq!(library.all_save_files(&entry).unwrap(), [new, old]);
+            assert_eq!(library.files_of_all_saves(&entry).unwrap(), [new, old]);
         }
 
         #[test]
@@ -902,7 +1167,7 @@ mod tests {
             let new = put_at(library.root(), "saves/gba/Gone/new.sav", b"b", 2_000);
             library.reload().unwrap();
             let orphan = library.orphan_saves().unwrap().remove(0);
-            assert_eq!(library.orphan_save_files(&orphan).unwrap(), [new, old]);
+            assert_eq!(library.files_of_orphan_save(&orphan).unwrap(), [new, old]);
         }
 
         #[test]
@@ -914,7 +1179,7 @@ mod tests {
             put(library.root(), "roms/gba/Gone.gba", b"hello");
             library.reload().unwrap();
             assert_eq!(
-                library.orphan_save_files(&orphan).unwrap(),
+                library.files_of_orphan_save(&orphan).unwrap(),
                 Vec::<PathBuf>::new()
             );
         }

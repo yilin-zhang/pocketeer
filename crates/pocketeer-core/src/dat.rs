@@ -3,17 +3,18 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    fs, io,
+    io,
     iter::Peekable,
     path::{Path, PathBuf},
     vec,
 };
 
+use fs_err as fs;
 use strum::IntoEnumIterator;
 
 use crate::{
-    error::{BaseError, io_at},
-    files::write,
+    error::BaseError,
+    files::write_atomically,
     game::{Files, Game, Rom},
     platform::Platform,
 };
@@ -43,14 +44,14 @@ impl Dat {
     /// No-Intro write.
     pub fn parse_clrmamepro(text: &str) -> Result<Self, ParseError> {
         let mut tokens = tokenize(text)?.into_iter().peekable();
-        let blocks = block(&mut tokens, 0)?;
+        let blocks = parse_block(&mut tokens, 0)?;
         if tokens.next().is_some() {
             return Err(ParseError("unexpected `)`".into()));
         }
         let mut entries = Vec::new();
         for (key, value) in &blocks {
             if let ("game", Value::Block(game)) = (key.as_str(), value) {
-                entries.push(entry(game)?);
+                entries.push(parse_entry(game)?);
             }
         }
         if entries.is_empty() {
@@ -133,7 +134,7 @@ impl<S: RemoteDatSource> DatMirror<S> {
                 let text = match fs::read_to_string(&path) {
                     Ok(text) => text,
                     Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                    Err(source) => return Err(io_at(&path)(source)),
+                    Err(e) => return Err(e.into()),
                 };
                 if let Ok(dat) = mirror.source.parse(&text) {
                     mirror.dats.insert(name, dat);
@@ -174,7 +175,7 @@ impl<S: RemoteDatSource> DatMirror<S> {
                 })?;
                 // The DAT first, then its version: stopped in between, the
                 // next sync downloads it again.
-                write(&self.dat_path(name), text.as_bytes(), None)?;
+                write_atomically(&self.dat_path(name), text.as_bytes(), None)?;
                 versions.insert(name.to_string(), version.clone());
                 self.write_versions(&versions)?;
                 self.dats.insert(name, dat);
@@ -218,13 +219,13 @@ impl<S: RemoteDatSource> DatMirror<S> {
         match fs::read_to_string(&path) {
             Ok(text) => Ok(serde_json::from_str(&text).unwrap_or_default()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(BTreeMap::new()),
-            Err(source) => Err(io_at(&path)(source)),
+            Err(e) => Err(e.into()),
         }
     }
 
     fn write_versions(&self, versions: &BTreeMap<String, String>) -> Result<(), BaseError> {
         let json = serde_json::to_string_pretty(versions).expect("a map of strings serializes");
-        write(&self.versions_path(), json.as_bytes(), None)
+        write_atomically(&self.versions_path(), json.as_bytes(), None)
     }
 }
 
@@ -283,7 +284,7 @@ fn tokenize(text: &str) -> Result<Vec<Token>, ParseError> {
 
 /// `key value` and `key ( ... )` pairs up to the `)` that closes this block
 /// (or the end, at the top).
-fn block(
+fn parse_block(
     tokens: &mut Peekable<vec::IntoIter<Token>>,
     depth: usize,
 ) -> Result<Vec<(String, Value)>, ParseError> {
@@ -302,7 +303,7 @@ fn block(
         };
         let value = match tokens.next() {
             Some(Token::Word(value)) => Value::Word(value),
-            Some(Token::Open) => Value::Block(block(tokens, depth + 1)?),
+            Some(Token::Open) => Value::Block(parse_block(tokens, depth + 1)?),
             Some(Token::Close) | None => {
                 return Err(ParseError(format!("`{key}` has no value")));
             }
@@ -311,15 +312,15 @@ fn block(
     }
 }
 
-fn word<'a>(pairs: &'a [(String, Value)], key: &str) -> Option<&'a str> {
+fn word_value<'a>(pairs: &'a [(String, Value)], key: &str) -> Option<&'a str> {
     pairs.iter().find_map(|(k, v)| match v {
         Value::Word(w) if k == key => Some(w.as_str()),
         _ => None,
     })
 }
 
-fn entry(pairs: &[(String, Value)]) -> Result<DatEntry, ParseError> {
-    let name = word(pairs, "name").ok_or_else(|| ParseError("a game has no name".into()))?;
+fn parse_entry(pairs: &[(String, Value)]) -> Result<DatEntry, ParseError> {
+    let name = word_value(pairs, "name").ok_or_else(|| ParseError("a game has no name".into()))?;
     let name = name.to_string();
     let roms = pairs
         .iter()
@@ -329,7 +330,7 @@ fn entry(pairs: &[(String, Value)]) -> Result<DatEntry, ParseError> {
         })
         // A ROM without a size or crc (one nobody has dumped) can't be
         // matched, so it is left out.
-        .filter_map(|rom| Some((word(rom, "size")?, word(rom, "crc")?)))
+        .filter_map(|rom| Some((word_value(rom, "size")?, word_value(rom, "crc")?)))
         .map(|(size, crc)| {
             let bad = |what: &str| ParseError(format!("{name}: bad {what} `{size}`/`{crc}`"));
             Ok(Rom {

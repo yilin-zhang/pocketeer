@@ -9,6 +9,7 @@ authors.workspace = true
 
 [dependencies]
 crc32fast.workspace = true
+fs-err.workspace = true
 image.workspace = true
 jiff.workspace = true
 serde.workspace = true
