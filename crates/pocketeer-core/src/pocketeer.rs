@@ -18,7 +18,7 @@ use crate::{
         DeleteSaveError, Device, DeviceEntry, OrphanDeviceSave, RenameOnDeviceError, ScanReport,
     },
     error::{BaseError, trash_failed},
-    files::files_under,
+    files::list_files_recursive,
     game::{Game, Save},
     library::{AddGameError, Library, LocalEntry, OrphanLocalSave, RenameInLibraryError},
     log::{FrontEnd, LogEntry, LogEvent, Logger},
@@ -831,9 +831,9 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         )
     }
 
-    /// The files to import for `paths`: a file stands for itself, and a folder
-    /// for every file under it whose extension tells its platform.
-    pub fn files_to_import(&self, paths: &[PathBuf]) -> Result<Vec<PathBuf>, BaseError> {
+    /// `paths` with each folder replaced by every file under it whose extension
+    /// tells its platform; a file stays as it is.
+    pub fn expand_import_paths(&self, paths: &[PathBuf]) -> Result<Vec<PathBuf>, BaseError> {
         let tells_platform = |file: &PathBuf| {
             let extension = file.extension().and_then(|e| e.to_str());
             extension.and_then(Platform::from_extension).is_some()
@@ -841,7 +841,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         let mut files = Vec::new();
         for path in paths {
             if path.is_dir() {
-                let under = files_under(path)?;
+                let under = list_files_recursive(path)?;
                 let games = under.into_iter().filter(tells_platform);
                 files.extend(games.map(|file| path.join(file)));
             } else {
@@ -1682,7 +1682,7 @@ mod tests {
             let lone = put(apart.path(), "lone.txt", b"lone");
             let paths = [dir.path().to_path_buf(), lone.clone()];
             assert_eq!(
-                s.pocketeer.files_to_import(&paths).unwrap(),
+                s.pocketeer.expand_import_paths(&paths).unwrap(),
                 [game, deep, lone]
             );
         }

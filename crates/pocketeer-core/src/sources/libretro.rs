@@ -121,8 +121,8 @@ impl RemoteCoverSource for Libretro {
     /// One request to GitHub's API, for the folder at `version`.
     fn names(&self, system: &str, version: &str) -> Result<Vec<String>, BaseError> {
         let url = format!("{COVER_TREES}/{}/git/trees/{version}", repository(system));
-        let folder: Tree = get_json(&url)?;
-        Ok(folder
+        let dir: Tree = get_json(&url)?;
+        Ok(dir
             .tree
             .into_iter()
             .filter_map(|e| Some(e.path.strip_suffix(".png")?.to_string()))

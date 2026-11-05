@@ -12,7 +12,7 @@ use image::ImageFormat;
 use crate::{
     cover::{COVER_FORMATS, Cover},
     error::BaseError,
-    files::{Cache, copy_atomically, list_folder, safe_rename_all, write_atomically},
+    files::{Cache, copy_atomically, list_dir, safe_rename_all, write_atomically},
     game::{Game, Save, SaveHistory, is_valid_fat_name, is_valid_file_name, renamed_file_name},
     platform::Platform,
 };
@@ -242,10 +242,10 @@ impl Library {
     pub fn orphan_saves(&self) -> Result<Vec<OrphanLocalSave>, BaseError> {
         let all = self.layout.all_saves();
         let mut orphans = Vec::new();
-        for id in list_folder(&all)?.dirs {
+        for id in list_dir(&all)?.dirs {
             let platform = Platform::from_id(&id);
-            let folder = self.layout.platform_saves(&platform);
-            for name in list_folder(&folder)?.dirs {
+            let dir = self.layout.platform_saves(&platform);
+            for name in list_dir(&dir)?.dirs {
                 let has_game = |e: &LocalEntry| e.game.platform == platform && e.stem() == name;
                 if self.entries.iter().any(has_game) {
                     continue;
@@ -477,10 +477,10 @@ impl Library {
         let mut seen = HashSet::new();
         let mut entries = Vec::new();
         let roms = self.layout.roms();
-        for id in list_folder(&roms)?.dirs {
+        for id in list_dir(&roms)?.dirs {
             let platform = Platform::from_id(&id);
             let dir = self.layout.platform_roms(&platform);
-            for name in list_folder(&dir)?.files {
+            for name in list_dir(&dir)?.files {
                 let path = self.layout.rom(&platform, &name);
                 let game = self.cache.read_game(&platform, &path)?;
                 seen.insert(path);
@@ -549,7 +549,7 @@ impl Library {
     ) -> Result<Vec<(PathBuf, Save)>, BaseError> {
         let dir = self.layout.saves(platform, stem);
         let mut files = Vec::new();
-        for name in list_folder(&dir)?.files {
+        for name in list_dir(&dir)?.files {
             if Path::new(&name).extension().is_some_and(|e| e == "sav") {
                 let path = dir.join(&name);
                 let save = Save::read(&path)?;
@@ -600,15 +600,15 @@ mod tests {
         /// What is under the library's `roms`, `covers` and `saves`.
         fn all_files(root: &Path) -> Vec<String> {
             let mut files = Vec::new();
-            for folder in [
+            for dir in [
                 "roms/gba",
                 "covers/gba",
                 "saves/gba",
                 "saves/gba/Old",
                 "saves/gba/New",
             ] {
-                for file in list_folder(&root.join(folder)).unwrap().files {
-                    files.push(format!("{folder}/{file}"));
+                for file in list_dir(&root.join(dir)).unwrap().files {
+                    files.push(format!("{dir}/{file}"));
                 }
             }
             files.sort();
@@ -685,7 +685,7 @@ mod tests {
             let entry = rename(&mut library, "OLD").unwrap();
             assert_eq!(entry.name, "OLD.gba");
             assert_eq!(entry.save.unwrap().iter().count(), 2);
-            let names = list_folder(&dir.path().join("roms/gba")).unwrap().files;
+            let names = list_dir(&dir.path().join("roms/gba")).unwrap().files;
             assert!(names.contains(&"OLD.gba".to_string()), "{names:?}");
         }
 

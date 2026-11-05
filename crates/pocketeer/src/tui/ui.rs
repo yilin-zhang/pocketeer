@@ -25,7 +25,10 @@ use ratatui_image::{StatefulImage, protocol::StatefulProtocol};
 use strum::IntoEnumIterator;
 
 use super::{
-    app::{App, Importing, Message, Page, Renaming, name_of},
+    app::{
+        App, DeviceStatus, ImportPrompt, ImportTarget, Page, PlatformPrompt, Prompt, RenamePrompt,
+        RenameTarget, StatusMessage, name_of,
+    },
     covers::{self, Cover},
     path_input::{PathEntry, PathInput},
     worker::Row,
@@ -180,13 +183,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(frame.area());
     draw_header(frame, app, header);
-    if app.page() == Page::Cores {
+    if app.current_page() == Page::Cores {
         draw_cores_status(frame, app, search);
         draw_cores(frame, app, body);
-    } else if app.page() == Page::Bios {
+    } else if app.current_page() == Page::Bios {
         draw_bios_status(frame, app, search);
         draw_bios(frame, app, body);
-    } else if !app.is_loaded() {
+    } else if !app.games.is_loaded() {
         draw_search(frame, app, search);
         frame.render_widget(
             Paragraph::new(
@@ -199,14 +202,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_body(frame, app, body);
     }
     draw_footer(frame, app, footer);
-    if app.import().is_some() {
-        draw_import(frame, app);
-    }
-    if app.platform_choice().is_some() {
-        draw_platform_choice(frame, app);
-    }
-    if app.rename().is_some() {
-        draw_rename(frame, app);
+    match app.prompt() {
+        Some(Prompt::Import(import)) => draw_import(frame, import),
+        Some(Prompt::Platform(choice)) => draw_platform_prompt(frame, choice),
+        Some(Prompt::Rename(rename)) => draw_rename(frame, rename),
+        None => {}
     }
     if app.dialog().is_some() {
         draw_dialog(frame, app);
@@ -216,7 +216,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let tab = |key: &str, name: &str, page: Page| {
         let text = format!("   {key} {name}");
-        if app.page() == page {
+        if app.current_page() == page {
             Palette::Ink.span(text)
         } else {
             Palette::Faint.span(text)
@@ -237,14 +237,14 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         let name = root.file_name().unwrap_or(root.as_os_str());
         name.to_string_lossy().into_owned()
     };
-    let device = match (app.reading_device(), app.device_root()) {
-        (Some(root), _) => {
+    let device = match app.device_status() {
+        DeviceStatus::Reading(root) => {
             Palette::Muted.span(format!("{} reading {}…", spinner_frame(), name_of(root)))
         }
-        (None, Some(root)) => Palette::Ink.span(format!("● {}", name_of(root))),
-        (None, None) => Palette::Faint.span("○ no device"),
+        DeviceStatus::Open(root) => Palette::Ink.span(format!("● {}", name_of(root))),
+        DeviceStatus::NoDevice => Palette::Faint.span("○ no device"),
     };
-    let (games, orphans) = app.game_and_orphan_counts();
+    let (games, orphans) = app.games.game_and_orphan_counts();
     let mut chips = vec![device, Palette::Faint.span("  ·  ")];
     chips.push(Palette::Muted.span(format!("{games} games")));
     if orphans > 0 {
@@ -273,17 +273,17 @@ fn typed_spans(before: String, after: &str) -> [Span<'static>; 3] {
 }
 
 fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
-    let mut line = if app.is_typing() {
-        let (before, after) = app.query_around_cursor();
+    let mut line = if app.games.is_searching() {
+        let (before, after) = app.games.search_text_around_cursor();
         let mut line = Line::from(Palette::Ink.span(" / "));
         line.extend(typed_spans(before, &after));
         line
-    } else if app.query().is_empty() {
+    } else if app.games.search_text().is_empty() {
         Line::from(Palette::Faint.span(" / search"))
     } else {
-        Line::from(Palette::Ink.span(format!(" / {}", app.query())))
+        Line::from(Palette::Ink.span(format!(" / {}", app.games.search_text())))
     };
-    line.push_span(Palette::Faint.span(format!("   {}", app.visible_len())));
+    line.push_span(Palette::Faint.span(format!("   {}", app.games.visible_len())));
     frame.render_widget(Paragraph::new(line), area);
 }
 
@@ -314,11 +314,11 @@ fn page_table<'a>(
 
 /// How many updates there are, or why the inventory can't be had.
 fn draw_cores_status(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(cores) = app.cores() else {
+    let Some(cores) = app.cores.core_list() else {
         return;
     };
     let updates = cores.rows.iter().filter(|r| r.has_update()).count();
-    let line = match (&cores.failure, updates) {
+    let line = match (&cores.inventory_failure, updates) {
         (Some(failure), _) => {
             Palette::Warn.span(format!(" couldn't get the cores to install: {failure}"))
         }
@@ -330,7 +330,7 @@ fn draw_cores_status(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
-    let Some(cores) = app.cores() else {
+    let Some(cores) = app.cores.core_list() else {
         let reading = Palette::Muted.span(" reading the cores…");
         frame.render_widget(Paragraph::new(reading).block(panel_block("CORES")), area);
         return;
@@ -347,7 +347,7 @@ fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(10),
         ],
     );
-    frame.render_stateful_widget(table, area, &mut app.cores_table);
+    frame.render_stateful_widget(table, area, &mut app.cores.table_state);
 }
 
 fn core_table_row(row: &CoreRow) -> TableRow<'static> {
@@ -374,7 +374,7 @@ fn core_table_row(row: &CoreRow) -> TableRow<'static> {
 
 /// How many files aren't right: in red if a core can't run because of them.
 fn draw_bios_status(frame: &mut Frame, app: &App, area: Rect) {
-    let rows = app.bios();
+    let rows = app.bios.rows();
     let missing = |r: &&BiosRow| r.status == BiosStatus::Missing;
     let is_wrong = |r: &&BiosRow| matches!(r.status, BiosStatus::WrongSize { .. });
     let wrong = rows.iter().filter(is_wrong).count();
@@ -397,8 +397,8 @@ fn draw_bios_status(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_bios(frame: &mut Frame, app: &mut App, area: Rect) {
-    let rows: Vec<TableRow> = app.bios().iter().map(bios_table_row).collect();
-    let files = app.bios().iter().map(|r| r.path.display().to_string());
+    let rows: Vec<TableRow> = app.bios.rows().iter().map(bios_table_row).collect();
+    let files = app.bios.rows().iter().map(|r| r.path.display().to_string());
     let table = page_table(
         "BIOS",
         ["PLATFORM", "FILE", "STATUS", "NEEDED BY"],
@@ -410,7 +410,7 @@ fn draw_bios(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Min(16),
         ],
     );
-    frame.render_stateful_widget(table, area, &mut app.bios_table);
+    frame.render_stateful_widget(table, area, &mut app.bios.table_state);
 }
 
 fn bios_table_row(row: &BiosRow) -> TableRow<'static> {
@@ -437,7 +437,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
     draw_table(frame, app, left);
-    match app.selected_version() {
+    match app.games.selected_version() {
         Some(selected) => draw_saves(frame, app, right, selected),
         None => {
             let [cover, details] =
@@ -452,6 +452,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
 fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let compact = area.width < 60;
     let rows: Vec<TableRow> = app
+        .games
         .visible_rows()
         .map(|r| game_table_row(app, r, compact))
         .collect();
@@ -469,18 +470,20 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             rows,
             vec![
                 Constraint::Length(9),
-                names_column_width("GAME", app.rows().iter().map(name_of)),
+                names_column_width("GAME", app.games.rows().iter().map(name_of)),
                 Constraint::Length(12),
                 Constraint::Length(3),
                 Constraint::Length(4),
             ],
         )
     };
-    let table = match app.selected_row() {
-        Some(row) if app.is_marked(row) => table.row_highlight_style(selected_and_marked_style()),
+    let table = match app.games.selected_row() {
+        Some(row) if app.games.is_marked(row) => {
+            table.row_highlight_style(selected_and_marked_style())
+        }
         _ => table,
     };
-    frame.render_stateful_widget(table, area, &mut app.table);
+    frame.render_stateful_widget(table, area, &mut app.games.table_state);
 }
 
 /// A column's only symbol, in the middle of it.
@@ -536,7 +539,7 @@ fn game_table_row(app: &App, row: &Row, compact: bool) -> TableRow<'static> {
         cells.truncate(2);
     }
     let marked = Style::new().bg(Palette::Rule.color());
-    let style = match (row, app.is_marked(row)) {
+    let style = match (row, app.games.is_marked(row)) {
         (Row::Game { .. }, false) => Style::new(),
         (Row::Game { .. }, true) => marked,
         // Grey all over: they are saves with no game.
@@ -548,14 +551,14 @@ fn game_table_row(app: &App, row: &Row, compact: bool) -> TableRow<'static> {
 }
 
 fn draw_cover(frame: &mut Frame, app: &mut App, area: Rect) {
-    let local = app.selected_row().and_then(Row::local_entry);
+    let local = app.games.selected_row().and_then(Row::local_entry);
     let path = local.and_then(|l| l.cover_path.clone());
-    let around = app.covers_around();
+    let around = app.games.covers_around();
     let block = panel_block("COVER");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(path) = path else {
-        let what = match app.selected_row() {
+        let what = match app.games.selected_row() {
             Some(Row::Game {
                 row: GameRow::OnDevice(_),
                 ..
@@ -610,7 +613,7 @@ fn draw_cover_placeholder(frame: &mut Frame, area: Rect, what: &str) {
 
 fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines = Vec::new();
-    match app.selected_row() {
+    match app.games.selected_row() {
         Some(Row::Game {
             row, standard_name, ..
         }) => {
@@ -671,10 +674,10 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize) {
-    let versions = app.selected_save_versions();
-    let on_device = app.selected_row().and_then(Row::device_entry);
+    let versions = app.games.selected_save_versions();
+    let on_device = app.games.selected_row().and_then(Row::device_entry);
     let on_device = on_device.and_then(|d| d.save.clone());
-    let block = panel_block(match app.selected_row() {
+    let block = panel_block(match app.games.selected_row() {
         Some(row) => format!("SAVES OF {}", name_of(row)),
         None => "SAVES".to_string(),
     });
@@ -751,29 +754,39 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize)
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let [status, keys] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
-    let mut line = match (app.job(), app.message()) {
+    let mut line = match (app.job_status(), app.status_message()) {
         (Some(job), _) => {
-            let progress = match job.total {
+            let progress = match job.total_count {
                 0 | 1 => String::new(),
-                total => format!("  {}/{total}", job.done),
+                total => format!("  {}/{total}", job.done_count),
             };
-            let game = job.game.clone().unwrap_or_default();
-            let stop = if job.cancelling { "  stopping…" } else { "" };
+            let game = job.last_game.clone().unwrap_or_default();
+            let stop = if job.is_cancelling {
+                "  stopping…"
+            } else {
+                ""
+            };
             Line::from(Palette::Ink.span(format!(
                 " {} {}{progress}  {game}{stop}",
                 spinner_frame(),
-                job.label
+                job.description
             )))
         }
-        (None, Some(Message { text, failed: true })) => Line::from(vec![
+        (
+            None,
+            Some(StatusMessage {
+                text,
+                is_failure: true,
+            }),
+        ) => Line::from(vec![
             Palette::Bad.span(" › "),
             Palette::Bad.span(text.clone()),
         ]),
         (
             None,
-            Some(Message {
+            Some(StatusMessage {
                 text,
-                failed: false,
+                is_failure: false,
             }),
         ) => Line::from(vec![
             Palette::Faint.span(" › "),
@@ -781,8 +794,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         (None, None) => Line::default(),
     };
-    if app.marked_count() > 0 {
-        line.push_span(Palette::Warn.span(format!("   {} marked", app.marked_count())));
+    if app.games.marked_count() > 0 {
+        line.push_span(Palette::Warn.span(format!("   {} marked", app.games.marked_count())));
     }
     frame.render_widget(Paragraph::new(line), status);
     frame.render_widget(
@@ -795,34 +808,35 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 /// and their tints form runs: open or back, library, device, covers, remove,
 /// then search, help and quit. Keep new keys in this order.
 fn legend(app: &App) -> Vec<(&'static str, &'static str)> {
-    if app.is_typing() {
+    if app.games.is_searching() {
         return vec![("Enter", "done"), ("Esc", "clear")];
     }
-    if let Some(import) = app.import() {
-        let enter = match import.importing {
-            Importing::Bios(_) => "put on the device",
-            _ => "import",
-        };
-        return vec![
-            ("Enter", enter),
-            ("Esc", "cancel"),
-            ("Tab", "complete"),
-            ("↑↓", "pick"),
-        ];
+    match app.prompt() {
+        Some(Prompt::Import(import)) => {
+            let enter = match import.target {
+                ImportTarget::Bios(_) => "put on the device",
+                _ => "import",
+            };
+            return vec![
+                ("Enter", enter),
+                ("Esc", "cancel"),
+                ("Tab", "complete"),
+                ("↑↓", "pick"),
+            ];
+        }
+        Some(Prompt::Platform(_)) => {
+            return vec![("Enter", "import"), ("Esc", "cancel"), ("↑↓", "pick")];
+        }
+        Some(Prompt::Rename(_)) => return vec![("Enter", "rename"), ("Esc", "cancel")],
+        None => {}
     }
-    if app.platform_choice().is_some() {
-        return vec![("Enter", "import"), ("Esc", "cancel"), ("↑↓", "pick")];
-    }
-    if app.rename().is_some() {
-        return vec![("Enter", "rename"), ("Esc", "cancel")];
-    }
-    if app.page() == Page::Cores {
+    if app.current_page() == Page::Cores {
         return cores_legend(app);
     }
-    if app.page() == Page::Bios {
+    if app.current_page() == Page::Bios {
         return bios_legend(app);
     }
-    if app.selected_version().is_some() {
+    if app.games.selected_version().is_some() {
         return vec![
             ("Esc", "back"),
             ("b", "back up"),
@@ -835,10 +849,10 @@ fn legend(app: &App) -> Vec<(&'static str, &'static str)> {
         ];
     }
     let mut keys = Vec::new();
-    if app.job().is_some() {
+    if app.job_status().is_some() {
         keys.push(("Esc", "stop"));
     }
-    if let Some(Row::Game { row, .. }) = app.selected_row() {
+    if let Some(Row::Game { row, .. }) = app.games.selected_row() {
         let (local, on_device) = (row.local_entry(), row.device_entry());
         keys.push(("Enter", "saves"));
         if on_device.is_some() {
@@ -864,7 +878,7 @@ fn legend(app: &App) -> Vec<(&'static str, &'static str)> {
             keys.push(("X", "delete on device"));
         }
     }
-    match app.selected_row() {
+    match app.games.selected_row() {
         Some(Row::Game { .. }) => {}
         Some(Row::OrphanInLibrary(_)) => keys.extend([("I", "import"), ("x", "trash")]),
         Some(Row::OrphanOnDevice(_)) => keys.extend([("I", "import"), ("X", "delete on device")]),
@@ -881,19 +895,23 @@ fn legend(app: &App) -> Vec<(&'static str, &'static str)> {
 /// What the keys do on the Cores page, in the same order as [`legend`].
 fn cores_legend(app: &App) -> Vec<(&'static str, &'static str)> {
     let mut keys = Vec::new();
-    if app.job().is_some() {
+    if app.job_status().is_some() {
         keys.push(("Esc", "stop"));
     }
-    match app.selected_core() {
+    match app.cores.selected_row() {
         Some(CoreRow::Available(_)) => keys.push(("u", "install")),
         Some(row) if row.has_update() => keys.push(("u", "update")),
         _ => {}
     }
-    let rows = app.cores().map_or(&[][..], |c| &c.rows);
+    let rows = app.cores.core_list().map_or(&[][..], |c| &c.rows);
     if rows.iter().any(CoreRow::has_update) {
         keys.push(("U", "update all"));
     }
-    if app.selected_core().is_some_and(|r| r.installed().is_some()) {
+    if app
+        .cores
+        .selected_row()
+        .is_some_and(|r| r.installed().is_some())
+    {
         keys.push(("x", "delete on device"));
     }
     keys.push(("Tab", "BIOS"));
@@ -905,11 +923,12 @@ fn cores_legend(app: &App) -> Vec<(&'static str, &'static str)> {
 /// What the keys do on the BIOS page, in the same order as [`legend`].
 fn bios_legend(app: &App) -> Vec<(&'static str, &'static str)> {
     let mut keys = Vec::new();
-    if app.job().is_some() {
+    if app.job_status().is_some() {
         keys.push(("Esc", "stop"));
     }
     if app
-        .selected_bios()
+        .bios
+        .selected_row()
         .is_some_and(|r| r.status == BiosStatus::Missing)
     {
         keys.push(("I", "put a file"));
@@ -994,14 +1013,11 @@ fn import_buttons(action: &str) -> Paragraph<'static> {
     ]))
 }
 
-fn draw_import(frame: &mut Frame, app: &App) {
-    let Some(import) = app.import() else {
-        return;
-    };
-    let (title, action) = match &import.importing {
-        Importing::Game => ("Import a game or a folder".to_string(), "Import"),
-        Importing::Save(local) => (format!("Import a save for {}", local.name), "Import"),
-        Importing::Bios(row) => {
+fn draw_import(frame: &mut Frame, import: &ImportPrompt) {
+    let (title, action) = match &import.target {
+        ImportTarget::Game => ("Import a game or a folder".to_string(), "Import"),
+        ImportTarget::Save(local) => (format!("Import a save for {}", local.name), "Import"),
+        ImportTarget::Bios(row) => {
             let name = row.path.file_name().unwrap_or_default().to_string_lossy();
             (format!("Your {name}, to put on the device"), "Put")
         }
@@ -1021,13 +1037,10 @@ fn draw_import(frame: &mut Frame, app: &App) {
     frame.render_widget(import_buttons(action), buttons);
 }
 
-fn draw_rename(frame: &mut Frame, app: &App) {
-    let Some(rename) = app.rename() else {
-        return;
-    };
-    let (title, note) = match &rename.renaming {
-        Renaming::InLibrary(_) => ("Rename in the library", None),
-        Renaming::OnDevice(_) => (
+fn draw_rename(frame: &mut Frame, rename: &RenamePrompt) {
+    let (title, note) = match &rename.target {
+        RenameTarget::InLibrary(_) => ("Rename in the library", None),
+        RenameTarget::OnDevice(_) => (
             "Rename on the device",
             Some(" The Pocket's recent games and a game put to sleep keep the old name."),
         ),
@@ -1053,12 +1066,9 @@ fn draw_rename(frame: &mut Frame, app: &App) {
     frame.render_widget(import_buttons("Rename"), buttons);
 }
 
-fn draw_platform_choice(frame: &mut Frame, app: &App) {
-    let Some(choice) = app.platform_choice() else {
-        return;
-    };
+fn draw_platform_prompt(frame: &mut Frame, choice: &PlatformPrompt) {
     let name = choice
-        .file
+        .file_to_import
         .file_name()
         .unwrap_or_default()
         .to_string_lossy();
@@ -1068,13 +1078,13 @@ fn draw_platform_choice(frame: &mut Frame, app: &App) {
     let [list, buttons] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
     // Keeps the one selected in view when the window is cut short.
-    let first = (choice.selected + 1).saturating_sub(list.height as usize);
+    let first = (choice.selected_platform_index + 1).saturating_sub(list.height as usize);
     let width = list.width as usize;
     let lines: Vec<Line> = Platform::iter()
         .enumerate()
         .skip(first)
         .map(|(i, platform)| {
-            let picked = i == choice.selected;
+            let picked = i == choice.selected_platform_index;
             let style = if picked {
                 selected_style()
             } else {
@@ -1174,7 +1184,7 @@ fn draw_dialog(frame: &mut Frame, app: &App) {
     let longest = dialog.lines.iter().map(|l| l.chars().count()).max();
     let width = longest.unwrap_or(0).max(40) as u16 + 6;
     let height = dialog.lines.len() as u16 + 5;
-    let border = if dialog.danger {
+    let border = if dialog.is_irreversible {
         Palette::Bad
     } else {
         Palette::Muted
@@ -1190,7 +1200,7 @@ fn draw_dialog(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(lines), text);
     let mut spans = vec![Span::raw(" ")];
     for (i, button) in dialog.buttons.iter().enumerate() {
-        let style = if i == dialog.focus {
+        let style = if i == dialog.focused_button {
             selected_style()
         } else {
             Palette::Muted.style().bg(Palette::Keycap.color())

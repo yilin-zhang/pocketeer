@@ -799,7 +799,7 @@ impl CliSession {
 
     fn import_games(&mut self, paths: &[PathBuf], platform: Option<&str>) -> CliResult<()> {
         let platform = platform.map(parse_platform).transpose()?;
-        let files = self.p.files_to_import(paths)?;
+        let files = self.p.expand_import_paths(paths)?;
         self.run_batch(|p, each| p.import_games(&files, platform.as_ref(), each))
     }
 

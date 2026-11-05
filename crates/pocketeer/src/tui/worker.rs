@@ -394,12 +394,14 @@ impl State<'_> {
             Command::FetchCovers(games) => {
                 p.fetch_covers(&games, |p, e| batch.report_step(p, e.event))
             }
-            Command::ImportGame(path, platform) => p.files_to_import(&[path]).and_then(|files| {
-                batch.total = files.len();
-                p.import_games(&files, platform.as_ref(), |p, e| {
-                    batch.report_step(p, e.event)
+            Command::ImportGame(path, platform) => {
+                p.expand_import_paths(&[path]).and_then(|files| {
+                    batch.total = files.len();
+                    p.import_games(&files, platform.as_ref(), |p, e| {
+                        batch.report_step(p, e.event)
+                    })
                 })
-            }),
+            }
             Command::ImportSave(game, from) => {
                 p.import_saves(&[(game, from)], |p, e| batch.report_step(p, e.event))
             }

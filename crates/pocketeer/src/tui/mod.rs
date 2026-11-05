@@ -22,7 +22,7 @@ use ratatui_image::picker::Picker;
 
 use app::App;
 use covers::Covers;
-use path_input::PathReader;
+use path_input::DirReader;
 use worker::{Update, Worker};
 
 /// What the loop wakes up for.
@@ -33,7 +33,7 @@ enum Event {
     Worker(Box<Update>),
     CoverReady,
     /// A folder to offer paths from has been read.
-    FolderRead,
+    DirRead,
 }
 
 /// How often the spinner moves while something is running.
@@ -86,8 +86,8 @@ fn start_threads(
     let covers = Covers::spawn(picker, move || {
         let _ = to_ui.send(Event::CoverReady);
     });
-    let paths = PathReader::spawn(move || {
-        let _ = tx.send(Event::FolderRead);
+    let paths = DirReader::spawn(move || {
+        let _ = tx.send(Event::DirRead);
     });
     (App::new(worker, covers, paths), rx)
 }
@@ -117,14 +117,17 @@ fn run_event_loop(
         for event in first.into_iter().chain(rx.try_iter()) {
             match event {
                 Event::Key(key) => app.handle_key(key),
-                Event::Worker(update) => app.update(*update),
+                Event::Worker(update) => match *update {
+                    Update::LibraryFailed(reason) => return Ok(Some(reason)),
+                    update => app.update(update),
+                },
                 Event::CoverReady => app.on_cover_ready(),
-                Event::FolderRead => app.on_folder_read(),
+                Event::DirRead => app.on_dir_read(),
                 Event::Resized => {}
             }
         }
         if app.should_quit() {
-            return Ok(app.take_library_failure());
+            return Ok(None);
         }
     }
 }

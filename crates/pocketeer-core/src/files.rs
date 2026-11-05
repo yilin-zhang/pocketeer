@@ -27,7 +27,7 @@ pub(crate) struct Listing {
 
 /// What is in `dir`; nothing if it doesn't exist. Hidden entries (macOS
 /// leaves `._` files on devices) and symlinks are left out.
-pub(crate) fn list_folder(dir: &Path) -> Result<Listing, BaseError> {
+pub(crate) fn list_dir(dir: &Path) -> Result<Listing, BaseError> {
     let read = match fs::read_dir(dir) {
         Ok(read) => read,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Listing::default()),
@@ -53,11 +53,11 @@ pub(crate) fn list_folder(dir: &Path) -> Result<Listing, BaseError> {
 }
 
 /// Every visible file under `dir`, at any depth, as a path from `dir`.
-pub(crate) fn files_under(dir: &Path) -> Result<Vec<PathBuf>, BaseError> {
-    let Listing { dirs, files } = list_folder(dir)?;
+pub(crate) fn list_files_recursive(dir: &Path) -> Result<Vec<PathBuf>, BaseError> {
+    let Listing { dirs, files } = list_dir(dir)?;
     let mut paths: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
     for sub in dirs {
-        for path in files_under(&dir.join(&sub))? {
+        for path in list_files_recursive(&dir.join(&sub))? {
             paths.push(Path::new(&sub).join(path));
         }
     }
@@ -99,7 +99,7 @@ pub(crate) fn safe_rename_all(renames: &[(PathBuf, PathBuf)]) -> Result<(), Base
 
 /// Replaces the file at `path` with what `fill` writes to a hidden file beside
 /// it, so that `path` is never half written. If this fails the hidden file is
-/// removed; if the process dies first, [`list_folder`] doesn't see it and the
+/// removed; if the process dies first, [`list_dir`] doesn't see it and the
 /// next write to `path` replaces it.
 fn replace_atomically(
     path: &Path,
@@ -288,7 +288,7 @@ mod tests {
     fn a_file_left_by_a_dead_process_is_not_listed_and_is_replaced() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(".Foo.gba.part"), b"half").unwrap();
-        assert_eq!(list_folder(dir.path()).unwrap().files, Vec::<String>::new());
+        assert_eq!(list_dir(dir.path()).unwrap().files, Vec::<String>::new());
         write_atomically(&dir.path().join("Foo.gba"), b"whole", None).unwrap();
         assert_eq!(all_in(dir.path()), ["Foo.gba"]);
     }

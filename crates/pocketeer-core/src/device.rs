@@ -15,7 +15,9 @@ use crate::{
         parse_core_files, parse_core_json,
     },
     error::BaseError,
-    files::{Cache, copy_atomically, files_under, list_folder, safe_rename_all, write_atomically},
+    files::{
+        Cache, copy_atomically, list_dir, list_files_recursive, safe_rename_all, write_atomically,
+    },
     game::{Game, Save, is_valid_fat_name, renamed_file_name},
     platform::Platform,
 };
@@ -282,9 +284,9 @@ impl Device {
         let mut entries = Vec::new();
         let mut duplicates = Vec::new();
         let assets = layout.assets();
-        for id in list_folder(&assets)?.dirs {
+        for id in list_dir(&assets)?.dirs {
             let platform = Platform::from_id(&id);
-            for path in files_under(&layout.common(&platform))? {
+            for path in list_files_recursive(&layout.common(&platform))? {
                 let full = layout.game(&platform, &path);
                 if declared.contains(&full) {
                     continue;
@@ -381,8 +383,8 @@ impl Device {
             stem.to_string_lossy().to_lowercase()
         };
         let (old_stem, new_stem) = (stem_of(&file), stem_of(&new_name));
-        let folder = from.parent().expect("a game is in a folder");
-        let beside = list_folder(folder)?.files;
+        let dir = from.parent().expect("a game is in a folder");
+        let beside = list_dir(dir)?.files;
         let others = || beside.iter().filter(|name| **name != *file);
         if others().any(|name| stem_of(name) == new_stem) {
             return Err(RenameOnDeviceError::NameTaken);
@@ -390,11 +392,11 @@ impl Device {
         if others().any(|name| stem_of(name) == old_stem) {
             return Err(RenameOnDeviceError::SharesSave);
         }
-        let saves_folder = self
+        let saves_dir = self
             .layout
             .saves_common(platform)
             .join(entry.path.parent().unwrap_or(Path::new("")));
-        let saves = list_folder(&saves_folder)?.files;
+        let saves = list_dir(&saves_dir)?.files;
         // With only the case changed, those are the game's own.
         if old_stem != new_stem && saves.iter().any(|name| stem_of(name) == new_stem) {
             return Err(RenameOnDeviceError::LeftoversThere);
@@ -410,7 +412,7 @@ impl Device {
                     renamed.push(".");
                     renamed.push(extension);
                 }
-                (saves_folder.join(name), saves_folder.join(renamed))
+                (saves_dir.join(name), saves_dir.join(renamed))
             })
             .collect();
         renames.push((from.clone(), to.clone()));
@@ -439,21 +441,21 @@ impl Device {
         let declared = self.declared_files()?;
         let saves = self.layout.saves();
         let mut orphans = Vec::new();
-        for id in list_folder(&saves)?.dirs {
+        for id in list_dir(&saves)?.dirs {
             let platform = Platform::from_id(&id);
-            let games = files_under(&self.layout.common(&platform))?;
+            let games = list_files_recursive(&self.layout.common(&platform))?;
             let games: Vec<PathBuf> = games
                 .iter()
                 .filter(|p| !declared.contains(&self.layout.game(&platform, p)))
                 .map(|p| p.with_extension(""))
                 .collect();
-            let folder = self.layout.saves_common(&platform);
-            for path in files_under(&folder)? {
+            let dir = self.layout.saves_common(&platform);
+            for path in list_files_recursive(&dir)? {
                 let is_save = path.extension().is_some_and(|e| e == "sav");
                 if !is_save || games.contains(&path.with_extension("")) {
                     continue;
                 }
-                let full = folder.join(&path);
+                let full = dir.join(&path);
                 orphans.push(OrphanDeviceSave {
                     platform: platform.clone(),
                     save: Save::read(&full)?,
@@ -491,8 +493,8 @@ impl Device {
     /// The cores on the device, as the folders are now. One whose `core.json`
     /// can't be read has no version.
     pub fn installed_cores(&self) -> Result<Vec<InstalledCore>, BaseError> {
-        let folder = self.layout.cores();
-        let ids = list_folder(&folder)?.dirs;
+        let dir = self.layout.cores();
+        let ids = list_dir(&dir)?.dirs;
         Ok(ids
             .into_iter()
             .map(|id| {
@@ -1153,8 +1155,8 @@ mod tests {
         }
 
         fn all_files(root: &Path) -> Vec<PathBuf> {
-            let mut files = files_under(&root.join("Assets")).unwrap();
-            files.extend(files_under(&root.join("Saves")).unwrap());
+            let mut files = list_files_recursive(&root.join("Assets")).unwrap();
+            files.extend(list_files_recursive(&root.join("Saves")).unwrap());
             files
         }
 
@@ -1207,9 +1209,7 @@ mod tests {
             let renamed = device.rename_game(&entry, "OLD").unwrap();
             assert_eq!(renamed.path, Path::new("RPG/OLD.gba"));
             let root = dir.path();
-            let saves = list_folder(&root.join("Saves/gba/common/RPG"))
-                .unwrap()
-                .files;
+            let saves = list_dir(&root.join("Saves/gba/common/RPG")).unwrap().files;
             assert_eq!(saves, ["OLD.rtc", "OLD.sav"]);
         }
 

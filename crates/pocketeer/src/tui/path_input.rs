@@ -121,15 +121,15 @@ impl PathInput {
     }
 
     /// Whether what is typed ends in `/`, so can only be a folder.
-    pub fn is_folder(&self) -> bool {
+    pub fn is_dir(&self) -> bool {
         self.partial().is_empty() && !self.input.value().is_empty()
     }
 
     /// Whether what is typed is a folder, going by what has been read of the
     /// folder it is in.
-    pub fn names_folder(&self) -> bool {
+    pub fn names_dir(&self) -> bool {
         let is_it = |e: &&PathEntry| e.is_dir && e.name == self.partial();
-        self.is_folder() || self.matches().iter().any(is_it)
+        self.is_dir() || self.matches().iter().any(is_it)
     }
 
     pub fn picked(&self) -> Option<usize> {
@@ -139,7 +139,7 @@ impl PathInput {
     /// What the folder holds that is like what is typed, best first. Hidden
     /// ones only once a `.` is typed. None until the folder has been read.
     pub fn matches(&self) -> Vec<&PathEntry> {
-        if self.listed.as_deref() != Some(self.folder().as_path()) {
+        if self.listed.as_deref() != Some(self.dir().as_path()) {
             return Vec::new();
         }
         let partial = self.partial();
@@ -155,19 +155,19 @@ impl PathInput {
     }
 
     /// The folder to read now, if it hasn't been asked for.
-    pub fn folder_to_read(&mut self) -> Option<PathBuf> {
-        let folder = self.folder();
-        if self.asked.as_ref() == Some(&folder) {
+    pub fn dir_to_read(&mut self) -> Option<PathBuf> {
+        let dir = self.dir();
+        if self.asked.as_ref() == Some(&dir) {
             return None;
         }
-        self.asked = Some(folder.clone());
-        Some(folder)
+        self.asked = Some(dir.clone());
+        Some(dir)
     }
 
     /// Takes what a folder holds, unless the text has moved on from it.
-    pub fn set_entries(&mut self, folder: PathBuf, entries: Vec<PathEntry>) {
-        if folder == self.folder() {
-            self.listed = Some(folder);
+    pub fn set_entries(&mut self, dir: PathBuf, entries: Vec<PathEntry>) {
+        if dir == self.dir() {
+            self.listed = Some(dir);
             self.entries = entries;
             self.picked = None;
         }
@@ -212,7 +212,7 @@ impl PathInput {
     }
 
     /// The folder of the path typed.
-    fn folder(&self) -> PathBuf {
+    fn dir(&self) -> PathBuf {
         match self.partial_start() {
             0 => PathBuf::from("."),
             n => expand_tilde(&self.input.value()[..n]),
@@ -264,8 +264,8 @@ impl PathInput {
     }
 
     fn set_partial(&mut self, partial: String) {
-        let folder = &self.input.value()[..self.partial_start()];
-        self.input = Input::new(format!("{folder}{partial}"));
+        let dir = &self.input.value()[..self.partial_start()];
+        self.input = Input::new(format!("{dir}{partial}"));
         self.picked = None;
     }
 
@@ -281,12 +281,12 @@ impl PathInput {
 }
 
 /// Reads folders on its own thread.
-pub struct PathReader {
+pub struct DirReader {
     tx: Sender<PathBuf>,
     rx: Receiver<(PathBuf, Vec<PathEntry>)>,
 }
 
-impl PathReader {
+impl DirReader {
     /// Starts the thread; `wake` is called when a folder has been read.
     pub fn spawn(wake: impl Fn() + Send + 'static) -> Self {
         let (tx, requests) = mpsc::channel::<PathBuf>();
@@ -294,9 +294,9 @@ impl PathReader {
         thread::spawn(move || {
             while let Ok(first) = requests.recv() {
                 // Only the last one asked for matters.
-                let folder = requests.try_iter().last().unwrap_or(first);
-                let entries = read_folder(&folder);
-                if done.send((folder, entries)).is_err() {
+                let dir = requests.try_iter().last().unwrap_or(first);
+                let entries = read_dir(&dir);
+                if done.send((dir, entries)).is_err() {
                     return;
                 }
                 wake();
@@ -305,19 +305,19 @@ impl PathReader {
         Self { tx, rx }
     }
 
-    pub fn request_folder(&self, folder: PathBuf) {
-        let _ = self.tx.send(folder);
+    pub fn request_dir(&self, dir: PathBuf) {
+        let _ = self.tx.send(dir);
     }
 
     /// The folders read since the last time.
-    pub fn folders_read(&self) -> impl Iterator<Item = (PathBuf, Vec<PathEntry>)> + '_ {
+    pub fn dirs_read(&self) -> impl Iterator<Item = (PathBuf, Vec<PathEntry>)> + '_ {
         self.rx.try_iter()
     }
 }
 
-/// What `folder` holds, by name; nothing if it can't be read.
-fn read_folder(folder: &Path) -> Vec<PathEntry> {
-    let Ok(read) = fs::read_dir(folder) else {
+/// What `dir` holds, by name; nothing if it can't be read.
+fn read_dir(dir: &Path) -> Vec<PathEntry> {
+    let Ok(read) = fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut entries: Vec<PathEntry> = read
@@ -360,17 +360,17 @@ mod tests {
     /// `text` in a folder that holds `entries`.
     fn input(text: &str, entries: &[PathEntry]) -> PathInput {
         let mut input = PathInput::new(text);
-        input.set_entries(input.folder(), entries.to_vec());
+        input.set_entries(input.dir(), entries.to_vec());
         input
     }
 
     #[test]
     fn what_is_typed_names_a_folder_if_it_ends_so_or_the_folder_read_says_so() {
         let entries = [entry("roms", true), entry("Mine.gba", false)];
-        assert!(input("/some/", &entries).names_folder());
-        assert!(input("/some/roms", &entries).names_folder());
-        assert!(!input("/some/Mine.gba", &entries).names_folder());
-        assert!(!input("/some/rom", &entries).names_folder());
+        assert!(input("/some/", &entries).names_dir());
+        assert!(input("/some/roms", &entries).names_dir());
+        assert!(!input("/some/Mine.gba", &entries).names_dir());
+        assert!(!input("/some/rom", &entries).names_dir());
     }
 
     fn press(input: &mut PathInput, code: KeyCode) {
@@ -474,9 +474,9 @@ mod tests {
             let mut only_file = input("/a/mi", &[entry("mine.sav", false)]);
             press(&mut only_file, KeyCode::Tab);
             assert_eq!(text(&only_file), "/a/mine.sav");
-            let mut only_folder = input("/a/mi", &[entry("misc", true)]);
-            press(&mut only_folder, KeyCode::Tab);
-            assert_eq!(text(&only_folder), "/a/misc/");
+            let mut only_dir = input("/a/mi", &[entry("misc", true)]);
+            press(&mut only_dir, KeyCode::Tab);
+            assert_eq!(text(&only_dir), "/a/misc/");
         }
 
         #[test]
@@ -549,7 +549,7 @@ mod tests {
             let home = env::home_dir().unwrap();
             assert_eq!(PathInput::new("~/x/y").path(), home.join("x/y"));
             assert_eq!(PathInput::new("~").path(), home);
-            assert_eq!(PathInput::new("~/x").folder(), home);
+            assert_eq!(PathInput::new("~/x").dir(), home);
             // Only as a whole name.
             assert_eq!(PathInput::new("~x").path(), PathBuf::from("~x"));
         }
@@ -565,13 +565,13 @@ mod tests {
             fs::write(dir.path().join("A.sav"), b"").unwrap();
             fs::create_dir(dir.path().join("c")).unwrap();
             let (woken, wake) = mpsc::channel();
-            let reader = PathReader::spawn(move || {
+            let reader = DirReader::spawn(move || {
                 let _ = woken.send(());
             });
-            reader.request_folder(dir.path().to_path_buf());
+            reader.request_dir(dir.path().to_path_buf());
             wake.recv_timeout(Duration::from_secs(10)).unwrap();
-            let (folder, entries) = reader.folders_read().next().unwrap();
-            assert_eq!(folder, dir.path());
+            let (read, entries) = reader.dirs_read().next().unwrap();
+            assert_eq!(read, dir.path());
             assert_eq!(
                 entries,
                 [
@@ -584,7 +584,7 @@ mod tests {
 
         #[test]
         fn a_folder_that_cannot_be_read_holds_nothing() {
-            assert_eq!(read_folder(Path::new("/no/such/folder")), []);
+            assert_eq!(read_dir(Path::new("/no/such/folder")), []);
         }
     }
 }
