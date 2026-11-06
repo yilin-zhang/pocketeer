@@ -460,7 +460,7 @@ impl Device {
         Ok(renamed)
     }
 
-    /// Where `entry`'s save is, whether or not it has one.
+    /// Where `entry`'s save is, even if it has none.
     pub fn save_path(&self, entry: &DeviceEntry) -> PathBuf {
         self.layout.save(&entry.game.platform, &entry.path)
     }
@@ -608,8 +608,8 @@ impl Device {
         Ok(files)
     }
 
-    /// Where the files the cores on the device load are, whether or not they
-    /// are there.
+    /// Where the files the cores on the device load are, even if they
+    /// aren't there.
     fn declared_files(&self) -> Result<HashSet<PathBuf>, SharedError> {
         let files = self.core_files()?;
         Ok(files
@@ -1268,13 +1268,13 @@ mod tests {
                 ("a:b", None, "the device can't hold a game of that name"),
                 ("Old", None, "it has that name already"),
                 (
-                    "Neighbour",
-                    Some("Assets/gba/common/RPG/Neighbour.gba"),
+                    "Neighbor",
+                    Some("Assets/gba/common/RPG/Neighbor.gba"),
                     "another file on the device has that name",
                 ),
                 (
-                    "neighbour",
-                    Some("Assets/gba/common/RPG/Neighbour.pce"),
+                    "neighbor",
+                    Some("Assets/gba/common/RPG/Neighbor.pce"),
                     "another file on the device has that name",
                 ),
                 (

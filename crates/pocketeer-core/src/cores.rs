@@ -16,7 +16,7 @@ use crate::{error::SharedError, files::write_atomically, platform::Platform};
 
 /// The cores pocketeer installs, for now: each comes alone in its zip, which
 /// holds nothing it needs beyond `Cores/` and `Platforms/`, and neither ROMs,
-/// saves nor a licence to find. By system, in the order they are listed.
+/// saves nor a license to find. By system, in the order they are listed.
 pub const SUPPORTED: &[&str] = &[
     "Spiritualized.GB",
     "budude2.GB",

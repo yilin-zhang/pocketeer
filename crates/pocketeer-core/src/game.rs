@@ -26,7 +26,7 @@ pub(crate) fn is_valid_fat_name(name: &str) -> bool {
 }
 
 /// What the file `name` is called once renamed to `new`: it keeps its extension,
-/// whether or not `new` has it already.
+/// even if `new` has it already.
 pub(crate) fn renamed_file_name(name: &str, new: &str) -> String {
     let new = new.trim();
     let Some(extension) = Path::new(name).extension().and_then(|e| e.to_str()) else {
@@ -40,7 +40,7 @@ pub(crate) fn renamed_file_name(name: &str, new: &str) -> String {
     format!("{without}.{extension}")
 }
 
-/// One file's contents, as ROM catalogues (No-Intro and Redump DATs) list
+/// One file's contents, as ROM catalogs (No-Intro and Redump DATs) list
 /// them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Rom {

@@ -1,4 +1,4 @@
-//! DATs, catalogues of known games, and a local copy of them to look games
+//! DATs, catalogs of known games, and a local copy of them to look games
 //! up in.
 
 use std::{

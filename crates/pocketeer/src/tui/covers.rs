@@ -127,7 +127,7 @@ pub enum Cover<'a> {
     Loading,
     Unreadable,
     Image(&'a mut StatefulProtocol),
-    /// The dot-matrix picture, one line per row, centred in the panel.
+    /// The dot-matrix picture, one line per row, centered in the panel.
     Dots(&'a [Line<'static>]),
 }
 
@@ -339,7 +339,7 @@ fn do_work(picker: &Picker, work: Work) -> Done {
 // ---------------------------------------------------------------------------
 // The dot-matrix picture
 
-/// A cover drawn in coloured braille dots, kept with its picture so it can
+/// A cover drawn in colored braille dots, kept with its picture so it can
 /// be drawn again when the panel changes size.
 struct Dots {
     source: DynamicImage,
@@ -375,7 +375,7 @@ const BITS: [[u8; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
 /// Fits `source` into `size` cells (dots are about square, since a cell is
 /// twice as tall as it is wide), dithers its brightness and encodes it as
 /// braille. Which dots are lit carries the brightness; each cell is drawn
-/// in the average colour of its lit dots, so the colour carries the hue.
+/// in the average color of its lit dots, so the color carries the hue.
 fn render_dots(source: &DynamicImage, size: Size) -> Vec<Line<'static>> {
     let (cols, rows) = (u32::from(size.width), u32::from(size.height));
     if cols == 0 || rows == 0 || source.width() == 0 || source.height() == 0 {
@@ -386,7 +386,7 @@ fn render_dots(source: &DynamicImage, size: Size) -> Vec<Line<'static>> {
     let small = small.to_rgb8();
     let (w, h) = small.dimensions();
 
-    // Centre the picture in whole cells.
+    // Center the picture in whole cells.
     let used_cols = w.div_ceil(DOTS_X);
     let used_rows = h.div_ceil(DOTS_Y);
     let left = ((cols - used_cols) / 2) as usize;
@@ -428,7 +428,7 @@ fn render_dots(source: &DynamicImage, size: Size) -> Vec<Line<'static>> {
     lines
 }
 
-/// A dot's colour, lifted so a dark colour still shows on the dark
+/// A dot's color, lifted so a dark color still shows on the dark
 /// background: a lit dot means "light here", and density already says how
 /// light.
 fn lifted_color(r: u32, g: u32, b: u32) -> Color {
@@ -440,7 +440,7 @@ fn lifted_color(r: u32, g: u32, b: u32) -> Color {
 
 /// Which dots are lit: the contrast is stretched to the picture's own
 /// range, then Atkinson dithering (the classic Mac look) spreads three
-/// quarters of each error to six neighbours, which keeps highlights and
+/// quarters of each error to six neighbors, which keeps highlights and
 /// shadows clean instead of speckled.
 fn dither(image: &GrayImage) -> Vec<bool> {
     let (w, h) = (image.width() as usize, image.height() as usize);
@@ -561,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn fits_tall_cover_centred_in_whole_cells() {
+    fn fits_tall_cover_centered_in_whole_cells() {
         // White left half, black right half; 1:2, so 10×5 cells take the
         // full height (20 dots) and 10 dots (5 cells) across.
         let dots = Dots::new(
@@ -580,8 +580,8 @@ mod tests {
     }
 
     #[test]
-    fn dithers_mid_grey_to_about_half_the_dots() {
-        // A grey ramp: after stretching, the middle is mid-grey.
+    fn dithers_mid_gray_to_about_half_the_dots() {
+        // A gray ramp: after stretching, the middle is mid-gray.
         let on = dither(&picture(64, 64, |x, _| (x * 4) as u8).to_luma8());
         let middle: Vec<bool> = (0..64)
             .flat_map(|y| (28..36).map(move |x| (x, y)))

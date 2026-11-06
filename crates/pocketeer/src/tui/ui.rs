@@ -37,12 +37,12 @@ use super::{
 /// Width of the label column in the details.
 const LABEL: usize = 10;
 
-/// The palette. Analogue OS is black and white, so the UI is greys; colour
+/// The palette. Analogue OS is black and white, so the UI is grays; color
 /// is kept for state, so that it means something when it shows up. Indexed
-/// colours render the same in every 256-colour terminal.
+/// colors render the same in every 256-color terminal.
 #[derive(Debug, Clone, Copy)]
 enum Palette {
-    // Greys, from text to background.
+    // Grays, from text to background.
     Ink,
     Muted,
     Faint,
@@ -87,8 +87,8 @@ impl Palette {
     }
 }
 
-/// A platform as the table shows it: its id in capitals, in a colour of its
-/// own. The colours are soft, so they don't read as a state.
+/// A platform as the table shows it: its id in capitals, in a color of its
+/// own. The colors are soft, so they don't read as a state.
 fn platform_cell(platform: &Platform) -> Cell<'static> {
     const OTHERS: [u8; 6] = [110, 146, 182, 144, 116, 181];
     let id = platform.id();
@@ -155,12 +155,12 @@ fn spinner_frame() -> &'static str {
     FRAMES[((ms / 150) % 4) as usize]
 }
 
-fn labelled(label: &str, value: Span<'static>) -> Line<'static> {
+fn labeled(label: &str, value: Span<'static>) -> Line<'static> {
     Line::from(vec![Palette::Faint.span(format!("{label:<LABEL$}")), value])
 }
 
-fn labelled_text(label: &str, value: impl Into<String>) -> Line<'static> {
-    labelled(label, Span::raw(value.into()))
+fn labeled_text(label: &str, value: impl Into<String>) -> Line<'static> {
+    labeled(label, Span::raw(value.into()))
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -531,9 +531,9 @@ fn game_table_row(app: &App, row: &Row, compact: bool) -> TableRow<'static> {
     let style = match (row, app.games.is_marked(row)) {
         (Row::Game { .. }, false) => Style::new(),
         (Row::Game { .. }, true) => marked,
-        // Grey all over: they are saves with no game.
+        // Gray all over: they are saves with no game.
         (_, false) => Palette::Faint.style(),
-        // Lighter than that, to show on the mark's grey.
+        // Lighter than that, to show on the mark's gray.
         (_, true) => marked.fg(Palette::Muted.color()),
     };
     TableRow::new(cells).style(style)
@@ -622,24 +622,21 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
             row, standard_name, ..
         }) => {
             if let Some(local) = row.local_entry() {
-                lines.push(labelled_text("Library", local.name.clone()));
+                lines.push(labeled_text("Library", local.name.clone()));
             }
             if let Some(on_device) = row.device_entry() {
-                lines.push(labelled_text(
-                    "Device",
-                    on_device.path.display().to_string(),
-                ));
+                lines.push(labeled_text("Device", on_device.path.display().to_string()));
             }
             if let Some(name) = standard_name {
-                lines.push(labelled_text("Standard", name.clone()));
+                lines.push(labeled_text("Standard", name.clone()));
             }
             let Files::Single(rom) = row.game().files;
-            lines.push(labelled_text("Size", format!("{} bytes", rom.size)));
-            lines.push(labelled(
+            lines.push(labeled_text("Size", format!("{} bytes", rom.size)));
+            lines.push(labeled(
                 "crc32",
                 Palette::Muted.span(format!("{:08x}", rom.crc32)),
             ));
-            lines.push(labelled_text(
+            lines.push(labeled_text(
                 "Save",
                 match (row.saves_kept(), row.has_new_save_on_device()) {
                     (0, false) => "none".to_string(),
@@ -650,18 +647,18 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
             ));
         }
         Some(Row::OrphanInLibrary(o)) => {
-            lines.push(labelled_text("Saves of", o.stem.clone()));
-            lines.push(labelled_text("Kept", o.save.iter().count().to_string()));
-            lines.push(labelled_text("Newest", o.save.current.timestamp()));
+            lines.push(labeled_text("Saves of", o.stem.clone()));
+            lines.push(labeled_text("Kept", o.save.iter().count().to_string()));
+            lines.push(labeled_text("Newest", o.save.current.timestamp()));
             lines.push(Line::default());
             lines.push(Line::from(Palette::Muted.span(
                 "The library has no game of this name. A game put there under it has them again.",
             )));
         }
         Some(Row::OrphanOnDevice(o)) => {
-            lines.push(labelled_text("Save", o.path.display().to_string()));
-            lines.push(labelled_text("Size", format!("{} bytes", o.save.size)));
-            lines.push(labelled_text("Written", o.save.timestamp()));
+            lines.push(labeled_text("Save", o.path.display().to_string()));
+            lines.push(labeled_text("Size", format!("{} bytes", o.save.size)));
+            lines.push(labeled_text("Written", o.save.timestamp()));
             lines.push(Line::default());
             lines.push(Line::from(Palette::Muted.span(
                 "The device has no game at this path. The Pocket gives it to any game put there.",
@@ -702,7 +699,7 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize)
                 state,
             ])
         }
-        None => labelled("Device", Palette::Muted.span("no save")),
+        None => labeled("Device", Palette::Muted.span("no save")),
     };
     frame.render_widget(Paragraph::new(device_line), top);
     if versions.is_empty() {
@@ -770,7 +767,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 spinner_frame(),
                 job.description
             )));
-            if job.is_cancelling {
+            if job.is_canceling {
                 line.push_span(Palette::Muted.span("stopping…"));
             } else {
                 line.push_span(keycap("Esc", Palette::Keycap));

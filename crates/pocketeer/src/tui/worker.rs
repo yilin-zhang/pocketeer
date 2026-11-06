@@ -154,7 +154,7 @@ pub enum Update {
     LibraryFailed(String),
 }
 
-/// A command, and the token that says whether it has been cancelled.
+/// A command, and the token that says whether it has been canceled.
 pub type Sent = (Arc<AtomicBool>, Command);
 
 /// The UI's end of the worker. When it goes, the thread is stopped as by
@@ -491,7 +491,7 @@ struct Batch<'a> {
 
 impl Batch<'_> {
     /// Notes how one game went and sends how things stand; breaks if the
-    /// command was cancelled.
+    /// command was canceled.
     fn report_step(&mut self, p: &Pocketeer, report: OperationReport) -> ControlFlow<()> {
         let game = report.subject();
         self.reports.push(report);
@@ -509,7 +509,7 @@ impl Batch<'_> {
     }
 }
 
-/// How a command labelled `label`, meant for `total` games, went; and whether
+/// How a command labeled `label`, meant for `total` games, went; and whether
 /// any of it failed.
 fn summary(label: &str, total: usize, reports: &[OperationReport]) -> (String, bool) {
     let done = reports.len();
@@ -859,12 +859,11 @@ mod tests {
     }
 
     #[test]
-    fn skips_cancelled_commands() {
+    fn skips_canceled_commands() {
         let (dir, library, _) = empty_library_and_device();
         let (tx, commands) = mpsc::channel();
-        let cancelled = Arc::new(AtomicBool::new(true));
-        tx.send((cancelled, Command::PullSaves(Vec::new())))
-            .unwrap();
+        let canceled = Arc::new(AtomicBool::new(true));
+        tx.send((canceled, Command::PullSaves(Vec::new()))).unwrap();
         tx.send((Arc::default(), Command::Reload)).unwrap();
         // With nothing left to come, `run` returns.
         drop(tx);

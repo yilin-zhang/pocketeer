@@ -40,7 +40,7 @@ pub struct JobStatus {
     pub total_count: usize,
     /// The game last finished.
     pub last_game: Option<String>,
-    pub is_cancelling: bool,
+    pub is_canceling: bool,
 }
 
 /// What last happened.
@@ -635,7 +635,7 @@ impl App {
                     done_count: 0,
                     total_count: total,
                     last_game: None,
-                    is_cancelling: false,
+                    is_canceling: false,
                 });
             }
             Update::Progress { done, total, game } => {
@@ -711,7 +711,7 @@ impl App {
             self.games.search_input.reset();
             self.games.refresh_visible_rows(keep);
         } else if let Some(job) = &mut self.job_status {
-            job.is_cancelling = true;
+            job.is_canceling = true;
             self.worker.cancel();
         }
     }
@@ -919,8 +919,8 @@ impl App {
             return;
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let cancelling = key.code == KeyCode::Esc || (ctrl && key.code == KeyCode::Char('g'));
-        if cancelling {
+        let canceling = key.code == KeyCode::Esc || (ctrl && key.code == KeyCode::Char('g'));
+        if canceling {
             if !import.input.unpick() {
                 self.prompt = None;
             }
@@ -1804,7 +1804,7 @@ mod tests {
         });
         press(&mut app, "\x1b");
         assert!(cancel_token.load(Ordering::Relaxed));
-        assert!(app.job_status().unwrap().is_cancelling);
+        assert!(app.job_status().unwrap().is_canceling);
         app.update(Update::Finished {
             summary: "stopped".into(),
             failed: false,
@@ -2348,7 +2348,7 @@ mod tests {
         }
 
         #[test]
-        fn t_sends_nothing_when_cancelled() {
+        fn t_sends_nothing_when_canceled() {
             let (mut app, rx) = app_with_standard_names();
             press(&mut app, "t\x1b");
             assert!(app.dialog().is_none());
