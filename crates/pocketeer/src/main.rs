@@ -679,7 +679,7 @@ impl CliSession {
         }
         let orphans: Vec<Orphan> = self
             .p
-            .orphan_saves_in_library()?
+            .find_orphan_saves_in_library()?
             .into_iter()
             .map(|o| Orphan {
                 save: library_orphan_ref(&o),
@@ -710,7 +710,7 @@ impl CliSession {
         }
         let orphans: Vec<Orphan> = self
             .p
-            .orphan_saves_on_device()?
+            .find_orphan_saves_on_device()?
             .into_iter()
             .map(|o| Orphan {
                 save: device_orphan_ref(&o),
@@ -746,7 +746,7 @@ impl CliSession {
             [] => self.p.games_only_on_device(),
             refs => self.entries_on_device(refs)?,
         };
-        self.run_batch(|p, each| p.pull_games(&games, each))
+        self.run_batch(|p, on_entry_logged| p.pull_games(&games, on_entry_logged))
     }
 
     fn pull_saves(&mut self, refs: &[String]) -> CliResult<()> {
@@ -754,7 +754,7 @@ impl CliSession {
             [] => self.games_with_saves_to_pull(),
             refs => self.entries_on_device(refs)?,
         };
-        self.run_batch(|p, each| p.pull_saves(&games, each))
+        self.run_batch(|p, on_entry_logged| p.pull_saves(&games, on_entry_logged))
     }
 
     /// The games on the device the library has: nobody asked for the others
@@ -777,7 +777,7 @@ impl CliSession {
 
     fn push_games(&mut self, refs: &[String]) -> CliResult<()> {
         let games = self.entries_in_library(refs)?;
-        self.run_batch(|p, each| p.push_games(&games, each))
+        self.run_batch(|p, on_entry_logged| p.push_games(&games, on_entry_logged))
     }
 
     fn push_saves(&mut self, refs: &[String], at: Option<&str>) -> CliResult<()> {
@@ -791,56 +791,62 @@ impl CliSession {
                 copy.ok_or_else(|| not_on_device(r))
             })
             .collect::<CliResult<Vec<DeviceEntry>>>()?;
-        self.run_batch(|p, each| match at {
-            Some(at) => p.push_saves_at(&copies, at, each),
-            None => p.push_saves(&copies, each),
+        self.run_batch(|p, on_entry_logged| match at {
+            Some(at) => p.push_saves_at(&copies, at, on_entry_logged),
+            None => p.push_saves(&copies, on_entry_logged),
         })
     }
 
     fn import_games(&mut self, paths: &[PathBuf], platform: Option<&str>) -> CliResult<()> {
         let platform = platform.map(parse_platform).transpose()?;
-        let files = self.p.expand_import_paths(paths)?;
-        self.run_batch(|p, each| p.import_games(&files, platform.as_ref(), each))
+        let files = pocketeer_core::pocketeer::expand_import_paths(paths)?;
+        self.run_batch(|p, on_entry_logged| {
+            p.import_games(&files, platform.as_ref(), on_entry_logged)
+        })
     }
 
     fn import_save(&mut self, game: &str, file: &Path) -> CliResult<()> {
         let saves = [(self.local_entry(game)?.clone(), file.to_path_buf())];
-        self.run_batch(|p, each| p.import_saves(&saves, each))
+        self.run_batch(|p, on_entry_logged| p.import_saves(&saves, on_entry_logged))
     }
 
     fn trash_games(&mut self, refs: &[String]) -> CliResult<()> {
         let games = self.entries_in_library(refs)?;
-        self.run_batch(|p, each| p.trash_games_in_library(&games, each))
+        self.run_batch(|p, on_entry_logged| p.trash_games_in_library(&games, on_entry_logged))
     }
 
     fn trash_saves(&mut self, refs: &[String], at: Option<&str>) -> CliResult<()> {
         let games = self.entries_in_library(refs)?;
-        self.run_batch(|p, each| match at {
-            Some(at) => p.trash_saves_at(&games, at, each),
-            None => p.trash_saves_in_library(&games, each),
+        self.run_batch(|p, on_entry_logged| match at {
+            Some(at) => p.trash_saves_at(&games, at, on_entry_logged),
+            None => p.trash_saves_in_library(&games, on_entry_logged),
         })
     }
 
     fn trash_orphan_saves(&mut self, refs: &[String]) -> CliResult<()> {
-        let orphans = self.p.orphan_saves_in_library()?;
+        let orphans = self.p.find_orphan_saves_in_library()?;
         let orphans = pick_orphans(refs, &orphans, library_orphan_ref)?;
-        self.run_batch(|p, each| p.trash_orphan_saves_in_library(&orphans, each))
+        self.run_batch(|p, on_entry_logged| {
+            p.trash_orphan_saves_in_library(&orphans, on_entry_logged)
+        })
     }
 
     fn delete_games(&mut self, refs: &[String]) -> CliResult<()> {
         let games = self.entries_on_device(refs)?;
-        self.run_batch(|p, each| p.delete_games_on_device(&games, each))
+        self.run_batch(|p, on_entry_logged| p.delete_games_on_device(&games, on_entry_logged))
     }
 
     fn delete_saves(&mut self, refs: &[String]) -> CliResult<()> {
         let games = self.entries_on_device(refs)?;
-        self.run_batch(|p, each| p.delete_saves_on_device(&games, each))
+        self.run_batch(|p, on_entry_logged| p.delete_saves_on_device(&games, on_entry_logged))
     }
 
     fn delete_orphan_saves(&mut self, refs: &[String]) -> CliResult<()> {
-        let orphans = self.p.orphan_saves_on_device()?;
+        let orphans = self.p.find_orphan_saves_on_device()?;
         let orphans = pick_orphans(refs, &orphans, device_orphan_ref)?;
-        self.run_batch(|p, each| p.delete_orphan_saves_on_device(&orphans, each))
+        self.run_batch(|p, on_entry_logged| {
+            p.delete_orphan_saves_on_device(&orphans, on_entry_logged)
+        })
     }
 
     fn fetch_covers(&mut self, refs: &[String]) -> CliResult<()> {
@@ -848,7 +854,7 @@ impl CliSession {
             [] => self.p.games_without_covers(),
             refs => self.entries_in_library(refs)?,
         };
-        self.run_batch(|p, each| p.fetch_covers(&games, each))
+        self.run_batch(|p, on_entry_logged| p.fetch_covers(&games, on_entry_logged))
     }
 
     /// Runs a command going through games. As text each is printed as it is
@@ -862,23 +868,23 @@ impl CliSession {
         ) -> BatchResult,
     ) -> CliResult<()> {
         let (format, entries) = (self.format, &mut self.entries);
-        let done = run(&mut self.p, &mut |_, entry| {
+        let batch_result = run(&mut self.p, &mut |_, entry| {
             if matches!(format, PrintFormat::Text) {
-                println!("{}", entry.event.to_line());
+                println!("{}", entry.report.to_line());
             }
             entries.push(entry);
             ControlFlow::Continue(())
         });
-        self.finish_batch(done)
+        self.finish_batch(batch_result)
     }
 
-    /// The end of a command going through games, which `done` says if it
+    /// The end of a command going through games, which `batch_result` says if it
     /// stopped.
-    fn finish_batch(&self, done: BatchResult) -> CliResult<()> {
-        if let Err(e) = &done {
+    fn finish_batch(&self, batch_result: BatchResult) -> CliResult<()> {
+        if let Err(e) = &batch_result {
             eprintln!("error: {e}");
         }
-        let ok = done.is_ok() && self.entries.iter().all(|e| e.event.is_ok());
+        let ok = batch_result.is_ok() && self.entries.iter().all(|e| e.report.is_ok());
         if matches!(self.format, PrintFormat::Json) {
             let lines: Vec<Value> = self.entries.iter().map(LogEntry::to_json).collect();
             print_json(ok, json!(lines));
@@ -901,7 +907,7 @@ impl CliSession {
             latest: Option<String>,
             update_available: bool,
         }
-        let (rows, failure) = self.p.core_rows()?;
+        let (rows, failure) = self.p.load_core_rows()?;
         if let Some(failure) = failure {
             eprintln!("warning: couldn't get the cores that can be installed: {failure}");
         }
@@ -955,12 +961,12 @@ impl CliSession {
             let message = format!("{id}: not a core that can be installed, as `cores list` shows");
             return Err(CliError::could_not_start("unsupported_core", message));
         }
-        self.run_batch(|p, each| p.install_cores(ids, each))
+        self.run_batch(|p, on_entry_logged| p.install_cores(ids, on_entry_logged))
     }
 
     fn update_cores(&mut self, ids: &[String]) -> CliResult<()> {
         let ids = match ids {
-            [] => self.p.cores_with_updates()?,
+            [] => self.p.find_cores_with_updates()?,
             ids => {
                 self.ensure_cores_on_device(ids)?;
                 ids.to_vec()
@@ -969,12 +975,12 @@ impl CliSession {
         if ids.is_empty() && matches!(self.format, PrintFormat::Text) {
             println!("every core is up to date");
         }
-        self.run_batch(|p, each| p.install_cores(&ids, each))
+        self.run_batch(|p, on_entry_logged| p.install_cores(&ids, on_entry_logged))
     }
 
     fn remove_cores(&mut self, ids: &[String]) -> CliResult<()> {
         self.ensure_cores_on_device(ids)?;
-        self.run_batch(|p, each| p.remove_cores(ids, each))
+        self.run_batch(|p, on_entry_logged| p.remove_cores(ids, on_entry_logged))
     }
 
     /// Refuses cores the device doesn't have.
@@ -992,13 +998,13 @@ impl CliSession {
 
     fn rename_game_in_library(&mut self, game: &str, name: &str) -> CliResult<()> {
         let games = [(self.local_entry(game)?.clone(), name.to_string())];
-        self.run_batch(|p, each| p.rename_games_in_library(&games, each))
+        self.run_batch(|p, on_entry_logged| p.rename_games_in_library(&games, on_entry_logged))
     }
 
     fn rename_game_on_device(&mut self, game: &str, name: &str) -> CliResult<()> {
         let on_device = self.entries_on_device(&[game.to_string()])?.remove(0);
         let games = [(on_device, name.to_string())];
-        self.run_batch(|p, each| p.rename_games_on_device(&games, each))
+        self.run_batch(|p, on_entry_logged| p.rename_games_on_device(&games, on_entry_logged))
     }
 
     fn print_bios(&self) -> CliResult<()> {
@@ -1019,7 +1025,7 @@ impl CliSession {
         }
         let rows: Vec<Row> = self
             .p
-            .bios_rows()?
+            .read_bios_rows()?
             .iter()
             .map(|r| {
                 let (status, size) = match r.status {
@@ -1069,13 +1075,13 @@ impl CliSession {
     }
 
     fn put_bios(&mut self, file: &str, from: &Path) -> CliResult<()> {
-        let rows = self.p.bios_rows()?;
+        let rows = self.p.read_bios_rows()?;
         let Some(row) = rows.into_iter().find(|r| bios_ref(r) == file) else {
             let message = format!("{file}: no core on the device loads it, as `bios list` shows");
             return Err(CliError::could_not_start("not_a_bios_file", message));
         };
         let files = [(row, from.to_path_buf())];
-        self.run_batch(|p, each| p.put_bios_files(&files, each))
+        self.run_batch(|p, on_entry_logged| p.put_bios_files(&files, on_entry_logged))
     }
 
     fn eject(&mut self) -> CliResult<()> {

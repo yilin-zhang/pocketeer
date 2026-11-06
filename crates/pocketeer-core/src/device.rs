@@ -262,7 +262,7 @@ impl Device {
         orphan: &OrphanDeviceSave,
     ) -> Result<(), DeleteSaveError> {
         let is_it = |o: &OrphanDeviceSave| o.platform == orphan.platform && o.path == orphan.path;
-        if !self.orphan_saves()?.iter().any(is_it) {
+        if !self.find_orphan_saves()?.iter().any(is_it) {
             return Err(DeleteSaveError::NoSave);
         }
         let path = self
@@ -437,7 +437,7 @@ impl Device {
 
     /// The saves on the device with no game, as the folders are now: they
     /// are looked for each time, and the device needn't be scanned.
-    pub fn orphan_saves(&self) -> Result<Vec<OrphanDeviceSave>, BaseError> {
+    pub fn find_orphan_saves(&self) -> Result<Vec<OrphanDeviceSave>, BaseError> {
         let declared = self.declared_files()?;
         let saves = self.layout.saves();
         let mut orphans = Vec::new();
@@ -590,7 +590,7 @@ impl Device {
 
     /// The files the cores on the device load, by platform and path, as the
     /// folders are now.
-    pub fn bios_rows(&self) -> Result<Vec<BiosRow>, BaseError> {
+    pub fn read_bios_rows(&self) -> Result<Vec<BiosRow>, BaseError> {
         let mut rows: Vec<BiosRow> = Vec::new();
         for (core, file) in self.core_files()? {
             let same = |r: &&mut BiosRow| r.platform == file.platform && r.path == file.path;
@@ -630,7 +630,7 @@ impl Device {
         path: &Path,
         from: &Path,
     ) -> Result<(), PutBiosError> {
-        let rows = self.bios_rows()?;
+        let rows = self.read_bios_rows()?;
         let row = rows
             .iter()
             .find(|r| &r.platform == platform && r.path == path);
@@ -1329,7 +1329,7 @@ mod tests {
         }
 
         fn status(device: &Device) -> BiosStatus {
-            device.bios_rows().unwrap().remove(0).status
+            device.read_bios_rows().unwrap().remove(0).status
         }
 
         #[test]
@@ -1345,7 +1345,7 @@ mod tests {
             core(&device, "a.GB", "gb", r#"{"filename":"gb_bios.bin"}"#);
             core(&device, "a.GG", "gg", r#"{"name":"Cartridge"}"#);
             assert_eq!(
-                device.bios_rows().unwrap(),
+                device.read_bios_rows().unwrap(),
                 [
                     BiosRow {
                         platform: Platform::Gb,
@@ -1373,7 +1373,11 @@ mod tests {
                     let slot = format!(r#"{{"filename":"x.bin","size_exact":{size}}}"#);
                     core(&device, core_id, "gba", &slot);
                 }
-                assert_eq!(device.bios_rows().unwrap()[0].size_exact, None, "{sizes:?}");
+                assert_eq!(
+                    device.read_bios_rows().unwrap()[0].size_exact,
+                    None,
+                    "{sizes:?}"
+                );
             }
         }
 
@@ -1384,7 +1388,7 @@ mod tests {
             put(device.root(), "Cores/broken.A/core.json", b"{ not json");
             core(&device, "broken.B", "gba", BIOS);
             put(device.root(), "Cores/broken.B/data.json", b"{ not json");
-            let rows = device.bios_rows().unwrap();
+            let rows = device.read_bios_rows().unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].needed_by, [("a.GBA".to_string(), true)]);
         }
@@ -1516,7 +1520,7 @@ mod tests {
                 put(root, "Assets/gba/common/Kept.gba", b"game");
                 put(root, "Saves/gba/common/gba_bios.sav", b"save");
                 put(root, "Saves/gba/common/Kept.sav", b"save");
-                let orphans = device.orphan_saves().unwrap();
+                let orphans = device.find_orphan_saves().unwrap();
                 let found: Vec<_> = orphans.iter().map(|o| o.path.clone()).collect();
                 assert_eq!(found, [PathBuf::from("gba_bios.sav")]);
             }
@@ -1537,7 +1541,7 @@ mod tests {
             put(root, "Saves/gba/common/notes.txt", b"not a save");
             // No folder for this platform under `Assets/`, nor a scan.
             put(root, "Saves/gb/common/Gone Too.sav", b"none");
-            let orphans = device.orphan_saves().unwrap();
+            let orphans = device.find_orphan_saves().unwrap();
             let found: Vec<_> = orphans
                 .iter()
                 .map(|o| (o.platform.clone(), o.path.clone(), o.save.size))
@@ -1556,7 +1560,7 @@ mod tests {
             let (_dir, device) = empty_device();
             let root = device.root().to_path_buf();
             let save = put(&root, "Saves/gba/common/RPG/Gone.sav", b"save");
-            let orphan = device.orphan_saves().unwrap().remove(0);
+            let orphan = device.find_orphan_saves().unwrap().remove(0);
             device.remove_orphan_save(&orphan).unwrap();
             assert!(!save.exists());
         }
@@ -1566,7 +1570,7 @@ mod tests {
             let (_dir, device) = empty_device();
             let root = device.root().to_path_buf();
             let save = put(&root, "Saves/gba/common/Tetris.sav", b"save");
-            let orphan = device.orphan_saves().unwrap().remove(0);
+            let orphan = device.find_orphan_saves().unwrap().remove(0);
             put(&root, "Assets/gba/common/Tetris.gba", b"hello");
             assert!(matches!(
                 device.remove_orphan_save(&orphan),

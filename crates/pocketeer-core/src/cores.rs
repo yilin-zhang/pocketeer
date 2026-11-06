@@ -83,6 +83,24 @@ pub enum CoreRow {
 }
 
 impl CoreRow {
+    /// A row for each of `latest`, with its copy in `installed` if there is one,
+    /// and then a row for each of the others.
+    pub(crate) fn pair(mut installed: Vec<InstalledCore>, latest: Vec<InventoryCore>) -> Vec<Self> {
+        let mut rows = Vec::new();
+        for latest in latest {
+            let on_device = installed.iter().position(|c| c.id == latest.id);
+            rows.push(match on_device {
+                Some(i) => CoreRow::Both {
+                    installed: installed.remove(i),
+                    latest,
+                },
+                None => CoreRow::Available(latest),
+            });
+        }
+        rows.extend(installed.into_iter().map(CoreRow::Installed));
+        rows
+    }
+
     pub fn id(&self) -> &str {
         match self {
             CoreRow::Installed(InstalledCore { id, .. })

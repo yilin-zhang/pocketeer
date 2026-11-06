@@ -239,7 +239,7 @@ impl Library {
     }
 
     /// The saves with no game of their name, as the folders are now.
-    pub fn orphan_saves(&self) -> Result<Vec<OrphanLocalSave>, BaseError> {
+    pub fn find_orphan_saves(&self) -> Result<Vec<OrphanLocalSave>, BaseError> {
         let all = self.layout.all_saves();
         let mut orphans = Vec::new();
         for id in list_dir(&all)?.dirs {
@@ -275,7 +275,7 @@ impl Library {
         orphan: &OrphanLocalSave,
     ) -> Result<Vec<PathBuf>, BaseError> {
         let is_it = |o: &OrphanLocalSave| o.platform == orphan.platform && o.stem == orphan.stem;
-        if !self.orphan_saves()?.iter().any(is_it) {
+        if !self.find_orphan_saves()?.iter().any(is_it) {
             return Ok(Vec::new());
         }
         let files = self.files_of_saves(&orphan.platform, &orphan.stem)?;
@@ -1142,7 +1142,7 @@ mod tests {
             put(library.root(), "saves/gb/Kept/a.sav", b"another platform");
             put(library.root(), "saves/gba/Empty/notes.txt", b"not a save");
             library.reload().unwrap();
-            let orphans = library.orphan_saves().unwrap();
+            let orphans = library.find_orphan_saves().unwrap();
             let found: Vec<_> = orphans
                 .iter()
                 .map(|o| (o.platform.clone(), o.stem.as_str()))
@@ -1156,7 +1156,7 @@ mod tests {
             let old = put_at(library.root(), "saves/gba/Gone/old.sav", b"a", 1_000);
             let new = put_at(library.root(), "saves/gba/Gone/new.sav", b"b", 2_000);
             library.reload().unwrap();
-            let orphan = library.orphan_saves().unwrap().remove(0);
+            let orphan = library.find_orphan_saves().unwrap().remove(0);
             assert_eq!(library.files_of_orphan_save(&orphan).unwrap(), [new, old]);
         }
 
@@ -1165,7 +1165,7 @@ mod tests {
             let (_dir, mut library) = library();
             put_at(library.root(), "saves/gba/Gone/old.sav", b"a", 1_000);
             library.reload().unwrap();
-            let orphan = library.orphan_saves().unwrap().remove(0);
+            let orphan = library.find_orphan_saves().unwrap().remove(0);
             put(library.root(), "roms/gba/Gone.gba", b"hello");
             library.reload().unwrap();
             assert_eq!(

@@ -19,7 +19,7 @@ use pocketeer_core::{
     device::{Device, DeviceEntry, OrphanDeviceSave},
     game::Save,
     library::{LocalEntry, OrphanLocalSave},
-    log::{FrontEnd, LogEvent, device_ref},
+    log::{FrontEnd, OperationReport, device_ref},
     platform::Platform,
     pocketeer::GameRow,
 };
@@ -280,15 +280,15 @@ impl State<'_> {
     /// Orphans are looked for only when a command ends: that reads every
     /// save, and there may be a snapshot for each game.
     fn refresh_orphans(&mut self, p: &Pocketeer) {
-        self.orphans.in_library = p.orphan_saves_in_library().unwrap_or_default();
-        self.orphans.on_device = p.orphan_saves_on_device().unwrap_or_default();
+        self.orphans.in_library = p.find_orphan_saves_in_library().unwrap_or_default();
+        self.orphans.on_device = p.find_orphan_saves_on_device().unwrap_or_default();
     }
 
     fn send_cores(&self, p: &mut Pocketeer) {
         if !self.cores_wanted {
             return;
         }
-        let (rows, failure) = match p.core_rows() {
+        let (rows, failure) = match p.load_core_rows() {
             Ok((rows, failure)) => (rows, failure.map(|e| e.to_string())),
             Err(e) => (Vec::new(), Some(e.to_string())),
         };
@@ -296,7 +296,7 @@ impl State<'_> {
     }
 
     fn send_bios(&self, p: &Pocketeer) {
-        (self.send)(Update::Bios(p.bios_rows().unwrap_or_default()));
+        (self.send)(Update::Bios(p.read_bios_rows().unwrap_or_default()));
     }
 
     /// Opens a device that came, closes one that went.
@@ -373,90 +373,98 @@ impl State<'_> {
             orphans: &self.orphans,
             cancel_token,
             total: target_count(&command),
-            events: Vec::new(),
+            reports: Vec::new(),
         };
         let label = job_label(&command);
         (self.send)(Update::Started {
             label: label.to_string(),
             total: batch.total,
         });
-        // A command for one game goes through `batch` by hand; it has no entry
-        // to go by, only what came of it.
-        let done = match command {
-            Command::PullGames(games) => p.pull_games(&games, |p, e| batch.report_step(p, e.event)),
-            Command::PullSaves(games) => p.pull_saves(&games, |p, e| batch.report_step(p, e.event)),
-            Command::PushGames(games) => p.push_games(&games, |p, e| batch.report_step(p, e.event)),
-            Command::PushSaves(games) => p.push_saves(&games, |p, e| batch.report_step(p, e.event)),
+        // A command that isn't a batch reports through `batch` by hand: it has no
+        // entry to go by, only what came of it.
+        let batch_result = match command {
+            Command::PullGames(games) => {
+                p.pull_games(&games, |p, e| batch.report_step(p, e.report))
+            }
+            Command::PullSaves(games) => {
+                p.pull_saves(&games, |p, e| batch.report_step(p, e.report))
+            }
+            Command::PushGames(games) => {
+                p.push_games(&games, |p, e| batch.report_step(p, e.report))
+            }
+            Command::PushSaves(games) => {
+                p.push_saves(&games, |p, e| batch.report_step(p, e.report))
+            }
             Command::PushSaveVersion(game, version) => {
-                let done = p.push_save_version(&game, &version);
-                Ok(batch.report_step(p, LogEvent::PushSave(game, done)))
+                p.push_save_versions(&[(game, version)], |p, e| batch.report_step(p, e.report))
             }
             Command::FetchCovers(games) => {
-                p.fetch_covers(&games, |p, e| batch.report_step(p, e.event))
+                p.fetch_covers(&games, |p, e| batch.report_step(p, e.report))
             }
             Command::ImportGame(path, platform) => {
-                p.expand_import_paths(&[path]).and_then(|files| {
+                pocketeer_core::pocketeer::expand_import_paths(&[path]).and_then(|files| {
                     batch.total = files.len();
                     p.import_games(&files, platform.as_ref(), |p, e| {
-                        batch.report_step(p, e.event)
+                        batch.report_step(p, e.report)
                     })
                 })
             }
             Command::ImportSave(game, from) => {
-                p.import_saves(&[(game, from)], |p, e| batch.report_step(p, e.event))
+                p.import_saves(&[(game, from)], |p, e| batch.report_step(p, e.report))
             }
             Command::TrashGames(games) => {
-                p.trash_games_in_library(&games, |p, e| batch.report_step(p, e.event))
+                p.trash_games_in_library(&games, |p, e| batch.report_step(p, e.report))
             }
-            Command::TrashSaveVersion(game, version) => {
-                let done = p.trash_save_version_in_library(&game, &version);
-                let event = LogEvent::TrashSaveVersion(game, version.timestamp(), done);
-                Ok(batch.report_step(p, event))
-            }
+            Command::TrashSaveVersion(game, version) => p
+                .trash_save_versions_in_library(&[(game, version)], |p, e| {
+                    batch.report_step(p, e.report)
+                }),
             Command::TrashOrphanSaves(orphans) => {
-                p.trash_orphan_saves_in_library(&orphans, |p, e| batch.report_step(p, e.event))
+                p.trash_orphan_saves_in_library(&orphans, |p, e| batch.report_step(p, e.report))
             }
             Command::DeleteGames(games) => {
-                p.delete_games_on_device(&games, |p, e| batch.report_step(p, e.event))
+                p.delete_games_on_device(&games, |p, e| batch.report_step(p, e.report))
             }
             Command::DeleteSaves(games) => {
-                p.delete_saves_on_device(&games, |p, e| batch.report_step(p, e.event))
+                p.delete_saves_on_device(&games, |p, e| batch.report_step(p, e.report))
             }
             Command::DeleteOrphanSaves(orphans) => {
-                p.delete_orphan_saves_on_device(&orphans, |p, e| batch.report_step(p, e.event))
+                p.delete_orphan_saves_on_device(&orphans, |p, e| batch.report_step(p, e.report))
             }
             // Taken care of above: it is no job to report on.
             Command::ShowCores => Ok(ControlFlow::Continue(())),
             Command::InstallCores(ids) => {
-                p.install_cores(&ids, |p, e| batch.report_step(p, e.event))
+                p.install_cores(&ids, |p, e| batch.report_step(p, e.report))
             }
-            Command::RemoveCores(ids) => p.remove_cores(&ids, |p, e| batch.report_step(p, e.event)),
+            Command::RemoveCores(ids) => {
+                p.remove_cores(&ids, |p, e| batch.report_step(p, e.report))
+            }
             Command::PutBios(row, from) => {
-                p.put_bios_files(&[(row, from)], |p, e| batch.report_step(p, e.event))
+                p.put_bios_files(&[(row, from)], |p, e| batch.report_step(p, e.report))
             }
             Command::RenameInLibrary(game, new) => {
-                p.rename_games_in_library(&[(game, new)], |p, e| batch.report_step(p, e.event))
+                p.rename_games_in_library(&[(game, new)], |p, e| batch.report_step(p, e.report))
             }
             Command::RenameOnDevice(game, new) => {
-                p.rename_games_on_device(&[(game, new)], |p, e| batch.report_step(p, e.event))
+                p.rename_games_on_device(&[(game, new)], |p, e| batch.report_step(p, e.report))
             }
             Command::SyncDats => {
                 let synced = p.sync_dats();
-                Ok(batch.report_step(p, LogEvent::SyncDats(synced)))
+                Ok(batch.report_step(p, OperationReport::SyncDats(synced)))
             }
             Command::Reload => {
                 let read = p.reload();
                 let read = read.map(|report| send_duplicates(self.send, p, &report.duplicates));
-                Ok(batch.report_step(p, LogEvent::Reload(read)))
+                Ok(batch.report_step(p, OperationReport::Reload(read)))
             }
             Command::Eject => {
                 let root = p.device().map(|d| d.root().to_path_buf());
                 let ejected = p.eject_device();
-                Ok(batch.report_step(p, LogEvent::Eject(root, ejected)))
+                Ok(batch.report_step(p, OperationReport::Eject(root, ejected)))
             }
         };
-        let (mut summary, mut failed) = summary(label, batch.total, &batch.events);
-        if let Err(e) = done {
+        let (mut summary, mut failed) = summary(label, batch.total, &batch.reports);
+        if let Err(e) = batch_result {
             summary.push_str(&format!("; {e}"));
             failed = true;
         }
@@ -471,18 +479,18 @@ struct Batch<'a> {
     cancel_token: &'a AtomicBool,
     total: usize,
     /// What it has done so far.
-    events: Vec<LogEvent>,
+    reports: Vec<OperationReport>,
 }
 
 impl Batch<'_> {
     /// Notes how one game went and sends how things stand; breaks if the
     /// command was cancelled.
-    fn report_step(&mut self, p: &Pocketeer, event: LogEvent) -> ControlFlow<()> {
-        let game = event.subject();
-        self.events.push(event);
+    fn report_step(&mut self, p: &Pocketeer, report: OperationReport) -> ControlFlow<()> {
+        let game = report.subject();
+        self.reports.push(report);
         (self.send)(Update::Snapshot(snapshot(p, self.orphans)));
         (self.send)(Update::Progress {
-            done: self.events.len(),
+            done: self.reports.len(),
             total: self.total,
             game,
         });
@@ -496,11 +504,11 @@ impl Batch<'_> {
 
 /// How a command labelled `label`, meant for `total` games, went; and whether
 /// any of it failed.
-fn summary(label: &str, total: usize, events: &[LogEvent]) -> (String, bool) {
-    let done = events.len();
-    let failed = events.iter().filter(|e| !e.is_ok()).count();
-    let first_failure = events.iter().find(|e| !e.is_ok());
-    let summary = match (total, first_failure, events.last()) {
+fn summary(label: &str, total: usize, reports: &[OperationReport]) -> (String, bool) {
+    let done = reports.len();
+    let failed = reports.iter().filter(|r| !r.is_ok()).count();
+    let first_failure = reports.iter().find(|r| !r.is_ok());
+    let summary = match (total, first_failure, reports.last()) {
         (1, _, Some(last)) => last.to_line(),
         (_, Some(first), _) => format!(
             "{label}: {done} of {total} done, {failed} failed; first: {}",
@@ -517,7 +525,7 @@ fn snapshot(p: &Pocketeer, orphans: &Orphans) -> Snapshot {
         .game_rows()
         .into_iter()
         .map(|row| Row::Game {
-            standard_name: p.dat_entry_for(row.game()).map(|d| d.name.clone()),
+            standard_name: p.find_dat_entry(row.game()).map(|d| d.name.clone()),
             files: row
                 .local_entry()
                 .map_or(Vec::new(), |l| p.library().files_of(l)),
@@ -1039,8 +1047,8 @@ mod tests {
 
     #[test]
     fn summarizes_how_command_went() {
-        let ok = || LogEvent::Reload(Ok(()));
-        let bad = || LogEvent::Reload(Err(pocketeer_core::error::BaseError::NoDevice));
+        let ok = || OperationReport::Reload(Ok(()));
+        let bad = || OperationReport::Reload(Err(pocketeer_core::error::BaseError::NoDevice));
         assert_eq!(
             summary("reading", 1, &[ok()]),
             ("everything: read again".to_string(), false)

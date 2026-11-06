@@ -1,5 +1,5 @@
-//! What was done, through which front end: a record of it, and the file it is
-//! kept in.
+//! What an operation did and how it went, as the front ends show it and the log
+//! file keeps it.
 
 use std::{
     fmt,
@@ -29,7 +29,7 @@ use crate::{
 };
 
 /// What was done, to what, and how it went.
-pub enum LogEvent {
+pub enum OperationReport {
     PullGame(DeviceEntry, Result<PullGameOutcome, AddGameError>),
     PullSave(DeviceEntry, Result<PullSaveOutcome, PullSaveError>),
     PushGame(LocalEntry, Result<PushGameOutcome, PushGameError>),
@@ -61,67 +61,69 @@ pub enum LogEvent {
     Eject(Option<PathBuf>, Result<(), BaseError>),
 }
 
-impl LogEvent {
+impl OperationReport {
     /// Whether it went well. Finding nothing to do is not a failure, unless
     /// something in particular was asked for.
     pub fn is_ok(&self) -> bool {
         match self {
-            LogEvent::PullSave(_, Err(PullSaveError::NoSave))
-            | LogEvent::FetchCover(_, Err(FetchCoverError::NoCover))
-            | LogEvent::TrashSaveAll(_, Err(TrashSaveError::NoSave))
-            | LogEvent::DeleteSave(_, Err(DeleteSaveError::NoSave)) => true,
-            LogEvent::PullGame(_, done) => done.is_ok(),
-            LogEvent::PullSave(_, done) => done.is_ok(),
-            LogEvent::PushGame(_, done) => done.is_ok(),
-            LogEvent::PushSave(_, done) => done.is_ok(),
-            LogEvent::FetchCover(_, done) => done.is_ok(),
-            LogEvent::ImportGame(_, done) => done.is_ok(),
-            LogEvent::ImportSave(_, _, done) => done.is_ok(),
-            LogEvent::TrashGame(_, done)
-            | LogEvent::DeleteGame(_, done)
-            | LogEvent::Reload(done)
-            | LogEvent::Eject(_, done) => done.is_ok(),
-            LogEvent::TrashSaveAll(_, done)
-            | LogEvent::TrashSaveVersion(_, _, done)
-            | LogEvent::TrashOrphanSave(_, done) => done.is_ok(),
-            LogEvent::DeleteSave(_, done) | LogEvent::DeleteOrphanSave(_, done) => done.is_ok(),
-            LogEvent::InstallCore(_, done) => done.is_ok(),
-            LogEvent::RemoveCore(_, done) => done.is_ok(),
-            LogEvent::PutBios(_, _, done) => done.is_ok(),
-            LogEvent::RenameInLibrary(_, done) => done.is_ok(),
-            LogEvent::RenameOnDevice(_, done) => done.is_ok(),
-            LogEvent::SyncDats(done) => done.is_ok(),
+            OperationReport::PullSave(_, Err(PullSaveError::NoSave))
+            | OperationReport::FetchCover(_, Err(FetchCoverError::NoCover))
+            | OperationReport::TrashSaveAll(_, Err(TrashSaveError::NoSave))
+            | OperationReport::DeleteSave(_, Err(DeleteSaveError::NoSave)) => true,
+            OperationReport::PullGame(_, done) => done.is_ok(),
+            OperationReport::PullSave(_, done) => done.is_ok(),
+            OperationReport::PushGame(_, done) => done.is_ok(),
+            OperationReport::PushSave(_, done) => done.is_ok(),
+            OperationReport::FetchCover(_, done) => done.is_ok(),
+            OperationReport::ImportGame(_, done) => done.is_ok(),
+            OperationReport::ImportSave(_, _, done) => done.is_ok(),
+            OperationReport::TrashGame(_, done)
+            | OperationReport::DeleteGame(_, done)
+            | OperationReport::Reload(done)
+            | OperationReport::Eject(_, done) => done.is_ok(),
+            OperationReport::TrashSaveAll(_, done)
+            | OperationReport::TrashSaveVersion(_, _, done)
+            | OperationReport::TrashOrphanSave(_, done) => done.is_ok(),
+            OperationReport::DeleteSave(_, done) | OperationReport::DeleteOrphanSave(_, done) => {
+                done.is_ok()
+            }
+            OperationReport::InstallCore(_, done) => done.is_ok(),
+            OperationReport::RemoveCore(_, done) => done.is_ok(),
+            OperationReport::PutBios(_, _, done) => done.is_ok(),
+            OperationReport::RenameInLibrary(_, done) => done.is_ok(),
+            OperationReport::RenameOnDevice(_, done) => done.is_ok(),
+            OperationReport::SyncDats(done) => done.is_ok(),
         }
     }
 
     /// What it was done to, as a person would say it.
     pub fn subject(&self) -> String {
         match self {
-            LogEvent::PullGame(on_device, _)
-            | LogEvent::PullSave(on_device, _)
-            | LogEvent::PushSave(on_device, _)
-            | LogEvent::DeleteGame(on_device, _)
-            | LogEvent::DeleteSave(on_device, _)
-            | LogEvent::RenameOnDevice(on_device, _) => device_ref(on_device),
-            LogEvent::PushGame(local, _)
-            | LogEvent::FetchCover(local, _)
-            | LogEvent::ImportSave(local, ..)
-            | LogEvent::TrashGame(local, _)
-            | LogEvent::TrashSaveAll(local, _)
-            | LogEvent::TrashSaveVersion(local, ..)
-            | LogEvent::RenameInLibrary(local, _) => library_ref(local),
-            LogEvent::TrashOrphanSave(orphan, _) => library_orphan_ref(orphan),
-            LogEvent::DeleteOrphanSave(orphan, _) => device_orphan_ref(orphan),
+            OperationReport::PullGame(on_device, _)
+            | OperationReport::PullSave(on_device, _)
+            | OperationReport::PushSave(on_device, _)
+            | OperationReport::DeleteGame(on_device, _)
+            | OperationReport::DeleteSave(on_device, _)
+            | OperationReport::RenameOnDevice(on_device, _) => device_ref(on_device),
+            OperationReport::PushGame(local, _)
+            | OperationReport::FetchCover(local, _)
+            | OperationReport::ImportSave(local, ..)
+            | OperationReport::TrashGame(local, _)
+            | OperationReport::TrashSaveAll(local, _)
+            | OperationReport::TrashSaveVersion(local, ..)
+            | OperationReport::RenameInLibrary(local, _) => library_ref(local),
+            OperationReport::TrashOrphanSave(orphan, _) => library_orphan_ref(orphan),
+            OperationReport::DeleteOrphanSave(orphan, _) => device_orphan_ref(orphan),
             // Its path is in `to_json`: it would crowd out what comes after.
-            LogEvent::ImportGame(from, _) => {
+            OperationReport::ImportGame(from, _) => {
                 let name = from.file_name().unwrap_or(from.as_os_str());
                 name.to_string_lossy().into_owned()
             }
-            LogEvent::InstallCore(id, _) | LogEvent::RemoveCore(id, _) => id.clone(),
-            LogEvent::PutBios(row, ..) => bios_ref(row),
-            LogEvent::SyncDats(_) => "the DATs".to_string(),
-            LogEvent::Reload(_) => "everything".to_string(),
-            LogEvent::Eject(..) => "the device".to_string(),
+            OperationReport::InstallCore(id, _) | OperationReport::RemoveCore(id, _) => id.clone(),
+            OperationReport::PutBios(row, ..) => bios_ref(row),
+            OperationReport::SyncDats(_) => "the DATs".to_string(),
+            OperationReport::Reload(_) => "everything".to_string(),
+            OperationReport::Eject(..) => "the device".to_string(),
         }
     }
 
@@ -132,96 +134,101 @@ impl LogEvent {
 }
 
 /// The message.
-impl fmt::Display for LogEvent {
+impl fmt::Display for OperationReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LogEvent::PullGame(_, Ok(PullGameOutcome::Pulled(entry))) => {
+            OperationReport::PullGame(_, Ok(PullGameOutcome::Pulled(entry))) => {
                 write!(f, "pulled as {}", library_ref(entry))
             }
-            LogEvent::PullGame(_, Ok(PullGameOutcome::AlreadyHad)) => {
+            OperationReport::PullGame(_, Ok(PullGameOutcome::AlreadyHad)) => {
                 write!(f, "the library has it already")
             }
-            LogEvent::PullGame(_, Err(e @ (AddGameError::NameTaken | AddGameError::BadName))) => {
+            OperationReport::PullGame(
+                _,
+                Err(e @ (AddGameError::NameTaken | AddGameError::BadName)),
+            ) => {
                 write!(f, "not pulled: {e}")
             }
-            LogEvent::PullGame(_, Err(AddGameError::Other(e))) => write!(f, "error: {e}"),
+            OperationReport::PullGame(_, Err(AddGameError::Other(e))) => write!(f, "error: {e}"),
 
-            LogEvent::PullSave(_, Ok(PullSaveOutcome::Pulled)) => write!(f, "save kept"),
-            LogEvent::PullSave(_, Ok(PullSaveOutcome::AlreadyHad)) => {
+            OperationReport::PullSave(_, Ok(PullSaveOutcome::Pulled)) => write!(f, "save kept"),
+            OperationReport::PullSave(_, Ok(PullSaveOutcome::AlreadyHad)) => {
                 write!(f, "the library has this save already")
             }
-            LogEvent::PullSave(_, Err(PullSaveError::Other(e))) => write!(f, "error: {e}"),
-            LogEvent::PullSave(_, Err(e)) => write!(f, "{e}"),
+            OperationReport::PullSave(_, Err(PullSaveError::Other(e))) => write!(f, "error: {e}"),
+            OperationReport::PullSave(_, Err(e)) => write!(f, "{e}"),
 
-            LogEvent::PushGame(_, Ok(PushGameOutcome::Pushed(entry))) => {
+            OperationReport::PushGame(_, Ok(PushGameOutcome::Pushed(entry))) => {
                 write!(f, "pushed to {}", device_ref(entry))
             }
-            LogEvent::PushGame(_, Ok(PushGameOutcome::AlreadyThere(entry))) => {
+            OperationReport::PushGame(_, Ok(PushGameOutcome::AlreadyThere(entry))) => {
                 write!(f, "on the device already, at {}", device_ref(entry))
             }
-            LogEvent::PushGame(_, Err(e @ PushGameError::NameTaken)) => write!(f, "{e}"),
-            LogEvent::PushGame(_, Err(PushGameError::Other(e))) => write!(f, "error: {e}"),
+            OperationReport::PushGame(_, Err(e @ PushGameError::NameTaken)) => write!(f, "{e}"),
+            OperationReport::PushGame(_, Err(PushGameError::Other(e))) => write!(f, "error: {e}"),
 
-            LogEvent::PushSave(_, Ok(PushSaveOutcome::Pushed(save))) => {
+            OperationReport::PushSave(_, Ok(PushSaveOutcome::Pushed(save))) => {
                 write!(f, "save {} pushed", save.timestamp())
             }
-            LogEvent::PushSave(_, Ok(PushSaveOutcome::AlreadyThere)) => {
+            OperationReport::PushSave(_, Ok(PushSaveOutcome::AlreadyThere)) => {
                 write!(f, "the device has this save already")
             }
-            LogEvent::PushSave(_, Err(e @ PushSaveError::NotBackedUp)) => {
+            OperationReport::PushSave(_, Err(e @ PushSaveError::NotBackedUp)) => {
                 write!(f, "{e}; back it up first")
             }
-            LogEvent::PushSave(
+            OperationReport::PushSave(
                 _,
                 Err(e @ (PushSaveError::Other(_) | PushSaveError::AmbiguousVersion { .. })),
             ) => write!(f, "error: {e}"),
-            LogEvent::PushSave(_, Err(e)) => write!(f, "{e}"),
+            OperationReport::PushSave(_, Err(e)) => write!(f, "{e}"),
 
-            LogEvent::FetchCover(_, Ok(FetchCoverOutcome::Fetched)) => {
+            OperationReport::FetchCover(_, Ok(FetchCoverOutcome::Fetched)) => {
                 write!(f, "cover downloaded")
             }
-            LogEvent::FetchCover(_, Ok(FetchCoverOutcome::AlreadyHad)) => {
+            OperationReport::FetchCover(_, Ok(FetchCoverOutcome::AlreadyHad)) => {
                 write!(f, "it has a cover already")
             }
-            LogEvent::FetchCover(_, Err(FetchCoverError::Other(e))) => write!(f, "error: {e}"),
-            LogEvent::FetchCover(_, Err(e)) => write!(f, "{e}"),
+            OperationReport::FetchCover(_, Err(FetchCoverError::Other(e))) => {
+                write!(f, "error: {e}")
+            }
+            OperationReport::FetchCover(_, Err(e)) => write!(f, "{e}"),
 
-            LogEvent::ImportGame(_, Ok(ImportGameOutcome::Imported(entry))) => {
+            OperationReport::ImportGame(_, Ok(ImportGameOutcome::Imported(entry))) => {
                 write!(f, "imported as {}", library_ref(entry))
             }
-            LogEvent::ImportGame(_, Ok(ImportGameOutcome::AlreadyHad(entry))) => {
+            OperationReport::ImportGame(_, Ok(ImportGameOutcome::AlreadyHad(entry))) => {
                 write!(f, "the library has it already, as {}", library_ref(entry))
             }
-            LogEvent::ImportGame(_, Err(e @ ImportGameError::UnknownPlatform)) => {
+            OperationReport::ImportGame(_, Err(e @ ImportGameError::UnknownPlatform)) => {
                 write!(f, "{e}")
             }
-            LogEvent::ImportGame(
+            OperationReport::ImportGame(
                 _,
                 Err(ImportGameError::Add(e @ (AddGameError::NameTaken | AddGameError::BadName))),
             ) => {
                 write!(f, "not imported: {e}")
             }
-            LogEvent::ImportGame(_, Err(ImportGameError::Add(AddGameError::Other(e)))) => {
+            OperationReport::ImportGame(_, Err(ImportGameError::Add(AddGameError::Other(e)))) => {
                 write!(f, "error: {e}")
             }
 
-            LogEvent::ImportSave(_, _, Ok(ImportSaveOutcome::Imported(save))) => {
+            OperationReport::ImportSave(_, _, Ok(ImportSaveOutcome::Imported(save))) => {
                 write!(f, "save {} imported", save.timestamp())
             }
-            LogEvent::ImportSave(_, _, Ok(ImportSaveOutcome::AlreadyHad)) => {
+            OperationReport::ImportSave(_, _, Ok(ImportSaveOutcome::AlreadyHad)) => {
                 write!(f, "the library has this save already")
             }
-            LogEvent::ImportSave(_, _, Err(e)) => write!(f, "error: {e}"),
+            OperationReport::ImportSave(_, _, Err(e)) => write!(f, "error: {e}"),
 
-            LogEvent::TrashGame(_, Ok(())) => write!(f, "put in the trash"),
-            LogEvent::TrashSaveAll(_, Ok(()))
-            | LogEvent::TrashSaveVersion(_, _, Ok(()))
-            | LogEvent::TrashOrphanSave(_, Ok(())) => {
+            OperationReport::TrashGame(_, Ok(())) => write!(f, "put in the trash"),
+            OperationReport::TrashSaveAll(_, Ok(()))
+            | OperationReport::TrashSaveVersion(_, _, Ok(()))
+            | OperationReport::TrashOrphanSave(_, Ok(())) => {
                 write!(f, "save put in the trash")
             }
-            LogEvent::TrashSaveAll(_, Err(e))
-            | LogEvent::TrashSaveVersion(_, _, Err(e))
-            | LogEvent::TrashOrphanSave(_, Err(e))
+            OperationReport::TrashSaveAll(_, Err(e))
+            | OperationReport::TrashSaveVersion(_, _, Err(e))
+            | OperationReport::TrashOrphanSave(_, Err(e))
                 if matches!(
                     e,
                     TrashSaveError::Other(_) | TrashSaveError::AmbiguousVersion { .. }
@@ -229,65 +236,71 @@ impl fmt::Display for LogEvent {
             {
                 write!(f, "error: {e}")
             }
-            LogEvent::TrashSaveAll(_, Err(e))
-            | LogEvent::TrashSaveVersion(_, _, Err(e))
-            | LogEvent::TrashOrphanSave(_, Err(e)) => write!(f, "{e}"),
+            OperationReport::TrashSaveAll(_, Err(e))
+            | OperationReport::TrashSaveVersion(_, _, Err(e))
+            | OperationReport::TrashOrphanSave(_, Err(e)) => write!(f, "{e}"),
 
-            LogEvent::DeleteGame(_, Ok(())) => write!(f, "deleted from the device"),
-            LogEvent::DeleteSave(_, Ok(())) | LogEvent::DeleteOrphanSave(_, Ok(())) => {
+            OperationReport::DeleteGame(_, Ok(())) => write!(f, "deleted from the device"),
+            OperationReport::DeleteSave(_, Ok(()))
+            | OperationReport::DeleteOrphanSave(_, Ok(())) => {
                 write!(f, "save deleted from the device")
             }
-            LogEvent::DeleteSave(_, Err(DeleteSaveError::Other(e)))
-            | LogEvent::DeleteOrphanSave(_, Err(DeleteSaveError::Other(e))) => {
+            OperationReport::DeleteSave(_, Err(DeleteSaveError::Other(e)))
+            | OperationReport::DeleteOrphanSave(_, Err(DeleteSaveError::Other(e))) => {
                 write!(f, "error: {e}")
             }
-            LogEvent::DeleteSave(_, Err(e)) | LogEvent::DeleteOrphanSave(_, Err(e)) => {
+            OperationReport::DeleteSave(_, Err(e))
+            | OperationReport::DeleteOrphanSave(_, Err(e)) => {
                 write!(f, "{e}")
             }
 
-            LogEvent::InstallCore(_, Ok(InstallCoreOutcome::Installed { version })) => {
+            OperationReport::InstallCore(_, Ok(InstallCoreOutcome::Installed { version })) => {
                 write!(f, "{version} installed")
             }
-            LogEvent::InstallCore(_, Ok(InstallCoreOutcome::AlreadyCurrent)) => {
+            OperationReport::InstallCore(_, Ok(InstallCoreOutcome::AlreadyCurrent)) => {
                 write!(f, "the device has the newest version")
             }
-            LogEvent::InstallCore(_, Err(InstallCoreError::Other(e))) => write!(f, "error: {e}"),
-            LogEvent::InstallCore(_, Err(e)) => write!(f, "{e}"),
-            LogEvent::RemoveCore(_, Ok(())) => write!(f, "removed from the device"),
-            LogEvent::RemoveCore(_, Err(RemoveCoreError::Other(e))) => write!(f, "error: {e}"),
-            LogEvent::RemoveCore(_, Err(e)) => write!(f, "{e}"),
-            LogEvent::RenameInLibrary(_, Ok(entry)) => {
+            OperationReport::InstallCore(_, Err(InstallCoreError::Other(e))) => {
+                write!(f, "error: {e}")
+            }
+            OperationReport::InstallCore(_, Err(e)) => write!(f, "{e}"),
+            OperationReport::RemoveCore(_, Ok(())) => write!(f, "removed from the device"),
+            OperationReport::RemoveCore(_, Err(RemoveCoreError::Other(e))) => {
+                write!(f, "error: {e}")
+            }
+            OperationReport::RemoveCore(_, Err(e)) => write!(f, "{e}"),
+            OperationReport::RenameInLibrary(_, Ok(entry)) => {
                 write!(f, "renamed to {}", library_ref(entry))
             }
-            LogEvent::RenameInLibrary(_, Err(RenameInLibraryError::Other(e))) => {
+            OperationReport::RenameInLibrary(_, Err(RenameInLibraryError::Other(e))) => {
                 write!(f, "error: {e}")
             }
-            LogEvent::RenameInLibrary(_, Err(e)) => write!(f, "not renamed: {e}"),
-            LogEvent::RenameOnDevice(_, Ok(entry)) => {
+            OperationReport::RenameInLibrary(_, Err(e)) => write!(f, "not renamed: {e}"),
+            OperationReport::RenameOnDevice(_, Ok(entry)) => {
                 write!(f, "renamed to {}", device_ref(entry))
             }
-            LogEvent::RenameOnDevice(_, Err(RenameOnDeviceError::Other(e))) => {
+            OperationReport::RenameOnDevice(_, Err(RenameOnDeviceError::Other(e))) => {
                 write!(f, "error: {e}")
             }
-            LogEvent::RenameOnDevice(_, Err(e)) => write!(f, "not renamed: {e}"),
-            LogEvent::PutBios(_, _, Ok(())) => write!(f, "put on the device"),
-            LogEvent::PutBios(_, _, Err(PutBiosError::Other(e))) => write!(f, "error: {e}"),
-            LogEvent::PutBios(_, _, Err(e)) => write!(f, "{e}"),
+            OperationReport::RenameOnDevice(_, Err(e)) => write!(f, "not renamed: {e}"),
+            OperationReport::PutBios(_, _, Ok(())) => write!(f, "put on the device"),
+            OperationReport::PutBios(_, _, Err(PutBiosError::Other(e))) => write!(f, "error: {e}"),
+            OperationReport::PutBios(_, _, Err(e)) => write!(f, "{e}"),
 
-            LogEvent::SyncDats(Ok(report)) => {
+            OperationReport::SyncDats(Ok(report)) => {
                 write!(f, "{} platforms updated", report.updated.len())
             }
-            LogEvent::Reload(Ok(())) => write!(f, "read again"),
-            LogEvent::Eject(root, Ok(())) => {
+            OperationReport::Reload(Ok(())) => write!(f, "read again"),
+            OperationReport::Eject(root, Ok(())) => {
                 let root = root.as_ref().map(|r| r.display().to_string());
                 write!(f, "ejected {}", root.unwrap_or_default())
             }
 
-            LogEvent::TrashGame(_, Err(e))
-            | LogEvent::DeleteGame(_, Err(e))
-            | LogEvent::SyncDats(Err(e))
-            | LogEvent::Reload(Err(e))
-            | LogEvent::Eject(_, Err(e)) => write!(f, "error: {e}"),
+            OperationReport::TrashGame(_, Err(e))
+            | OperationReport::DeleteGame(_, Err(e))
+            | OperationReport::SyncDats(Err(e))
+            | OperationReport::Reload(Err(e))
+            | OperationReport::Eject(_, Err(e)) => write!(f, "error: {e}"),
         }
     }
 }
@@ -303,7 +316,7 @@ pub enum FrontEnd {
 pub struct LogEntry {
     pub time: Timestamp,
     pub front_end: FrontEnd,
-    pub event: LogEvent,
+    pub report: OperationReport,
 }
 
 impl LogEntry {
@@ -315,39 +328,39 @@ impl LogEntry {
         let mut json = json!({
             "time": self.time.to_string(),
             "front_end": front_end,
-            "game": self.event.subject(),
-            "ok": self.event.is_ok(),
-            "message": self.event.to_string(),
+            "game": self.report.subject(),
+            "ok": self.report.is_ok(),
+            "message": self.report.to_string(),
         });
-        match &self.event {
-            LogEvent::PullGame(_, Ok(PullGameOutcome::Pulled(entry))) => {
+        match &self.report {
+            OperationReport::PullGame(_, Ok(PullGameOutcome::Pulled(entry))) => {
                 json["library"] = json!(library_ref(entry));
             }
-            LogEvent::PushGame(
+            OperationReport::PushGame(
                 _,
                 Ok(PushGameOutcome::Pushed(entry) | PushGameOutcome::AlreadyThere(entry)),
             ) => {
                 json["device"] = json!(device_ref(entry));
             }
-            LogEvent::PushSave(_, Ok(PushSaveOutcome::Pushed(save))) => {
+            OperationReport::PushSave(_, Ok(PushSaveOutcome::Pushed(save))) => {
                 json["version"] = json!(save.timestamp());
             }
-            LogEvent::TrashSaveVersion(_, version, _) => {
+            OperationReport::TrashSaveVersion(_, version, _) => {
                 json["version"] = json!(version);
             }
-            LogEvent::InstallCore(_, Ok(InstallCoreOutcome::Installed { version })) => {
+            OperationReport::InstallCore(_, Ok(InstallCoreOutcome::Installed { version })) => {
                 json["version"] = json!(version);
             }
-            LogEvent::RenameInLibrary(_, Ok(entry)) => {
+            OperationReport::RenameInLibrary(_, Ok(entry)) => {
                 json["library"] = json!(library_ref(entry));
             }
-            LogEvent::RenameOnDevice(_, Ok(entry)) => {
+            OperationReport::RenameOnDevice(_, Ok(entry)) => {
                 json["device"] = json!(device_ref(entry));
             }
-            LogEvent::PutBios(_, from, _) => {
+            OperationReport::PutBios(_, from, _) => {
                 json["from"] = json!(from.display().to_string());
             }
-            LogEvent::ImportGame(from, done) => {
+            OperationReport::ImportGame(from, done) => {
                 json["from"] = json!(from.display().to_string());
                 if let Ok(
                     ImportGameOutcome::Imported(entry) | ImportGameOutcome::AlreadyHad(entry),
@@ -356,7 +369,7 @@ impl LogEntry {
                     json["library"] = json!(library_ref(entry));
                 }
             }
-            LogEvent::ImportSave(_, from, done) => {
+            OperationReport::ImportSave(_, from, done) => {
                 json["from"] = json!(from.display().to_string());
                 if let Ok(ImportSaveOutcome::Imported(save)) = done {
                     json["version"] = json!(save.timestamp());
@@ -379,18 +392,19 @@ impl Logger {
         Self { path, front_end }
     }
 
-    /// Adds `event` to the file, with the time and this front end; the entry
-    /// that makes, even if it can't be written, and whether it was.
-    pub(crate) fn record(&self, event: LogEvent) -> (LogEntry, Result<(), BaseError>) {
+    /// Adds `report` to the file, with the time and this front end. Returns the
+    /// entry that makes along with whether it was written, not one or the other:
+    /// the operation is done either way, so the front end still has to be told.
+    pub(crate) fn record(&self, report: OperationReport) -> (LogEntry, Result<(), BaseError>) {
         let entry = LogEntry {
             time: Timestamp::now(),
             front_end: self.front_end,
-            event,
+            report,
         };
-        let written = self.write(&entry).map_err(|source| BaseError::LogFailed {
+        let log_write_result = self.write(&entry).map_err(|source| BaseError::LogFailed {
             source: Arc::new(source),
         });
-        (entry, written)
+        (entry, log_write_result)
     }
 
     fn write(&self, entry: &LogEntry) -> io::Result<()> {
@@ -456,63 +470,67 @@ mod tests {
         }
     }
 
-    fn entry(event: LogEvent) -> LogEntry {
+    fn entry(report: OperationReport) -> LogEntry {
         LogEntry {
             time: Timestamp::UNIX_EPOCH,
             front_end: FrontEnd::Cli,
-            event,
+            report,
         }
     }
 
     #[test]
     fn formats_event_as_one_line() {
-        let pulled = LogEvent::PullGame(on_device(), Ok(PullGameOutcome::Pulled(local())));
+        let pulled = OperationReport::PullGame(on_device(), Ok(PullGameOutcome::Pulled(local())));
         assert_eq!(pulled.to_line(), "gba/RPG/Foo.gba: pulled as gba/Foo.gba");
-        let synced = LogEvent::SyncDats(Ok(SyncReport::default()));
+        let synced = OperationReport::SyncDats(Ok(SyncReport::default()));
         assert_eq!(synced.to_line(), "the DATs: 0 platforms updated");
-        let failed = LogEvent::DeleteGame(on_device(), Err(BaseError::NoDevice));
+        let failed = OperationReport::DeleteGame(on_device(), Err(BaseError::NoDevice));
         assert_eq!(failed.to_string(), "error: no device is open");
     }
 
     #[test]
     fn treats_nothing_found_as_failure_only_when_asked_for() {
-        for (event, ok) in [
+        for (report, ok) in [
             (
-                LogEvent::PullSave(on_device(), Err(PullSaveError::NoSave)),
+                OperationReport::PullSave(on_device(), Err(PullSaveError::NoSave)),
                 true,
             ),
             (
-                LogEvent::FetchCover(local(), Err(FetchCoverError::NoCover)),
+                OperationReport::FetchCover(local(), Err(FetchCoverError::NoCover)),
                 true,
             ),
             (
-                LogEvent::TrashSaveAll(local(), Err(TrashSaveError::NoSave)),
+                OperationReport::TrashSaveAll(local(), Err(TrashSaveError::NoSave)),
                 true,
             ),
             (
-                LogEvent::DeleteSave(on_device(), Err(DeleteSaveError::NoSave)),
+                OperationReport::DeleteSave(on_device(), Err(DeleteSaveError::NoSave)),
                 true,
             ),
             (
-                LogEvent::TrashSaveVersion(local(), "x".into(), Err(TrashSaveError::NoSuchVersion)),
+                OperationReport::TrashSaveVersion(
+                    local(),
+                    "x".into(),
+                    Err(TrashSaveError::NoSuchVersion),
+                ),
                 false,
             ),
             (
-                LogEvent::PullSave(on_device(), Err(PullSaveError::NotInLibrary)),
+                OperationReport::PullSave(on_device(), Err(PullSaveError::NotInLibrary)),
                 false,
             ),
             (
-                LogEvent::PushSave(on_device(), Err(PushSaveError::NoSuchVersion)),
+                OperationReport::PushSave(on_device(), Err(PushSaveError::NoSuchVersion)),
                 false,
             ),
         ] {
-            assert_eq!(event.is_ok(), ok, "{}", event.to_line());
+            assert_eq!(report.is_ok(), ok, "{}", report.to_line());
         }
     }
 
     #[test]
     fn formats_event_as_json() {
-        let pushed = LogEvent::PushGame(local(), Ok(PushGameOutcome::Pushed(on_device())));
+        let pushed = OperationReport::PushGame(local(), Ok(PushGameOutcome::Pushed(on_device())));
         assert_eq!(
             entry(pushed).to_json(),
             json!({
@@ -540,14 +558,14 @@ mod tests {
         let path = dir.path().join("pocketeer.log");
         let logger = Logger::new(path.clone(), FrontEnd::Cli);
         assert!(!path.exists());
-        logger.record(LogEvent::Reload(Ok(()))).1.unwrap();
+        logger.record(OperationReport::Reload(Ok(()))).1.unwrap();
         logger
-            .record(LogEvent::DeleteGame(on_device(), Ok(())))
+            .record(OperationReport::DeleteGame(on_device(), Ok(())))
             .1
             .unwrap();
         // Another run adds to what is there.
         let next = Logger::new(path.clone(), FrontEnd::Tui);
-        next.record(LogEvent::Reload(Err(BaseError::NoDevice)))
+        next.record(OperationReport::Reload(Err(BaseError::NoDevice)))
             .1
             .unwrap();
         let written = lines(&path);
