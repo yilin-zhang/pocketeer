@@ -184,35 +184,36 @@ fn hash_rom(mut file: File) -> io::Result<Rom> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::files::testing::at;
 
     mod renaming {
         use super::*;
 
         #[test]
-        fn the_extension_stays() {
+        fn keeps_extension() {
             assert_eq!(renamed_file_name("Old.gba", "New"), "New.gba");
             assert_eq!(renamed_file_name("Old", "New"), "New");
         }
 
         #[test]
-        fn an_extension_given_is_not_doubled() {
+        fn does_not_double_extension() {
             assert_eq!(renamed_file_name("Old.gba", "New.gba"), "New.gba");
             assert_eq!(renamed_file_name("Old.gba", "New.GBA"), "New.gba");
         }
 
         #[test]
-        fn the_dots_of_a_name_are_kept() {
+        fn keeps_dots_in_name() {
             assert_eq!(renamed_file_name("Old.gb", "Dr. Mario"), "Dr. Mario.gb");
             assert_eq!(renamed_file_name("Old.gb", "Dr. Mario.gb"), "Dr. Mario.gb");
         }
 
         #[test]
-        fn spaces_around_it_go() {
+        fn trims_spaces() {
             assert_eq!(renamed_file_name("Old.gba", "  New  "), "New.gba");
         }
 
         #[test]
-        fn nothing_left_is_not_a_plain_name() {
+        fn rejects_empty_name_after_removing_extension() {
             for new in ["", "  ", ".gba", ".GBA"] {
                 assert!(
                     !is_valid_file_name(&renamed_file_name("Old.gba", new)),
@@ -222,7 +223,7 @@ mod tests {
         }
 
         #[test]
-        fn a_name_leading_elsewhere_or_hidden_is_not_plain() {
+        fn rejects_names_with_path_or_leading_dot() {
             for name in ["../x.gba", "a/x.gba", "a\\x.gba", ".x.gba", ""] {
                 assert!(!is_valid_file_name(name), "{name}");
             }
@@ -230,7 +231,7 @@ mod tests {
         }
 
         #[test]
-        fn a_name_a_device_would_not_keep_is_not_given() {
+        fn rejects_characters_fat_cannot_hold() {
             for name in [
                 "a:b.gba", "a?.gba", "a*.gba", "a\".gba", "a<.gba", "a>.gba", "a|.gba",
             ] {
@@ -242,7 +243,6 @@ mod tests {
             ));
         }
     }
-    use crate::files::testing::at;
 
     fn file(bytes: &[u8]) -> tempfile::NamedTempFile {
         let f = tempfile::NamedTempFile::new().unwrap();
@@ -257,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rom_is_its_size_and_crc32() {
+    fn reads_rom_size_and_crc32() {
         let f = file(b"hello");
         let game = Game::read(Platform::Gba, f.path()).unwrap();
         assert_eq!(
@@ -270,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn a_nes_rom_is_hashed_without_its_ines_header() {
+    fn hashes_nes_rom_without_ines_header() {
         let mut bytes = b"NES\x1a".to_vec();
         bytes.extend([0u8; 12]);
         bytes.extend(b"hello");
@@ -289,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn versions_are_found_by_when_they_were_written() {
+    fn finds_versions_by_write_time() {
         let history = SaveHistory::from_saves(vec![
             Save::from_bytes(b"a", at(1)),
             Save::from_bytes(b"b", at(2)),
@@ -308,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn a_history_is_newest_first() {
+    fn sorts_history_newest_first() {
         let history = SaveHistory::from_saves(vec![
             Save::from_bytes(b"a", at(1)),
             Save::from_bytes(b"b", at(3)),
@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn a_save_time_is_written_in_utc() {
+    fn formats_save_time_in_utc() {
         let save = Save::from_bytes(b"", at(1_762_179_605));
         assert_eq!(save.timestamp(), "2025-11-03T14-20-05");
     }

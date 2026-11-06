@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn a_replaced_file_leaves_nothing_beside_it() {
+    fn leaves_no_temp_file_after_replacing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Foo.gba");
         write_atomically(&path, b"old", None).unwrap();
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_left_by_a_dead_process_is_not_listed_and_is_replaced() {
+    fn hides_and_replaces_temp_file_of_dead_process() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(".Foo.gba.part"), b"half").unwrap();
         assert_eq!(list_dir(dir.path()).unwrap().files, Vec::<String>::new());
@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_fill_leaves_nothing_and_keeps_the_old_file() {
+    fn keeps_old_file_and_removes_temp_after_failed_write() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Foo.gba");
         fs::write(&path, b"old").unwrap();
@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_rename_leaves_nothing() {
+    fn leaves_no_temp_file_after_failed_rename() {
         let dir = tempfile::tempdir().unwrap();
         // A folder with something in it can't be replaced by a file.
         let path = dir.path().join("Foo.gba");

@@ -465,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn it_reads_as_what_was_done_to_what() {
+    fn formats_event_as_one_line() {
         let pulled = LogEvent::PullGame(on_device(), Ok(PullGameOutcome::Pulled(local())));
         assert_eq!(pulled.to_line(), "gba/RPG/Foo.gba: pulled as gba/Foo.gba");
         let synced = LogEvent::SyncDats(Ok(SyncReport::default()));
@@ -475,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn finding_nothing_is_a_failure_only_if_something_was_asked_for() {
+    fn treats_nothing_found_as_failure_only_when_asked_for() {
         for (event, ok) in [
             (
                 LogEvent::PullSave(on_device(), Err(PullSaveError::NoSave)),
@@ -511,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn as_json_it_has_when_through_what_and_where_it_led() {
+    fn formats_event_as_json() {
         let pushed = LogEvent::PushGame(local(), Ok(PushGameOutcome::Pushed(on_device())));
         assert_eq!(
             entry(pushed).to_json(),
@@ -535,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn each_event_is_added_to_the_file_and_kept() {
+    fn appends_each_event_to_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pocketeer.log");
         let logger = Logger::new(path.clone(), FrontEnd::Cli);

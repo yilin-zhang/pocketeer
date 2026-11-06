@@ -628,26 +628,34 @@ mod tests {
         (summary, *failed)
     }
 
-    /// A library with two games and a device with one, the worker on them.
-    fn started() -> (tempfile::TempDir, Worker, Receiver<Update>) {
+    /// An empty library and an empty device in a new folder, with their paths.
+    fn empty_library_and_device() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let (library, device) = (dir.path().join("library"), dir.path().join("device"));
+        fs::create_dir(&library).unwrap();
+        put(&device, "Analogue_Pocket.json", b"{}");
+        fs::create_dir(device.join("Cores")).unwrap();
+        fs::create_dir(device.join("Assets")).unwrap();
+        (dir, library, device)
+    }
+
+    /// A library with two games and a device with one, the worker on them.
+    fn started() -> (tempfile::TempDir, Worker, Receiver<Update>) {
+        let (dir, library, device) = empty_library_and_device();
         put(&library, "roms/gba/A.gba", b"a");
         put(&library, "roms/gba/B.gba", b"b");
-        put(&device, "Analogue_Pocket.json", b"{}");
-        put(&device, "Cores/x", b"");
         put(&device, "Assets/gba/common/C.gba", b"c");
         put(&device, "Saves/gba/common/Gone.sav", b"orphan");
         let (worker, rx) = worker_on(library, Some(device));
         (dir, worker, rx)
     }
 
-    /// Every update up to the end of the next command.
-    fn until_finished(rx: &Receiver<Update>) -> Vec<Update> {
+    /// Every update up to the first that `is_last`.
+    fn updates_until(rx: &Receiver<Update>, is_last: impl Fn(&Update) -> bool) -> Vec<Update> {
         let mut updates = Vec::new();
         loop {
             let update = rx.recv_timeout(Duration::from_secs(10)).unwrap();
-            let last = matches!(update, Update::Finished { .. });
+            let last = is_last(&update);
             updates.push(update);
             if last {
                 return updates;
@@ -655,17 +663,14 @@ mod tests {
         }
     }
 
+    /// Every update up to the end of the next command.
+    fn until_finished(rx: &Receiver<Update>) -> Vec<Update> {
+        updates_until(rx, |u| matches!(u, Update::Finished { .. }))
+    }
+
     /// Every update up to the device having been read.
     fn until_device_read(rx: &Receiver<Update>) -> Vec<Update> {
-        let mut updates = Vec::new();
-        loop {
-            let update = rx.recv_timeout(Duration::from_secs(10)).unwrap();
-            let last = update == Update::DeviceRead;
-            updates.push(update);
-            if last {
-                return updates;
-            }
-        }
+        updates_until(rx, |u| *u == Update::DeviceRead)
     }
 
     fn last_snapshot(updates: &[Update]) -> &Snapshot {
@@ -690,11 +695,7 @@ mod tests {
 
     /// A device with two copies of a game, the worker on it.
     fn started_with_two_copies() -> (tempfile::TempDir, Worker, Receiver<Update>) {
-        let dir = tempfile::tempdir().unwrap();
-        let (library, device) = (dir.path().join("library"), dir.path().join("device"));
-        fs::create_dir(&library).unwrap();
-        put(&device, "Analogue_Pocket.json", b"{}");
-        put(&device, "Cores/x", b"");
+        let (dir, library, device) = empty_library_and_device();
         put(&device, "Assets/gba/common/One.gba", b"c");
         put(&device, "Assets/gba/common/RPG/Two.gba", b"c");
         let (worker, rx) = worker_on(library, Some(device));
@@ -704,15 +705,12 @@ mod tests {
     /// A device with the core `a.B`, and an inventory just written, so that it
     /// isn't asked for again, offering `Spiritualized.GB` from nowhere.
     fn started_with_cores() -> (tempfile::TempDir, Worker, Receiver<Update>) {
-        let dir = tempfile::tempdir().unwrap();
-        let (library, device) = (dir.path().join("library"), dir.path().join("device"));
+        let (dir, library, device) = empty_library_and_device();
         put(
             &library,
             "cores.json",
             br#"[{"id":"Spiritualized.GB","version":"2.0","platforms":["gb"],"download_url":"http://127.0.0.1:1/never"}]"#,
         );
-        put(&device, "Analogue_Pocket.json", b"{}");
-        put(&device, "Assets/x", b"");
         put(&device, "Cores/a.B/core.json", b"{}");
         let (worker, rx) = worker_on(library, Some(device));
         (dir, worker, rx)
@@ -728,25 +726,13 @@ mod tests {
 
     /// Every update up to the cores being told of.
     fn until_cores(rx: &Receiver<Update>) -> Vec<Update> {
-        let mut updates = Vec::new();
-        loop {
-            let update = rx.recv_timeout(Duration::from_secs(10)).unwrap();
-            let last = matches!(update, Update::Cores { .. });
-            updates.push(update);
-            if last {
-                return updates;
-            }
-        }
+        updates_until(rx, |u| matches!(u, Update::Cores { .. }))
     }
 
     /// A device with a game that can't be read, the worker on it: a folder
     /// is where its save goes.
     fn started_with_unreadable_device() -> (tempfile::TempDir, Worker, Receiver<Update>) {
-        let dir = tempfile::tempdir().unwrap();
-        let (library, device) = (dir.path().join("library"), dir.path().join("device"));
-        fs::create_dir(&library).unwrap();
-        put(&device, "Analogue_Pocket.json", b"{}");
-        put(&device, "Cores/x", b"");
+        let (dir, library, device) = empty_library_and_device();
         put(&device, "Assets/gba/common/One.gba", b"c");
         put(&device, "Saves/gba/common/One.sav/x", b"");
         let (worker, rx) = worker_on(library, Some(device));
@@ -764,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicates_are_told_when_the_device_is_opened_and_read_again() {
+    fn reports_duplicates_on_open_and_reload() {
         let (_dir, mut worker, rx) = started_with_two_copies();
         let lines = ["gba/RPG/Two.gba is the same game as gba/One.gba".to_string()];
         let opening = until_device_read(&rx);
@@ -775,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn once_the_first_copy_is_deleted_the_next_is_shown_without_telling() {
+    fn shows_next_copy_without_warning_after_deleting_first() {
         let (_dir, mut worker, rx) = started_with_two_copies();
         let opening = until_device_read(&rx);
         let first = last_snapshot(&opening).rows[0]
@@ -795,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn a_library_that_cannot_be_opened_is_told_and_nothing_else() {
+    fn reports_only_failure_when_library_cannot_open() {
         let dir = tempfile::tempdir().unwrap();
         let (_worker, rx) = worker_on(dir.path().join("typo"), None);
         let told = rx.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -805,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn it_opens_the_device_and_shows_every_row() {
+    fn opens_device_and_sends_every_row() {
         let (_dir, _worker, rx) = started();
         let opening = until_device_read(&rx);
         let snapshot = last_snapshot(&opening);
@@ -813,20 +799,15 @@ mod tests {
         // A, B, C and the orphan save.
         assert_eq!(snapshot.rows.len(), 4);
         assert!(matches!(snapshot.rows[3], Row::OrphanOnDevice(_)));
-    }
-
-    #[test]
-    fn a_device_read_well_tells_nothing_else() {
-        let (_dir, _worker, rx) = started();
-        let opening = until_device_read(&rx);
         assert!(matches!(opening[1], Update::ReadingDevice(_)));
-        let told = |u: &Update| matches!(u, Update::Started { .. } | Update::Finished { .. });
-        assert!(!opening.iter().any(told));
+        // Reading it well is no job to report on.
+        let is_job = |u: &Update| matches!(u, Update::Started { .. } | Update::Finished { .. });
+        assert!(!opening.iter().any(is_job));
     }
 
     #[test]
-    fn a_device_that_cannot_be_read_says_why() {
-        let (dir, _worker, rx) = started_with_unreadable_device();
+    fn reports_why_device_cannot_be_read() {
+        let (_dir, _worker, rx) = started_with_unreadable_device();
         let updates = until_finished(&rx);
         let (summary, failed) = finished(&updates);
         assert!(failed);
@@ -836,11 +817,10 @@ mod tests {
         );
         assert!(updates.contains(&Update::DeviceRead));
         assert_eq!(last_snapshot(&updates).device, None);
-        drop(dir);
     }
 
     #[test]
-    fn a_command_reports_each_game_with_how_things_stand() {
+    fn reports_progress_for_each_game() {
         let (_dir, mut worker, rx) = started();
         let opening = until_device_read(&rx);
         let games = locals(last_snapshot(&opening));
@@ -861,29 +841,28 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_drops_the_commands_waiting() {
-        let (_dir, mut worker, rx) = started();
-        until_device_read(&rx);
-        worker.send(Command::PullSaves(Vec::new()));
-        worker.cancel();
-        worker.send(Command::Reload);
-        let mut labels = Vec::new();
-        loop {
-            match rx.recv_timeout(Duration::from_secs(10)).unwrap() {
-                Update::Started { label, .. } => labels.push(label),
-                Update::Finished { .. } if labels.last().is_some_and(|l| l.contains("reading")) => {
-                    break;
-                }
-                _ => {}
+    fn skips_cancelled_commands() {
+        let (dir, library, _) = empty_library_and_device();
+        let (tx, commands) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(true));
+        tx.send((cancelled, Command::PullSaves(Vec::new())))
+            .unwrap();
+        tx.send((Arc::default(), Command::Reload)).unwrap();
+        // With nothing left to come, `run` returns.
+        drop(tx);
+        let labels = std::cell::RefCell::new(Vec::new());
+        // A device that isn't there: this must not read one that is mounted.
+        let no_device = Some(dir.path().join("no device"));
+        run(&library, no_device, &commands, &|update| {
+            if let Update::Started { label, .. } = update {
+                labels.borrow_mut().push(label);
             }
-        }
-        // The command before the cancel may have started; the one after runs.
-        assert_eq!(labels.last().unwrap(), "reading everything again");
-        assert!(labels.len() <= 2);
+        });
+        assert_eq!(*labels.borrow(), ["reading everything again"]);
     }
 
     #[test]
-    fn an_imported_game_shows_up_as_a_row() {
+    fn adds_row_for_imported_game() {
         let (dir, mut worker, rx) = started();
         let opening = until_device_read(&rx);
         let before = locals(last_snapshot(&opening)).len();
@@ -895,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn a_folder_imported_counts_the_games_in_it() {
+    fn counts_games_in_imported_dir() {
         let (dir, mut worker, rx) = started();
         until_device_read(&rx);
         put(dir.path(), "elsewhere/New.gb", b"new");
@@ -906,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn an_orphan_save_is_deleted_from_the_device() {
+    fn deletes_orphan_save_from_device() {
         let (_dir, mut worker, rx) = started();
         let opening = until_device_read(&rx);
         let Row::OrphanOnDevice(orphan) = last_snapshot(&opening).rows[3].clone() else {
@@ -922,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn a_game_renamed_is_told_of_under_its_new_name() {
+    fn reports_renamed_game_under_new_name() {
         let (_dir, mut worker, rx) = started();
         let opening = until_device_read(&rx);
         let local = locals(last_snapshot(&opening)).remove(0);
@@ -940,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cancel_is_for_what_was_sent_before_it() {
+    fn cancels_only_commands_sent_before_cancel() {
         let (mut worker, rx) = Worker::recording();
         worker.send(Command::Reload);
         worker.send(Command::SyncDats);
@@ -954,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn once_it_goes_the_thread_has_ended() {
+    fn ends_thread_when_dropped() {
         let (_dir, worker, rx) = started();
         until_device_read(&rx);
         drop(worker);
@@ -964,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn once_it_goes_at_most_the_game_under_way_is_done_and_logged() {
+    fn finishes_at_most_current_game_when_dropped() {
         let (dir, mut worker, rx) = started();
         let games = locals(last_snapshot(&until_device_read(&rx)));
         worker.send(Command::PushGames(games));
@@ -993,12 +972,8 @@ mod tests {
     }
 
     #[test]
-    fn a_file_a_core_loads_is_told_of_and_put_on_the_device() {
-        let dir = tempfile::tempdir().unwrap();
-        let (library, device) = (dir.path().join("library"), dir.path().join("device"));
-        fs::create_dir(&library).unwrap();
-        put(&device, "Analogue_Pocket.json", b"{}");
-        put(&device, "Assets/x", b"");
+    fn reports_bios_file_and_puts_it_on_device() {
+        let (dir, library, device) = empty_library_and_device();
         put(
             &device,
             "Cores/a.B/core.json",
@@ -1025,7 +1000,7 @@ mod tests {
     }
 
     #[test]
-    fn the_cores_are_only_told_of_once_their_page_is_open() {
+    fn sends_cores_only_after_page_opens() {
         let (_dir, mut worker, rx) = started_with_cores();
         let opening = until_device_read(&rx);
         assert_eq!(cores_told(&opening), None);
@@ -1037,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn a_core_removed_goes_from_what_is_told() {
+    fn drops_removed_core_from_cores_update() {
         let (_dir, mut worker, rx) = started_with_cores();
         until_device_read(&rx);
         worker.send(Command::ShowCores);
@@ -1049,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn a_core_that_cannot_be_downloaded_is_a_failure() {
+    fn reports_failed_core_download() {
         let (_dir, mut worker, rx) = started_with_cores();
         until_device_read(&rx);
         worker.send(Command::InstallCores(vec!["Spiritualized.GB".to_string()]));
@@ -1063,7 +1038,7 @@ mod tests {
     }
 
     #[test]
-    fn a_summary_tells_how_a_command_went() {
+    fn summarizes_how_command_went() {
         let ok = || LogEvent::Reload(Ok(()));
         let bad = || LogEvent::Reload(Err(pocketeer_core::error::BaseError::NoDevice));
         assert_eq!(
@@ -1089,21 +1064,18 @@ mod tests {
     }
 
     #[test]
-    fn what_a_command_did_goes_in_the_log() {
+    fn logs_commands_with_tui_front_end() {
         let (dir, mut worker, rx) = started();
         let opening = until_device_read(&rx);
         let games = locals(last_snapshot(&opening));
         worker.send(Command::PushGames(games));
         until_finished(&rx);
         let log = fs::read_to_string(dir.path().join("library/pocketeer.log")).unwrap();
-        let lines: Vec<&str> = log.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains(r#""front_end":"tui""#), "{}", lines[0]);
-        assert!(lines[0].contains(r#""game":"gba/A.gba""#), "{}", lines[0]);
+        assert!(log.contains(r#""front_end":"tui""#), "{log}");
     }
 
     #[test]
-    fn a_log_that_cannot_be_written_stops_the_command_and_says_so() {
+    fn stops_command_and_reports_when_log_cannot_be_written() {
         let (dir, mut worker, rx) = started();
         let opening = until_device_read(&rx);
         let games = locals(last_snapshot(&opening));

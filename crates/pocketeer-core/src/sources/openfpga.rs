@@ -77,19 +77,20 @@ impl RemoteCoreSource for OpenFpga {
 mod tests {
     use super::*;
 
+    /// The cores of a listing with these entries, as JSON.
+    fn cores_of(entries: &str) -> Vec<InventoryCore> {
+        let listing: Listing = serde_json::from_str(&format!(r#"{{"data":[{entries}]}}"#)).unwrap();
+        listing.data.into_iter().filter_map(Entry::newest).collect()
+    }
+
     #[test]
-    fn a_core_is_its_newest_release_and_one_with_none_is_left_out() {
-        let listing: Listing = serde_json::from_str(
-            r#"{"data":[
-                {"id":"a.B","releases":[
-                    {"download_url":"new.zip","core":{"metadata":{"version":"2","platform_ids":["gba"]}}},
-                    {"download_url":"old.zip","core":{"metadata":{"version":"1","platform_ids":["gba"]}}}
-                ]},
-                {"id":"c.D","releases":[]}
+    fn uses_newest_release_of_core() {
+        let cores = cores_of(
+            r#"{"id":"a.B","releases":[
+                {"download_url":"new.zip","core":{"metadata":{"version":"2","platform_ids":["gba"]}}},
+                {"download_url":"old.zip","core":{"metadata":{"version":"1","platform_ids":["gba"]}}}
             ]}"#,
-        )
-        .unwrap();
-        let cores: Vec<_> = listing.data.into_iter().filter_map(Entry::newest).collect();
+        );
         assert_eq!(
             cores,
             [InventoryCore {
@@ -99,5 +100,10 @@ mod tests {
                 download_url: "new.zip".into(),
             }]
         );
+    }
+
+    #[test]
+    fn leaves_out_core_without_releases() {
+        assert_eq!(cores_of(r#"{"id":"c.D","releases":[]}"#), []);
     }
 }

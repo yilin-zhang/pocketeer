@@ -365,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn what_is_typed_names_a_folder_if_it_ends_so_or_the_folder_read_says_so() {
+    fn names_dir_when_text_ends_with_slash_or_matches_dir() {
         let entries = [entry("roms", true), entry("Mine.gba", false)];
         assert!(input("/some/", &entries).names_dir());
         assert!(input("/some/roms", &entries).names_dir());
@@ -394,7 +394,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn narrow_as_you_type_with_names_starting_with_it_first() {
+        fn narrows_as_typed_and_lists_prefix_matches_first() {
             let entries = [
                 entry("Amine.sav", false),
                 entry("mine.sav", false),
@@ -409,7 +409,7 @@ mod tests {
         }
 
         #[test]
-        fn hidden_entries_are_offered_once_a_dot_is_typed() {
+        fn offers_hidden_entries_after_typing_dot() {
             let entries = [entry(".hidden", false), entry("shown", false)];
             let mut input = input("/a/", &entries);
             assert_eq!(names(&input), ["shown"]);
@@ -418,7 +418,7 @@ mod tests {
         }
 
         #[test]
-        fn nothing_is_offered_from_a_folder_the_text_has_left() {
+        fn offers_nothing_from_dir_text_has_left() {
             let mut input = input("/a/", &[entry("b", true)]);
             press(&mut input, KeyCode::Tab);
             assert_eq!(text(&input), "/a/b/");
@@ -429,7 +429,7 @@ mod tests {
         }
 
         #[test]
-        fn letters_in_order_are_enough() {
+        fn matches_letters_in_order() {
             let mut input = input("/a/", &[entry("Pokemon.gba", false), entry("other", false)]);
             for c in "pkmn".chars() {
                 press(&mut input, KeyCode::Char(c));
@@ -438,7 +438,7 @@ mod tests {
         }
 
         #[test]
-        fn what_is_typed_is_found_by_character() {
+        fn returns_matched_character_positions() {
             let name = entry("Mine.sav", false);
             assert_eq!(name.matched_positions("in"), [1, 2]);
             assert_eq!(name.matched_positions("MINE"), [0, 1, 2, 3]);
@@ -447,7 +447,7 @@ mod tests {
         }
 
         #[test]
-        fn characters_are_counted_past_ones_that_take_several_bytes() {
+        fn counts_positions_in_characters_not_bytes() {
             let name = entry("日本語 mine.sav", false);
             assert_eq!(name.matched_positions("mine"), [4, 5, 6, 7]);
         }
@@ -455,7 +455,7 @@ mod tests {
         /// A capital that lowercases to two characters, by a name holding those
         /// two: it once cut one in half, and took the whole UI down.
         #[test]
-        fn a_character_whose_lowercase_is_longer_cuts_nothing_in_half() {
+        fn keeps_positions_in_bounds_when_lowercase_is_longer() {
             let name = entry("i\u{0307}.gba", false);
             let chars = name.name.chars().count();
             assert!(
@@ -470,7 +470,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn tab_takes_the_only_match_with_a_slash_for_a_folder() {
+        fn tab_completes_only_match_with_slash_for_dir() {
             let mut only_file = input("/a/mi", &[entry("mine.sav", false)]);
             press(&mut only_file, KeyCode::Tab);
             assert_eq!(text(&only_file), "/a/mine.sav");
@@ -480,7 +480,7 @@ mod tests {
         }
 
         #[test]
-        fn tab_goes_as_far_as_the_matches_agree() {
+        fn tab_completes_common_prefix() {
             let mut input = input("/a/m", &[entry("mine-1", false), entry("mine-2", false)]);
             press(&mut input, KeyCode::Tab);
             assert_eq!(text(&input), "/a/mine-");
@@ -490,7 +490,7 @@ mod tests {
         }
 
         #[test]
-        fn the_arrows_pick_a_match_and_tab_takes_it() {
+        fn arrows_pick_match_and_tab_completes_it() {
             let mut input = input("/a/", &[entry("one", false), entry("two", false)]);
             press(&mut input, KeyCode::Down);
             press(&mut input, KeyCode::Down);
@@ -502,7 +502,7 @@ mod tests {
         }
 
         #[test]
-        fn a_match_picked_is_let_go_by_going_up_from_it_or_by_editing() {
+        fn clears_pick_on_up_from_first_match_or_on_editing() {
             let mut input = input("/a/", &[entry("one", false)]);
             press(&mut input, KeyCode::Down);
             press(&mut input, KeyCode::Up);
@@ -517,7 +517,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn text_is_edited_at_the_cursor() {
+        fn edits_text_at_cursor() {
             let mut input = PathInput::new("/one/two");
             ctrl(&mut input, 'a');
             press(&mut input, KeyCode::Right);
@@ -534,7 +534,7 @@ mod tests {
         }
 
         #[test]
-        fn a_word_is_cut_back_to_its_slash() {
+        fn cuts_word_back_to_slash() {
             let mut input = PathInput::new("/one/two/");
             ctrl(&mut input, 'w');
             assert_eq!(text(&input), "/one/");
@@ -545,7 +545,7 @@ mod tests {
         }
 
         #[test]
-        fn the_home_folder_is_written_as_a_tilde() {
+        fn expands_tilde_to_home_dir() {
             let home = env::home_dir().unwrap();
             assert_eq!(PathInput::new("~/x/y").path(), home.join("x/y"));
             assert_eq!(PathInput::new("~").path(), home);
@@ -559,7 +559,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn a_folder_is_read_on_its_own_thread_by_name() {
+        fn reads_dir_on_own_thread_sorted_by_name() {
             let dir = tempfile::tempdir().unwrap();
             fs::write(dir.path().join("b.sav"), b"").unwrap();
             fs::write(dir.path().join("A.sav"), b"").unwrap();
@@ -583,7 +583,7 @@ mod tests {
         }
 
         #[test]
-        fn a_folder_that_cannot_be_read_holds_nothing() {
+        fn returns_nothing_for_unreadable_dir() {
             assert_eq!(read_dir(Path::new("/no/such/folder")), []);
         }
     }

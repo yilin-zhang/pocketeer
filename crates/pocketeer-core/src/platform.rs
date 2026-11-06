@@ -80,7 +80,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_extension_tells_the_platform_whatever_its_case() {
+    fn maps_extension_to_platform_ignoring_case() {
         assert_eq!(Platform::from_extension("gba"), Some(Platform::Gba));
         assert_eq!(Platform::from_extension("SFC"), Some(Platform::Snes));
         assert_eq!(Platform::from_extension("sgx"), Some(Platform::PcEngine));
@@ -88,26 +88,26 @@ mod tests {
     }
 
     #[test]
-    fn an_extension_that_could_be_anything_tells_nothing() {
+    fn maps_ambiguous_extension_to_no_platform() {
         assert_eq!(Platform::from_extension("bin"), None);
         assert_eq!(Platform::from_extension("zip"), None);
         assert_eq!(Platform::from_extension(""), None);
     }
 
     #[test]
-    fn an_unknown_id_is_kept_as_it_is() {
+    fn keeps_unknown_id() {
         let p = Platform::from_id("arduboy");
         assert_eq!(p, Platform::Other("arduboy".into()));
         assert_eq!(p.id(), "arduboy");
     }
 
     #[test]
-    fn an_unknown_platform_is_not_gone_through() {
+    fn iterates_only_named_platforms() {
         assert!(!Platform::iter().any(|p| matches!(p, Platform::Other(_))));
     }
 
     #[test]
-    fn every_named_platform_is_found_by_its_id() {
+    fn finds_every_named_platform_by_id() {
         for p in Platform::iter() {
             assert_eq!(Platform::from_id(p.id()), p);
         }

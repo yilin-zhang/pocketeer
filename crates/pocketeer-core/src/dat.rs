@@ -448,7 +448,7 @@ game (
         use super::*;
 
         #[test]
-        fn a_game_is_found_in_any_dat_of_its_platform() {
+        fn finds_game_in_any_dat_of_platform() {
             let (_dir, _, mirror) = synced();
             assert_eq!(mirror.lookup(&pce(4, 0xA)).unwrap().name, "Bonk (USA)");
             assert_eq!(
@@ -458,7 +458,7 @@ game (
         }
 
         #[test]
-        fn a_game_the_dats_do_not_list_is_not_found() {
+        fn finds_nothing_for_unlisted_game() {
             let (_dir, _, mirror) = synced();
             assert_eq!(mirror.lookup(&pce(4, 0xB)), None);
             let gba = Game {
@@ -472,21 +472,21 @@ game (
         }
 
         #[test]
-        fn once_synced_it_opens_without_the_source() {
+        fn opens_synced_dats_without_source() {
             let (dir, _, _) = synced();
             let offline = open(dir.path(), &Fake::default());
             assert_eq!(offline.lookup(&pce(4, 0xA)).unwrap().name, "Bonk (USA)");
         }
 
         #[test]
-        fn an_empty_or_missing_directory_is_empty() {
+        fn opens_missing_dir_as_empty() {
             let dir = tempfile::tempdir().unwrap();
             let mirror = open(&dir.path().join("nope"), &Fake::default());
             assert_eq!(mirror.lookup(&pce(4, 0xA)), None);
         }
 
         #[test]
-        fn sync_downloads_only_what_is_new_or_changed() {
+        fn fetches_only_new_or_changed_dats() {
             let (_dir, fake, mut mirror) = synced();
             fake.fetched.borrow_mut().clear();
             fake.set("sgx", "2", SGX_NEW);
@@ -500,7 +500,7 @@ game (
         }
 
         #[test]
-        fn a_broken_local_dat_is_downloaded_again() {
+        fn refetches_corrupt_local_dat() {
             let (dir, fake, _) = synced();
             fs::write(dir.path().join("pce.dat"), "game (").unwrap();
             let mut mirror = open(dir.path(), &fake);
@@ -512,7 +512,7 @@ game (
         }
 
         #[test]
-        fn a_dat_the_source_no_longer_has_is_reported_and_kept() {
+        fn reports_and_keeps_dat_gone_from_source() {
             let (dir, fake, _) = synced();
             fake.dats.borrow_mut().remove("sgx");
             let mut mirror = open(dir.path(), &fake);
@@ -522,7 +522,7 @@ game (
         }
 
         #[test]
-        fn a_broken_download_is_an_error_and_keeps_the_old_dat() {
+        fn reports_corrupt_download_and_keeps_old_dat() {
             let (_dir, fake, mut mirror) = synced();
             fake.set("sgx", "2", "game (");
             assert!(matches!(mirror.sync(), Err(BaseError::Remote { .. })));
@@ -533,7 +533,7 @@ game (
         }
 
         #[test]
-        fn a_shared_dat_is_downloaded_once_and_reported_for_every_platform() {
+        fn fetches_shared_dat_once_and_reports_every_platform() {
             let (_dir, fake, mut mirror) = synced();
             fake.fetched.borrow_mut().clear();
             fake.set("gb", "2", GB);
@@ -555,7 +555,7 @@ game (
         use super::*;
 
         #[test]
-        fn a_dat_lists_its_games() {
+        fn parses_game_entries() {
             let dat = Dat::parse_clrmamepro(GBA).unwrap();
             assert_eq!(
                 dat.entries[0],
@@ -570,13 +570,13 @@ game (
         }
 
         #[test]
-        fn quoted_names_keep_their_quotes_and_symbols() {
+        fn keeps_quotes_and_symbols_in_names() {
             let dat = Dat::parse_clrmamepro(GBA).unwrap();
             assert_eq!(dat.entries[1].name, r#"Tom & "Jerry" (Proto)"#);
         }
 
         #[test]
-        fn broken_dats_are_errors() {
+        fn rejects_malformed_dats() {
             for bad in [
                 "game (",
                 r#"game ( name "unterminated"#,

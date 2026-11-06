@@ -495,30 +495,43 @@ mod tests {
     }
 
     #[test]
-    fn covers_load_off_thread_and_reload_when_the_file_changes() {
+    fn loads_cover_on_background_thread() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("cover.png");
         image::RgbImage::new(8, 8).save(&path).unwrap();
         let mut covers = Covers::spawn(Picker::halfblocks(), || {});
         let size = Size::new(10, 5);
-
         // The first look only asks for it.
         assert!(matches!(covers.show(&path, &[], size), Cover::Loading));
         assert!(wait_ready(&mut covers, &path, size));
+    }
 
-        // A new file at the same path is decoded again.
+    #[test]
+    fn reloads_cover_when_file_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cover.png");
+        image::RgbImage::new(8, 8).save(&path).unwrap();
+        let mut covers = Covers::spawn(Picker::halfblocks(), || {});
+        let size = Size::new(10, 5);
+        assert!(wait_ready(&mut covers, &path, size));
         image::RgbImage::new(16, 16).save(&path).unwrap();
         assert!(matches!(covers.show(&path, &[], size), Cover::Loading));
         assert!(wait_ready(&mut covers, &path, size));
+    }
 
-        // Garbage is reported, not retried every frame.
+    #[test]
+    fn reports_unreadable_cover_without_retrying() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cover.png");
         std::fs::write(&path, b"not an image").unwrap();
+        let mut covers = Covers::spawn(Picker::halfblocks(), || {});
+        let size = Size::new(10, 5);
         assert!(!wait_ready(&mut covers, &path, size));
         assert!(matches!(covers.show(&path, &[], size), Cover::Unreadable));
     }
 
     #[test]
-    fn a_cover_scrolled_past_still_loads_when_the_user_comes_back() {
+    fn loads_cover_scrolled_past_when_user_returns() {
         let tmp = tempfile::tempdir().unwrap();
         let paths: Vec<PathBuf> = (0..6)
             .map(|i| {
@@ -548,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tall_cover_is_fitted_and_centred_in_whole_cells() {
+    fn fits_tall_cover_centred_in_whole_cells() {
         // White left half, black right half; 1:2, so 10×5 cells take the
         // full height (20 dots) and 10 dots (5 cells) across.
         let dots = Dots::new(
@@ -567,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn mid_grey_dithers_to_about_half_the_dots() {
+    fn dithers_mid_grey_to_about_half_the_dots() {
         // A grey ramp: after stretching, the middle is mid-grey.
         let on = dither(&picture(64, 64, |x, _| (x * 4) as u8).to_luma8());
         let middle: Vec<bool> = (0..64)
@@ -579,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn redrawing_at_another_size_uses_the_kept_picture() {
+    fn resizes_dots_from_kept_picture() {
         let dots = Dots::new(&picture(40, 40, |_, _| 200), Size::new(8, 4));
         let art = Art::Dots(dots);
         assert!(!art.needs_resize(Size::new(8, 4)));

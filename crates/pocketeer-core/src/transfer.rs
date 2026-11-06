@@ -236,7 +236,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn a_new_one_on_the_device_is_pulled() {
+        fn pulls_new_save() {
             let mut s = setup(Some(b"a"), Some(b"bb"));
             let pulled = pull_save(&mut s.library, &s.device, &s.on_device).unwrap();
             assert_eq!(pulled, PullSaveOutcome::Pulled);
@@ -244,7 +244,7 @@ mod tests {
         }
 
         #[test]
-        fn nothing_is_pulled_without_one_or_a_game_in_the_library() {
+        fn rejects_pull_without_save_or_game() {
             let mut s = setup(None, None);
             let pulled = pull_save(&mut s.library, &s.device, &s.on_device);
             assert!(matches!(pulled, Err(PullSaveError::NoSave)));
@@ -256,7 +256,7 @@ mod tests {
         }
 
         #[test]
-        fn a_kept_version_is_pushed_over_one_backed_up() {
+        fn pushes_kept_version_over_backed_up_save() {
             let mut s = setup(Some(b"a"), Some(b"bb"));
             pull_save(&mut s.library, &s.device, &s.on_device).unwrap();
             let old = s.library.entries()[0].save.as_ref().unwrap().versions[0].clone();
@@ -270,7 +270,7 @@ mod tests {
         }
 
         #[test]
-        fn one_not_backed_up_is_not_pushed_over() {
+        fn rejects_push_over_save_not_backed_up() {
             let mut s = setup(Some(b"a"), Some(b"bb"));
             let kept = current(&s);
             let pushed = push_save(&s.library, &mut s.device, &s.on_device, &kept);
@@ -280,7 +280,7 @@ mod tests {
         }
 
         #[test]
-        fn pushed_onto_a_device_without_one() {
+        fn pushes_onto_device_without_save() {
             let mut s = setup(Some(b"a"), None);
             let kept = current(&s);
             let pushed = push_save(&s.library, &mut s.device, &s.on_device, &kept).unwrap();
@@ -289,7 +289,7 @@ mod tests {
         }
 
         #[test]
-        fn the_same_one_is_already_there() {
+        fn reports_already_there_when_device_has_same_save() {
             let mut s = setup(Some(b"a"), Some(b"a"));
             let kept = current(&s);
             let pushed = push_save(&s.library, &mut s.device, &s.on_device, &kept).unwrap();
@@ -297,7 +297,7 @@ mod tests {
         }
 
         #[test]
-        fn a_version_the_library_does_not_have_is_not_pushed() {
+        fn rejects_version_not_in_library() {
             let mut s = setup(Some(b"a"), None);
             let unknown = Save::from_bytes(b"zzz", at(5));
             let pushed = push_save(&s.library, &mut s.device, &s.on_device, &unknown);
@@ -309,7 +309,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn pulled_under_the_name_given() {
+        fn pulls_under_given_name() {
             let mut s = setup(None, Some(b"a"));
             fs::remove_file(s.library.root().join("roms/gba/Tetris.gba")).unwrap();
             s.library.reload().unwrap();
@@ -327,7 +327,7 @@ mod tests {
         }
 
         #[test]
-        fn one_the_library_has_is_not_pulled_again() {
+        fn skips_pull_of_game_in_library() {
             let mut s = setup(None, None);
             let pulled = pull_game(&mut s.library, &s.device, &s.on_device, "Other.gba");
             assert_eq!(pulled.unwrap(), PullGameOutcome::AlreadyHad);
@@ -335,7 +335,7 @@ mod tests {
         }
 
         #[test]
-        fn one_the_device_does_not_have_is_pushed() {
+        fn pushes_game_device_lacks() {
             let mut s = setup(None, None);
             fs::remove_file(s.device.root().join("Assets/gba/common/Tetris.gba")).unwrap();
             s.device.scan().unwrap();
@@ -345,7 +345,7 @@ mod tests {
         }
 
         #[test]
-        fn one_the_device_has_anywhere_is_already_there() {
+        fn reports_game_device_has_in_any_folder() {
             let mut s = setup(None, None);
             fs::create_dir_all(s.device.root().join("Assets/gba/common/Puzzle")).unwrap();
             fs::rename(
@@ -361,7 +361,7 @@ mod tests {
         }
 
         #[test]
-        fn not_pushed_over_another_file() {
+        fn rejects_push_over_other_file() {
             let mut s = setup(None, None);
             put_at(
                 s.device.root(),

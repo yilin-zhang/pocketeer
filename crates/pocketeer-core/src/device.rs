@@ -782,7 +782,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn a_folder_without_the_markers_is_not_a_device() {
+        fn rejects_dir_without_device_markers() {
             let dir = tempfile::tempdir().unwrap();
             fs::create_dir(dir.path().join("Assets")).unwrap();
             match Device::open(dir.path()) {
@@ -794,7 +794,7 @@ mod tests {
         }
 
         #[test]
-        fn only_the_volumes_that_are_devices_are_found() {
+        fn finds_only_volumes_that_are_devices() {
             let (root, _) = empty_device();
             let other = tempfile::tempdir().unwrap();
             let volumes = vec![
@@ -808,7 +808,7 @@ mod tests {
         }
 
         #[test]
-        fn games_are_found_at_any_depth_with_their_saves() {
+        fn finds_games_at_any_depth_with_saves() {
             let (_dir, mut device) = empty_device();
             let root = device.root().to_path_buf();
             put(&root, "Assets/gba/common/Tetris.gba", b"hello");
@@ -829,7 +829,7 @@ mod tests {
         }
 
         #[test]
-        fn hidden_files_and_other_folders_are_not_games() {
+        fn ignores_hidden_files_and_other_dirs() {
             let (_dir, mut device) = empty_device();
             let root = device.root().to_path_buf();
             put(&root, "Assets/gba/common/._Tetris.gba", b"x");
@@ -840,7 +840,7 @@ mod tests {
         }
 
         #[test]
-        fn only_the_first_copy_of_a_game_is_kept() {
+        fn keeps_first_copy_and_reports_duplicates() {
             let (_dir, mut device) = empty_device();
             let root = device.root().to_path_buf();
             put(&root, "Assets/gba/common/One.gba", b"hello");
@@ -851,7 +851,7 @@ mod tests {
         }
 
         #[test]
-        fn the_same_contents_on_another_platform_are_another_game() {
+        fn treats_same_contents_on_other_platform_as_other_game() {
             let (_dir, mut device) = empty_device();
             let root = device.root().to_path_buf();
             put(&root, "Assets/gb/common/Tetris.gb", b"hello");
@@ -865,7 +865,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn an_unchanged_file_is_not_read_again_even_once_opened_again() {
+        fn reuses_unchanged_file_after_reopening() {
             let (_dir, mut device) = empty_device();
             let root = device.root().to_path_buf();
             let path = "Assets/gba/common/Tetris.gba";
@@ -881,7 +881,7 @@ mod tests {
         }
 
         #[test]
-        fn does_not_answer_for_a_file_gone_at_a_scan() {
+        fn rereads_file_at_path_gone_at_last_scan() {
             let (_dir, mut device) = empty_device();
             let root = device.root().to_path_buf();
             let path = "Assets/gba/common/Tetris.gba";
@@ -895,7 +895,7 @@ mod tests {
         }
 
         #[test]
-        fn does_not_answer_for_a_removed_game() {
+        fn rereads_file_at_path_of_removed_game() {
             let (_dir, mut device) = empty_device();
             let root = device.root().to_path_buf();
             let path = "Assets/gba/common/Tetris.gba";
@@ -908,7 +908,7 @@ mod tests {
         }
 
         #[test]
-        fn is_ignored_when_broken() {
+        fn ignores_corrupt_cache_file() {
             let (_dir, mut device) = empty_device();
             let root = device.root().to_path_buf();
             put(&root, "Assets/gba/common/Tetris.gba", b"hello");
@@ -921,7 +921,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn a_save_put_on_the_device_is_where_the_scan_finds_it() {
+        fn puts_save_where_scan_finds_it() {
             let (_dir, mut device) = empty_device();
             put(device.root(), "Assets/gba/common/RPG/Pokemon.gba", b"hi");
             let entry = scanned(&mut device).remove(0);
@@ -939,7 +939,7 @@ mod tests {
         }
 
         #[test]
-        fn a_game_put_on_the_device_is_not_read_back() {
+        fn lists_put_game_without_rereading() {
             let (_dir, mut device) = empty_device();
             let elsewhere = tempfile::tempdir().unwrap();
             let from = put(elsewhere.path(), "Tetris.gba", b"hello");
@@ -963,24 +963,41 @@ mod tests {
             assert_eq!(scanned(&mut device), [put_there]);
         }
 
-        #[test]
-        fn a_game_and_its_save_are_removed_apart() {
-            let (_dir, mut device) = empty_device();
-            let root = device.root().to_path_buf();
-            put(&root, "Assets/gba/common/One.gba", b"hello");
-            put(&root, "Assets/gba/common/Two.gba", b"other");
-            put(&root, "Saves/gba/common/One.sav", b"save");
+        /// A device with `One.gba`, its save, and `Two.gba`; and `One.gba`'s entry.
+        fn with_two_games() -> (tempfile::TempDir, Device, DeviceEntry) {
+            let (dir, mut device) = empty_device();
+            let root = dir.path();
+            put(root, "Assets/gba/common/One.gba", b"hello");
+            put(root, "Assets/gba/common/Two.gba", b"other");
+            put(root, "Saves/gba/common/One.sav", b"save");
             let entry = scanned(&mut device).remove(0);
+            (dir, device, entry)
+        }
+
+        #[test]
+        fn removes_save_from_device() {
+            let (dir, mut device, entry) = with_two_games();
             device.remove_save(&entry).unwrap();
-            assert!(!root.join("Saves/gba/common/One.sav").exists());
+            assert!(!dir.path().join("Saves/gba/common/One.sav").exists());
             assert_eq!(device.entries()[0].save, None);
+        }
+
+        #[test]
+        fn rejects_removing_save_already_gone() {
+            let (_dir, mut device, entry) = with_two_games();
+            device.remove_save(&entry).unwrap();
             assert!(matches!(
                 device.remove_save(&entry),
                 Err(DeleteSaveError::NoSave)
             ));
+        }
+
+        #[test]
+        fn removes_game_and_leaves_other_games() {
+            let (dir, mut device, entry) = with_two_games();
             device.remove_game(&entry).unwrap();
-            assert!(!root.join("Assets/gba/common/One.gba").exists());
-            assert!(root.join("Assets/gba/common/Two.gba").exists());
+            assert!(!dir.path().join("Assets/gba/common/One.gba").exists());
+            assert!(dir.path().join("Assets/gba/common/Two.gba").exists());
             assert_eq!(paths(device.entries()), [PathBuf::from("Two.gba")]);
         }
     }
@@ -999,7 +1016,7 @@ mod tests {
         }
 
         #[test]
-        fn a_core_is_listed_with_what_its_core_json_says() {
+        fn lists_core_from_core_json() {
             let (_dir, device) = empty_device();
             put(
                 device.root(),
@@ -1017,7 +1034,7 @@ mod tests {
         }
 
         #[test]
-        fn a_folder_without_a_core_json_it_can_read_has_no_version() {
+        fn reports_no_version_without_readable_core_json() {
             let (_dir, device) = empty_device();
             put(device.root(), "Cores/a.B/core.rbf_r", b"bits");
             assert_eq!(version(&device), None);
@@ -1026,7 +1043,7 @@ mod tests {
         }
 
         #[test]
-        fn only_the_core_and_its_platform_are_written_and_nothing_stays_behind() {
+        fn writes_only_core_and_platform_files() {
             let (_dir, device) = empty_device();
             install(&device, release("1.0")).unwrap();
             let root = device.root();
@@ -1049,7 +1066,7 @@ mod tests {
         }
 
         #[test]
-        fn a_new_version_replaces_the_core_and_keeps_the_platform() {
+        fn replaces_core_and_keeps_platform_files() {
             let (_dir, device) = empty_device();
             install(&device, release("1.0")).unwrap();
             let root = device.root();
@@ -1061,7 +1078,7 @@ mod tests {
         }
 
         #[test]
-        fn a_platform_set_aside_stays_set_aside() {
+        fn skips_platform_json_archived_by_user() {
             let (_dir, device) = empty_device();
             let root = device.root();
             put(root, "Platforms/_archive/gba.json", b"set aside");
@@ -1071,7 +1088,7 @@ mod tests {
         }
 
         #[test]
-        fn stopped_halfway_it_is_at_its_old_version_and_installing_again_finishes() {
+        fn keeps_old_version_until_interrupted_install_is_retried() {
             let (_dir, device) = empty_device();
             install(&device, release("1.0")).unwrap();
             let root = device.root();
@@ -1089,7 +1106,7 @@ mod tests {
         }
 
         #[test]
-        fn what_cannot_be_written_beside_the_files_changes_nothing() {
+        fn keeps_old_version_when_staging_fails() {
             let (_dir, device) = empty_device();
             install(&device, release("1.0")).unwrap();
             let bytes = zip_of(&[
@@ -1108,7 +1125,7 @@ mod tests {
         }
 
         #[test]
-        fn removing_a_core_leaves_all_else() {
+        fn removes_only_core_folder() {
             let (_dir, device) = empty_device();
             let root = device.root();
             install(&device, release("1.0")).unwrap();
@@ -1121,7 +1138,7 @@ mod tests {
         }
 
         #[test]
-        fn only_a_core_on_the_device_is_removed() {
+        fn rejects_removing_path_that_is_not_installed_core() {
             let (_dir, device) = empty_device();
             let root = device.root();
             let marker = root.join("Analogue_Pocket.json");
@@ -1161,7 +1178,7 @@ mod tests {
         }
 
         #[test]
-        fn the_files_of_its_name_beside_its_save_go_with_it_in_the_same_folder() {
+        fn moves_game_and_files_beside_save_within_folder() {
             let (dir, mut device, entry) = with_game();
             let root = dir.path();
             let renamed = device.rename_game(&entry, "New").unwrap();
@@ -1184,7 +1201,7 @@ mod tests {
         }
 
         #[test]
-        fn a_scan_finds_the_same() {
+        fn matches_fresh_scan_after_renaming() {
             let (_dir, mut device, entry) = with_game();
             let renamed = device.rename_game(&entry, "New").unwrap();
             let listed = device.entries().to_vec();
@@ -1193,7 +1210,7 @@ mod tests {
         }
 
         #[test]
-        fn its_contents_are_not_read_again() {
+        fn does_not_reread_renamed_game() {
             let (dir, mut device, entry) = with_game();
             device.rename_game(&entry, "New").unwrap();
             // Same size and time, other contents: the cache answers.
@@ -1204,7 +1221,7 @@ mod tests {
         }
 
         #[test]
-        fn only_the_case_can_change() {
+        fn allows_case_only_change() {
             let (dir, mut device, entry) = with_game();
             let renamed = device.rename_game(&entry, "OLD").unwrap();
             assert_eq!(renamed.path, Path::new("RPG/OLD.gba"));
@@ -1214,63 +1231,65 @@ mod tests {
         }
 
         #[test]
-        fn nothing_moves_when_it_is_refused() {
-            let core_json = r#"{"core":{"metadata":{"version":"1","platform_ids":["gba"]}}}"#;
-            let data = r#"{"data":{"data_slots":[{"filename":"Bios.gba"}]}}"#;
-            for (new, extra, refused) in [
-                ("../x", None, "bad"),
-                ("", None, "bad"),
-                ("a:b", None, "bad"),
-                ("Old", None, "same"),
+        fn moves_nothing_when_refused() {
+            for (new, extra, refusal) in [
+                ("a:b", None, "the device can't hold a game of that name"),
+                ("Old", None, "it has that name already"),
                 (
                     "Neighbour",
                     Some("Assets/gba/common/RPG/Neighbour.gba"),
-                    "taken",
+                    "another file on the device has that name",
                 ),
                 (
                     "neighbour",
                     Some("Assets/gba/common/RPG/Neighbour.pce"),
-                    "taken",
+                    "another file on the device has that name",
                 ),
-                ("New", Some("Saves/gba/common/RPG/New.rtc"), "leftovers"),
-                ("New", Some("Assets/gba/common/RPG/Old.sgx"), "shares"),
-                ("Bios", None, "bios"),
+                (
+                    "New",
+                    Some("Saves/gba/common/RPG/New.rtc"),
+                    "the device has a save under that name",
+                ),
+                (
+                    "New",
+                    Some("Assets/gba/common/RPG/Old.sgx"),
+                    "another file beside it shares its save",
+                ),
             ] {
                 let (dir, mut device, entry) = with_game();
                 let root = dir.path();
-                put(root, "Cores/a.B/core.json", core_json.as_bytes());
-                put(root, "Cores/a.B/data.json", data.as_bytes());
                 if let Some(extra) = extra {
                     put(root, extra, b"in the way");
                 }
-                // A file a core loads sits at the top of `common/`.
-                let entry = match new {
-                    "Bios" => {
-                        put(root, "Assets/gba/common/Mine.gba", b"mine");
-                        scanned(&mut device)
-                            .into_iter()
-                            .find(|e| e.path == Path::new("Mine.gba"))
-                            .unwrap()
-                    }
-                    _ => entry,
-                };
                 let before = all_files(root);
-                let kind = match device.rename_game(&entry, new) {
-                    Err(RenameOnDeviceError::BadName) => "bad",
-                    Err(RenameOnDeviceError::SameName) => "same",
-                    Err(RenameOnDeviceError::NameTaken) => "taken",
-                    Err(RenameOnDeviceError::LeftoversThere) => "leftovers",
-                    Err(RenameOnDeviceError::SharesSave) => "shares",
-                    Err(RenameOnDeviceError::BiosName) => "bios",
-                    other => panic!("{new}: {other:?}"),
-                };
-                assert_eq!(kind, refused, "{new}");
+                let refused = device.rename_game(&entry, new).unwrap_err();
+                assert_eq!(refused.to_string(), refusal, "{new}");
                 assert_eq!(all_files(root), before, "{new}");
             }
         }
 
         #[test]
-        fn a_failure_on_the_way_puts_everything_back() {
+        fn rejects_name_of_file_core_loads() {
+            let (dir, mut device, _) = with_game();
+            let root = dir.path();
+            let core_json = r#"{"core":{"metadata":{"version":"1","platform_ids":["gba"]}}}"#;
+            let data = r#"{"data":{"data_slots":[{"filename":"Bios.gba"}]}}"#;
+            put(root, "Cores/a.B/core.json", core_json.as_bytes());
+            put(root, "Cores/a.B/data.json", data.as_bytes());
+            // A file a core loads sits at the top of `common/`.
+            put(root, "Assets/gba/common/Mine.gba", b"mine");
+            let entry = scanned(&mut device)
+                .into_iter()
+                .find(|e| e.path == Path::new("Mine.gba"))
+                .unwrap();
+            let before = all_files(root);
+            let refused = device.rename_game(&entry, "Bios").unwrap_err();
+            assert!(matches!(refused, RenameOnDeviceError::BiosName));
+            assert_eq!(all_files(root), before);
+        }
+
+        #[test]
+        fn restores_everything_on_failure() {
             let (dir, mut device, entry) = with_game();
             let root = dir.path();
             let before = all_files(root);
@@ -1314,7 +1333,7 @@ mod tests {
         }
 
         #[test]
-        fn a_file_several_cores_load_is_one_row() {
+        fn merges_file_loaded_by_several_cores_into_one_row() {
             let (_dir, device) = empty_device();
             core(&device, "a.GBA", "gba", BIOS);
             core(
@@ -1347,7 +1366,7 @@ mod tests {
         }
 
         #[test]
-        fn cores_that_disagree_on_a_size_ask_for_none() {
+        fn requires_no_size_when_cores_disagree() {
             for sizes in [[4, 8, 4], [8, 4, 4], [4, 4, 8]] {
                 let (_dir, device) = empty_device();
                 for (core_id, size) in ["a.A", "b.B", "c.C"].iter().zip(sizes) {
@@ -1359,7 +1378,7 @@ mod tests {
         }
 
         #[test]
-        fn a_core_that_cannot_be_read_is_left_out() {
+        fn leaves_out_core_that_cannot_be_read() {
             let (_dir, device) = empty_device();
             core(&device, "a.GBA", "gba", BIOS);
             put(device.root(), "Cores/broken.A/core.json", b"{ not json");
@@ -1371,7 +1390,7 @@ mod tests {
         }
 
         #[test]
-        fn it_is_told_whether_the_file_is_there_at_the_right_size() {
+        fn reports_missing_present_or_wrong_size() {
             let (_dir, device) = empty_device();
             core(&device, "a.GBA", "gba", BIOS);
             assert_eq!(status(&device), BiosStatus::Missing);
@@ -1397,7 +1416,7 @@ mod tests {
             const PATH: &str = "gba_bios.bin";
 
             #[test]
-            fn it_goes_where_the_core_looks_and_the_file_stays() {
+            fn copies_file_where_core_looks_and_leaves_source() {
                 let (_dir, device, _elsewhere, from) = ready(b"four");
                 device
                     .put_bios(&Platform::Gba, Path::new(PATH), &from)
@@ -1409,7 +1428,7 @@ mod tests {
             }
 
             #[test]
-            fn what_is_there_is_not_replaced() {
+            fn rejects_file_already_on_device() {
                 let (_dir, device, _elsewhere, from) = ready(b"four");
                 let there = put(device.root(), "Assets/gba/common/gba_bios.bin", b"mine!");
                 assert!(matches!(
@@ -1420,7 +1439,7 @@ mod tests {
             }
 
             #[test]
-            fn a_file_of_another_size_is_refused() {
+            fn rejects_file_of_wrong_size() {
                 let (_dir, device, _elsewhere, from) = ready(b"five!");
                 assert!(matches!(
                     device.put_bios(&Platform::Gba, Path::new(PATH), &from),
@@ -1433,7 +1452,7 @@ mod tests {
             }
 
             #[test]
-            fn only_what_a_core_declares_is_written() {
+            fn rejects_file_no_core_declares() {
                 let (_dir, device, _elsewhere, from) = ready(b"four");
                 for (platform, path) in [
                     (Platform::Gba, "other.bin"),
@@ -1461,7 +1480,7 @@ mod tests {
             use super::*;
 
             #[test]
-            fn a_file_a_core_loads_is_no_game_and_another_of_its_kind_is() {
+            fn excludes_only_declared_bios_path_from_games() {
                 let (_dir, mut device) = empty_device();
                 core(&device, "a.GBA", "gba", BIOS);
                 let root = device.root().to_path_buf();
@@ -1479,7 +1498,7 @@ mod tests {
             }
 
             #[test]
-            fn with_no_core_to_load_it_the_file_is_a_game() {
+            fn lists_file_as_game_when_no_core_loads_it() {
                 let (_dir, mut device) = empty_device();
                 put(device.root(), "Assets/gba/common/gba_bios.bin", b"four");
                 assert_eq!(
@@ -1489,7 +1508,7 @@ mod tests {
             }
 
             #[test]
-            fn a_save_beside_a_file_a_core_loads_has_no_game() {
+            fn treats_save_of_bios_file_as_orphan() {
                 let (_dir, device) = empty_device();
                 core(&device, "a.GBA", "gba", BIOS);
                 let root = device.root();
@@ -1508,7 +1527,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn a_save_without_a_game_is_one() {
+        fn lists_saves_without_game() {
             let (_dir, device) = empty_device();
             let root = device.root();
             put(root, "Assets/gba/common/RPG/Kept.gba", b"hello");
@@ -1533,7 +1552,7 @@ mod tests {
         }
 
         #[test]
-        fn one_is_removed() {
+        fn removes_orphan_save() {
             let (_dir, device) = empty_device();
             let root = device.root().to_path_buf();
             let save = put(&root, "Saves/gba/common/RPG/Gone.sav", b"save");
@@ -1543,7 +1562,7 @@ mod tests {
         }
 
         #[test]
-        fn a_save_with_a_game_again_is_not_removed() {
+        fn rejects_removing_save_with_game() {
             let (_dir, device) = empty_device();
             let root = device.root().to_path_buf();
             let save = put(&root, "Saves/gba/common/Tetris.sav", b"save");

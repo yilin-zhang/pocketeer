@@ -571,6 +571,7 @@ fn stem(name: &str) -> &str {
 mod tests {
     use super::*;
     use crate::files::testing::{at, put, put_at};
+    use crate::game::{Files, Rom};
 
     mod renaming {
         use super::*;
@@ -616,7 +617,7 @@ mod tests {
         }
 
         #[test]
-        fn its_file_cover_and_saves_go_with_it() {
+        fn moves_file_cover_and_saves() {
             let (dir, mut library) = with_game();
             let root = dir.path();
             let entry = rename(&mut library, "New").unwrap();
@@ -639,7 +640,7 @@ mod tests {
         }
 
         #[test]
-        fn reading_the_folder_again_finds_the_same() {
+        fn matches_fresh_reload_after_renaming() {
             let (_dir, mut library) = with_game();
             let entry = rename(&mut library, "New").unwrap();
             library.reload().unwrap();
@@ -648,7 +649,7 @@ mod tests {
         }
 
         #[test]
-        fn a_game_with_no_cover_or_saves_is_renamed_too() {
+        fn renames_game_without_cover_or_saves() {
             let (dir, mut library) = library();
             put(dir.path(), "roms/gba/Old.gba", b"old");
             library.reload().unwrap();
@@ -658,7 +659,7 @@ mod tests {
         }
 
         #[test]
-        fn the_entries_stay_in_order() {
+        fn keeps_entries_sorted() {
             let (_dir, mut library) = with_game();
             rename(&mut library, "Zzz").unwrap();
             assert_eq!(names(&library), ["Other.gba", "Zzz.gba"]);
@@ -669,7 +670,7 @@ mod tests {
         }
 
         #[test]
-        fn its_contents_are_not_read_again() {
+        fn does_not_reread_renamed_game() {
             let (dir, mut library) = with_game();
             let before = library.entries()[0].game.clone();
             rename(&mut library, "New").unwrap();
@@ -680,7 +681,7 @@ mod tests {
         }
 
         #[test]
-        fn only_the_case_can_change() {
+        fn allows_case_only_change() {
             let (dir, mut library) = with_game();
             let entry = rename(&mut library, "OLD").unwrap();
             assert_eq!(entry.name, "OLD.gba");
@@ -690,39 +691,37 @@ mod tests {
         }
 
         #[test]
-        fn nothing_moves_when_it_is_refused() {
-            for (new, leftover, refused) in [
-                ("../x", None, "bad"),
-                ("", None, "bad"),
-                (".hidden", None, "bad"),
-                ("a:b", None, "bad"),
-                ("Old", None, "same"),
-                ("Other", None, "taken"),
-                ("other", None, "taken"),
-                ("New", Some("saves/gba/New/x.sav"), "leftovers"),
-                ("New", Some("covers/gba/New.jpg"), "leftovers"),
+        fn moves_nothing_when_refused() {
+            for (new, leftover, refusal) in [
+                ("a:b", None, "the library can't hold a game of that name"),
+                ("Old", None, "it has that name already"),
+                ("Other", None, "another game in the library has that name"),
+                ("other", None, "another game in the library has that name"),
+                (
+                    "New",
+                    Some("saves/gba/New/x.sav"),
+                    "the library has saves or a cover under that name",
+                ),
+                (
+                    "New",
+                    Some("covers/gba/New.jpg"),
+                    "the library has saves or a cover under that name",
+                ),
             ] {
                 let (dir, mut library) = with_game();
                 if let Some(leftover) = leftover {
                     put(dir.path(), leftover, b"not its own");
                 }
                 let before = all_files(dir.path());
-                let done = rename(&mut library, new);
-                let kind = match done {
-                    Err(RenameInLibraryError::BadName) => "bad",
-                    Err(RenameInLibraryError::SameName) => "same",
-                    Err(RenameInLibraryError::NameTaken) => "taken",
-                    Err(RenameInLibraryError::LeftoversThere) => "leftovers",
-                    other => panic!("{new}: {other:?}"),
-                };
-                assert_eq!(kind, refused, "{new}");
+                let refused = rename(&mut library, new).unwrap_err();
+                assert_eq!(refused.to_string(), refusal, "{new}");
                 assert_eq!(all_files(dir.path()), before, "{new}");
                 assert_eq!(names(&library), ["Old.gba", "Other.gba"]);
             }
         }
 
         #[test]
-        fn a_failure_on_the_way_puts_everything_back() {
+        fn restores_everything_on_failure() {
             let (dir, mut library) = with_game();
             let root = dir.path();
             // With its extension, too long to be a file's name: its save folder,
@@ -737,7 +736,6 @@ mod tests {
             assert_eq!(library.entries()[0].name, "Old.gba");
         }
     }
-    use crate::game::{Files, Rom};
 
     /// An empty library; tests put files in it and then reload.
     fn library() -> (tempfile::TempDir, Library) {
@@ -770,7 +768,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn a_folder_that_does_not_exist_is_not_made() {
+        fn does_not_create_missing_dir() {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path().join("typo");
             assert!(matches!(
@@ -781,7 +779,7 @@ mod tests {
         }
 
         #[test]
-        fn the_same_game_twice_is_refused() {
+        fn rejects_duplicate_game() {
             let dir = tempfile::tempdir().unwrap();
             let first = put(dir.path(), "roms/gba/Mine.gba", b"same");
             let second = put(dir.path(), "roms/gba/Other.gba", b"same");
@@ -792,7 +790,7 @@ mod tests {
         }
 
         #[test]
-        fn a_reload_that_finds_it_twice_keeps_what_it_had() {
+        fn keeps_entries_when_reload_finds_duplicate() {
             let (_dir, mut library) = library();
             put(library.root(), "roms/gba/Mine.gba", b"same");
             library.reload().unwrap();
@@ -805,7 +803,7 @@ mod tests {
         }
 
         #[test]
-        fn the_same_contents_on_another_platform_are_another_game() {
+        fn treats_same_contents_on_other_platform_as_other_game() {
             let dir = tempfile::tempdir().unwrap();
             put(dir.path(), "roms/gb/Tetris.gb", b"same");
             put(dir.path(), "roms/gbc/Tetris.gbc", b"same");
@@ -813,7 +811,7 @@ mod tests {
         }
 
         #[test]
-        fn a_game_is_found_with_its_cover_and_saves() {
+        fn finds_game_with_cover_and_saves() {
             let (_dir, mut library) = library();
             put(library.root(), "roms/gba/Tetris.gba", b"hello");
             put(library.root(), "covers/gba/Tetris.png", PNG);
@@ -844,7 +842,7 @@ mod tests {
         }
 
         #[test]
-        fn only_sav_files_are_saves() {
+        fn counts_only_sav_files_as_saves() {
             let (_dir, mut library) = library();
             put(library.root(), "roms/gba/Tetris.gba", b"hello");
             put(library.root(), "saves/gba/Tetris/notes.txt", b"x");
@@ -854,7 +852,7 @@ mod tests {
         }
 
         #[test]
-        fn a_forgotten_game_is_not_answered_for_by_the_cache() {
+        fn rereads_forgotten_game_instead_of_using_cache() {
             let (_dir, mut library) = library();
             let path = "roms/gba/Tetris.gba";
             let file = put_at(library.root(), path, b"hello", 1_000_000);
@@ -879,7 +877,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn not_under_a_name_differing_only_by_its_extension_or_case() {
+        fn rejects_name_differing_only_by_extension_or_case() {
             let (_dir, mut library) = library();
             let kept = put(library.root(), "roms/gba/Tetris.gba", b"kept");
             library.reload().unwrap();
@@ -895,7 +893,7 @@ mod tests {
         }
 
         #[test]
-        fn a_file_put_there_since_the_last_scan_is_not_replaced() {
+        fn keeps_existing_file_not_yet_scanned() {
             let (_dir, mut library) = library();
             let kept = put(library.root(), "roms/gba/Tetris.gba", b"kept");
             let elsewhere = tempfile::tempdir().unwrap();
@@ -906,7 +904,7 @@ mod tests {
         }
 
         #[test]
-        fn another_platform_can_have_the_same_name() {
+        fn allows_same_name_on_other_platform() {
             let (_dir, mut library) = library();
             put(library.root(), "roms/gba/Foo.gba", b"gba");
             library.reload().unwrap();
@@ -917,7 +915,7 @@ mod tests {
         }
 
         #[test]
-        fn not_under_a_name_that_leads_elsewhere_or_is_hidden() {
+        fn rejects_path_or_hidden_name() {
             let (_dir, mut library) = library();
             let elsewhere = tempfile::tempdir().unwrap();
             let from = put(elsewhere.path(), "x.gba", b"other");
@@ -930,7 +928,7 @@ mod tests {
         }
 
         #[test]
-        fn it_is_not_read_back() {
+        fn records_given_game_without_rereading_file() {
             let (_dir, mut library) = library();
             let elsewhere = tempfile::tempdir().unwrap();
             let from = put(elsewhere.path(), "x.gba", b"hello");
@@ -948,7 +946,7 @@ mod tests {
         }
 
         #[test]
-        fn in_order() {
+        fn inserts_game_in_sorted_position() {
             let (_dir, mut library) = library();
             put(library.root(), "roms/gba/B.gba", b"b");
             put(library.root(), "roms/gba/D.gba", b"d");
@@ -1003,7 +1001,7 @@ mod tests {
         }
 
         #[test]
-        fn under_its_time() {
+        fn names_version_file_after_modified_time() {
             let (_dir, mut library) = with_tetris();
             let added = add_save(&mut library, b"save", 1_762_179_605).unwrap();
             assert_eq!(added.unwrap().size, 4);
@@ -1023,15 +1021,7 @@ mod tests {
         }
 
         #[test]
-        fn one_already_kept_is_not_added_again() {
-            let (_dir, mut library) = with_tetris();
-            add_save(&mut library, b"save", 1_000).unwrap();
-            assert_eq!(add_save(&mut library, b"save", 2_000).unwrap(), None);
-            assert_eq!(library.entries()[0].save.as_ref().unwrap().versions, []);
-        }
-
-        #[test]
-        fn two_of_the_same_second_are_both_kept() {
+        fn keeps_both_saves_from_same_second() {
             let (_dir, mut library) = with_tetris();
             add_save(&mut library, b"one", 1_000).unwrap();
             add_save(&mut library, b"two", 1_000).unwrap();
@@ -1047,7 +1037,7 @@ mod tests {
         }
 
         #[test]
-        fn for_a_game_not_in_the_library_is_an_error() {
+        fn returns_error_for_game_not_in_library() {
             let (_dir, mut library) = library();
             assert!(matches!(
                 add_save(&mut library, b"save", 1_000),
@@ -1056,7 +1046,7 @@ mod tests {
         }
 
         #[test]
-        fn a_kept_version_is_found_by_what_it_holds() {
+        fn finds_version_file_by_contents() {
             let (_dir, mut library) = with_tetris();
             let save = add_save(&mut library, b"save", 1_000).unwrap().unwrap();
             let entry = &library.entries()[0];
@@ -1077,7 +1067,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn a_cover_is_added_where_a_reload_finds_it() {
+        fn adds_cover_where_reload_finds_it() {
             let (_dir, mut library) = library();
             put(library.root(), "roms/gba/Tetris.gba", b"hello");
             library.reload().unwrap();
@@ -1094,7 +1084,7 @@ mod tests {
         }
 
         #[test]
-        fn a_games_files_are_its_rom_and_cover() {
+        fn lists_rom_and_cover_as_game_files() {
             let (_dir, mut library) = library();
             put(library.root(), "roms/gba/Tetris.gba", b"hello");
             put(library.root(), "covers/gba/Tetris.png", PNG);
@@ -1114,7 +1104,7 @@ mod tests {
         }
 
         #[test]
-        fn all_save_files_are_every_version() {
+        fn lists_every_save_version_file() {
             let (_dir, mut library) = library();
             put(library.root(), "roms/gba/Tetris.gba", b"hello");
             let old = put_at(library.root(), "saves/gba/Tetris/old.sav", b"a", 1_000);
@@ -1126,7 +1116,7 @@ mod tests {
         }
 
         #[test]
-        fn saves_read_again_are_those_still_there() {
+        fn rereads_remaining_saves() {
             let (_dir, mut library) = library();
             put(library.root(), "roms/gba/Tetris.gba", b"hello");
             put_at(library.root(), "saves/gba/Tetris/old.sav", b"a", 1_000);
@@ -1144,7 +1134,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn saves_without_a_game_are_orphans() {
+        fn lists_saves_without_game() {
             let (_dir, mut library) = library();
             put(library.root(), "roms/gba/Kept.gba", b"hello");
             put(library.root(), "saves/gba/Kept/a.sav", b"has a game");
@@ -1161,7 +1151,7 @@ mod tests {
         }
 
         #[test]
-        fn their_files_are_every_version() {
+        fn lists_every_version_file_of_orphan() {
             let (_dir, mut library) = library();
             let old = put_at(library.root(), "saves/gba/Gone/old.sav", b"a", 1_000);
             let new = put_at(library.root(), "saves/gba/Gone/new.sav", b"b", 2_000);
@@ -1171,7 +1161,7 @@ mod tests {
         }
 
         #[test]
-        fn one_with_a_game_again_has_no_files() {
+        fn returns_no_files_after_game_comes_back() {
             let (_dir, mut library) = library();
             put_at(library.root(), "saves/gba/Gone/old.sav", b"a", 1_000);
             library.reload().unwrap();

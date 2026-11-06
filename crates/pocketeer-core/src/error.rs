@@ -103,11 +103,13 @@ pub(crate) fn trash_failed(source: trash::Error) -> BaseError {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn an_io_error_says_what_was_done_where() {
+    fn reports_operation_and_path_in_io_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Gone.gba");
-        let error = super::BaseError::from(fs_err::remove_file(&path).unwrap_err());
+        let error = BaseError::from(fs_err::remove_file(&path).unwrap_err());
         let text = error.to_string();
         assert!(
             text.starts_with(&format!("failed to remove file `{}`: ", path.display())),
@@ -116,11 +118,9 @@ mod tests {
         assert_eq!(error.code(), "io");
     }
 
-    use super::*;
-
     /// Programs go by these, so changing a variant's name mustn't change them.
     #[test]
-    fn a_code_is_the_variants_name_unless_it_says_otherwise() {
+    fn keeps_stable_error_codes() {
         assert_eq!(BaseError::NoHome.code(), "no_home");
         assert_eq!(
             BaseError::SameGameInLibrary { copies: Vec::new() }.code(),

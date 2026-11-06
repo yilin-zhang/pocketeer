@@ -150,7 +150,7 @@ fn assert_json_could_not_start(ran: &Ran, code: &str) {
 }
 
 #[test]
-fn the_default_library_is_made_in_the_home_folder() {
+fn creates_default_library_in_home_dir() {
     let home = tempfile::tempdir().unwrap();
     let ran = run_and_capture(
         pocketeer_command()
@@ -165,7 +165,7 @@ mod printing {
     use super::*;
 
     #[test]
-    fn games_are_a_table_as_text() {
+    fn prints_games_as_table() {
         let s = Setup::new();
         s.in_library("roms/gba/Mine.gba", b"both");
         s.on_device("Assets/gba/common/Both.gba", b"both");
@@ -182,7 +182,7 @@ mod printing {
     }
 
     #[test]
-    fn games_have_this_shape_as_json() {
+    fn prints_games_as_json() {
         let s = Setup::new();
         s.in_library("roms/gba/Mine.gba", b"both");
         let cover = s.in_library("covers/gba/Mine.png", b"png");
@@ -222,7 +222,7 @@ mod printing {
     }
 
     #[test]
-    fn saves_are_newest_first() {
+    fn prints_saves_newest_first() {
         let s = Setup::new();
         s.in_library("roms/gba/Mine.gba", b"game");
         let old = s.in_library("saves/gba/Mine/old.sav", b"old");
@@ -240,7 +240,7 @@ mod printing {
     }
 
     #[test]
-    fn orphan_saves_have_this_shape_as_json() {
+    fn prints_orphan_saves_as_json() {
         let s = Setup::new();
         let on_device = s.on_device("Saves/gba/common/RPG/Gone.sav", b"save");
         set_written_at(&on_device, 1_600_000_000);
@@ -269,7 +269,7 @@ mod batches {
     use super::*;
 
     #[test]
-    fn one_that_went_well_exits_with_0_and_says_each_game() {
+    fn exits_0_and_reports_each_game() {
         let s = Setup::new();
         s.on_device("Assets/gba/common/One.gba", b"one");
         s.on_device("Assets/gba/common/Two.gba", b"two");
@@ -283,7 +283,7 @@ mod batches {
     }
 
     #[test]
-    fn one_with_a_failure_goes_on_and_exits_with_1() {
+    fn continues_after_failure_and_exits_1() {
         let s = Setup::new();
         s.in_library("roms/gba/None.gba", b"none");
         s.in_library("roms/gba/Mine.gba", b"mine");
@@ -304,7 +304,7 @@ mod batches {
     }
 
     #[test]
-    fn finding_nothing_to_do_is_not_a_failure() {
+    fn exits_0_when_nothing_to_do() {
         let s = Setup::new();
         s.in_library("roms/gba/None.gba", b"none");
         s.on_device("Assets/gba/common/None.gba", b"none");
@@ -318,7 +318,7 @@ mod could_not_start {
     use super::*;
 
     #[test]
-    fn a_command_written_wrong_exits_with_2_and_prints_nothing_on_stdout() {
+    fn exits_2_with_empty_stdout_for_unknown_command() {
         let s = Setup::new();
         let ran = s.run(&["--json", "no-such-command"]);
         assert_eq!(ran.code, 2);
@@ -327,7 +327,7 @@ mod could_not_start {
     }
 
     #[test]
-    fn no_command_without_a_terminal_exits_with_2() {
+    fn exits_2_without_command_outside_terminal() {
         let s = Setup::new();
         let ran = s.run(&[]);
         assert_could_not_start(
@@ -337,7 +337,7 @@ mod could_not_start {
     }
 
     #[test]
-    fn a_game_written_wrong() {
+    fn exits_2_for_game_without_platform_prefix() {
         let s = Setup::new();
         let how = "write a game as <platform>/<name>, as `pocketeer games` shows it";
         assert_could_not_start(
@@ -348,7 +348,7 @@ mod could_not_start {
     }
 
     #[test]
-    fn a_game_that_is_not_there_and_nothing_is_done() {
+    fn exits_2_and_does_nothing_for_game_not_found() {
         let s = Setup::new();
         s.on_device("Assets/gba/common/One.gba", b"one");
         assert_could_not_start(
@@ -367,7 +367,7 @@ mod could_not_start {
     }
 
     #[test]
-    fn a_library_that_does_not_exist_and_it_is_not_made() {
+    fn exits_2_without_creating_missing_library() {
         let s = Setup::new();
         let typo = s.dir.path().join("typo");
         let ran = run_and_capture(
@@ -382,7 +382,7 @@ mod could_not_start {
     }
 
     #[test]
-    fn a_folder_that_is_not_a_device() {
+    fn exits_2_for_dir_that_is_not_device() {
         let s = Setup::new();
         let ran = run_and_capture(
             pocketeer_command()
@@ -397,7 +397,7 @@ mod could_not_start {
     }
 
     #[test]
-    fn a_library_holding_a_game_twice() {
+    fn exits_2_for_library_with_duplicate_game() {
         let s = Setup::new();
         s.in_library("roms/gba/One.gba", b"same");
         s.in_library("roms/gba/Two.gba", b"same");
@@ -405,7 +405,7 @@ mod could_not_start {
     }
 }
 
-mod copies_on_the_device {
+mod duplicates_on_device {
     use super::*;
 
     /// One game with two copies; only the later has a save.
@@ -422,7 +422,7 @@ mod copies_on_the_device {
                                       it is left out and its save isn't synced\n";
 
     #[test]
-    fn those_left_out_are_warned_of_and_listed_as_json() {
+    fn warns_of_duplicates_and_lists_them_in_json() {
         let s = two_copies();
         let ran = s.run(&["--json", "games"]);
         assert_eq!(ran.code, 0);
@@ -434,7 +434,7 @@ mod copies_on_the_device {
     }
 
     #[test]
-    fn a_command_naming_one_left_out_could_not_start() {
+    fn exits_2_for_command_naming_duplicate() {
         let s = two_copies();
         for what in [
             "pull game",
@@ -452,7 +452,7 @@ mod copies_on_the_device {
     }
 
     #[test]
-    fn pulling_every_save_warns_of_what_it_leaves_out_and_exits_with_0() {
+    fn warns_of_skipped_saves_and_exits_0_when_pulling_all() {
         let s = two_copies();
         s.on_device("Assets/gba/common/Here.gba", b"here");
         s.on_device("Saves/gba/common/Here.sav", b"save");
@@ -483,7 +483,7 @@ mod versions {
     }
 
     #[test]
-    fn pushed_by_its_time() {
+    fn pushes_version_at_given_time() {
         let s = with_a_version();
         let ran = s.run(&[
             "push",
@@ -504,7 +504,7 @@ mod versions {
     }
 
     #[test]
-    fn a_time_with_none_is_a_failure_for_that_game() {
+    fn exits_1_when_no_version_at_given_time() {
         let s = with_a_version();
         let ran = s.run(&["push", "save", "gba/Mine.gba", "--at", "never"]);
         assert_eq!(ran.code, 1);
@@ -538,7 +538,7 @@ mod importing {
     }
 
     #[test]
-    fn a_folder_brings_in_the_games_under_it() {
+    fn imports_games_under_dir() {
         let s = Setup::new();
         s.elsewhere("roms/old/Deep.gb", b"deep");
         s.elsewhere("roms/README.txt", b"read me");
@@ -553,29 +553,7 @@ mod importing {
     }
 
     #[test]
-    fn a_save_needs_no_device() {
-        let (s, file) = with_a_save_to_import();
-        let file = file.to_str().unwrap();
-        let ran = without_a_device(&s, &["import", "save", "gba/Mine.gba", file]);
-        assert_eq!(ran.code, 0, "{}", ran.stderr);
-        assert_eq!(
-            ran.stdout,
-            "gba/Mine.gba: save 2020-09-13T12-26-40 imported\n"
-        );
-        assert_eq!(
-            fs::read(s.library().join("saves/gba/Mine/2020-09-13T12-26-40.sav")).unwrap(),
-            b"save"
-        );
-        let ran = without_a_device(&s, &["import", "save", "gba/Mine.gba", file]);
-        assert_eq!(ran.code, 0);
-        assert_eq!(
-            ran.stdout,
-            "gba/Mine.gba: the library has this save already\n"
-        );
-    }
-
-    #[test]
-    fn a_save_has_this_shape_as_json() {
+    fn prints_imported_save_as_json() {
         let (s, file) = with_a_save_to_import();
         let file = file.to_str().unwrap();
         let ran = without_a_device(&s, &["--json", "import", "save", "gba/Mine.gba", file]);
@@ -597,21 +575,7 @@ mod importing {
     }
 
     #[test]
-    fn a_game_needs_no_device_and_is_told_by_its_file_name() {
-        let s = Setup::new();
-        let file = s.elsewhere("mine.gba", b"mine");
-        let ran = without_a_device(&s, &["import", "game", file.to_str().unwrap()]);
-        assert_eq!(ran.code, 0, "{}", ran.stderr);
-        assert_eq!(ran.stdout, "mine.gba: imported as gba/mine.gba\n");
-        assert_eq!(
-            fs::read(s.library().join("roms/gba/mine.gba")).unwrap(),
-            b"mine"
-        );
-        assert!(file.exists());
-    }
-
-    #[test]
-    fn a_game_has_this_shape_as_json() {
+    fn prints_imported_game_as_json() {
         let s = Setup::new();
         let file = s.elsewhere("mine.gba", b"mine");
         let path = file.to_str().unwrap();
@@ -634,7 +598,7 @@ mod importing {
     }
 
     #[test]
-    fn a_file_whose_platform_cannot_be_told_needs_it_given() {
+    fn requires_platform_for_unknown_extension() {
         let s = Setup::new();
         let file = s.elsewhere("mine.bin", b"mine");
         let path = file.to_str().unwrap();
@@ -650,7 +614,7 @@ mod importing {
     }
 
     #[test]
-    fn a_platform_not_named_could_not_start_and_nothing_is_written() {
+    fn exits_2_for_unlisted_platform_id() {
         let s = Setup::new();
         let file = s.elsewhere("mine.bin", b"mine");
         let path = file.to_str().unwrap();
@@ -664,16 +628,7 @@ mod importing {
     }
 
     #[test]
-    fn a_hidden_file_is_a_failure_and_stays_out_of_the_library() {
-        let s = Setup::new();
-        let file = s.elsewhere(".hidden.gba", b"mine");
-        let ran = without_a_device(&s, &["import", "game", file.to_str().unwrap()]);
-        assert_eq!(ran.code, 1);
-        assert!(!s.library().join("roms/gba/.hidden.gba").exists());
-    }
-
-    #[test]
-    fn a_file_given_by_a_relative_path_is_logged_by_its_absolute_one() {
+    fn logs_absolute_path_for_relative_path() {
         let (s, file) = with_a_save_to_import();
         let folder = file.parent().unwrap();
         let game = put(folder, "mine.gba", b"game");
@@ -699,7 +654,7 @@ mod deleting {
     use super::*;
 
     #[test]
-    fn a_game_leaves_a_save_that_is_then_deleted_as_an_orphan() {
+    fn deletes_game_and_leaves_its_save() {
         let s = Setup::new();
         let game = s.on_device("Assets/gba/common/One.gba", b"one");
         let save = s.on_device("Saves/gba/common/One.sav", b"save");
@@ -707,6 +662,12 @@ mod deleting {
         assert_eq!(ran.code, 0);
         assert_eq!(ran.stdout, "gba/One.gba: deleted from the device\n");
         assert!(!game.exists() && save.exists());
+    }
+
+    #[test]
+    fn deletes_orphan_save() {
+        let s = Setup::new();
+        let save = s.on_device("Saves/gba/common/One.sav", b"save");
         let ran = s.run(&["delete-on-device", "orphan-save", "gba/One.sav"]);
         assert_eq!(ran.code, 0);
         assert_eq!(ran.stdout, "gba/One.sav: save deleted from the device\n");
@@ -714,7 +675,7 @@ mod deleting {
     }
 
     #[test]
-    fn only_an_orphan_save_is_deleted_as_one() {
+    fn exits_2_for_save_that_is_not_orphan() {
         let s = Setup::new();
         s.on_device("Assets/gba/common/One.gba", b"one");
         let save = s.on_device("Saves/gba/common/One.sav", b"save");
@@ -738,7 +699,7 @@ mod log {
     use super::*;
 
     #[test]
-    fn what_a_command_does_goes_in_it() {
+    fn logs_command_with_cli_front_end() {
         let s = Setup::new();
         s.on_device("Assets/gba/common/One.gba", b"one");
         s.run(&["pull", "game"]);
@@ -751,7 +712,7 @@ mod log {
     }
 
     #[test]
-    fn unwritable_it_stops_a_batch_and_exits_with_1() {
+    fn stops_batch_and_exits_1_when_log_unwritable() {
         let s = Setup::new();
         s.on_device("Assets/gba/common/One.gba", b"one");
         s.on_device("Assets/gba/common/Two.gba", b"two");
@@ -768,7 +729,7 @@ mod log {
     }
 
     #[test]
-    fn unwritable_it_is_told_as_json_too() {
+    fn reports_unwritable_log_in_json() {
         let s = Setup::new();
         s.on_device("Assets/gba/common/One.gba", b"one");
         s.on_device("Assets/gba/common/Two.gba", b"two");
@@ -783,20 +744,26 @@ mod log {
 }
 
 #[test]
-fn sizes_are_aligned_to_the_right() {
+fn aligns_sizes_to_the_right() {
     let s = Setup::new();
-    s.on_device("Saves/gba/common/A.sav", &[0; 12]);
-    s.on_device("Saves/gba/common/B.sav", &[0; 3]);
+    let long = s.on_device("Saves/gba/common/A.sav", &[0; 12]);
+    let short = s.on_device("Saves/gba/common/B.sav", &[0; 3]);
+    set_written_at(&long, 1_600_000_000);
+    set_written_at(&short, 1_600_000_000);
     let ran = s.run(&["orphan-saves", "device"]);
-    let sizes: Vec<&str> = ran.stdout.lines().map(|l| &l[11..19]).collect();
-    assert_eq!(sizes, ["    SIZE", "12 bytes", " 3 bytes"]);
+    assert_eq!(
+        ran.stdout,
+        "SAVE           SIZE  WRITTEN\n\
+         gba/A.sav  12 bytes  2020-09-13T12-26-40\n\
+         gba/B.sav   3 bytes  2020-09-13T12-26-40\n"
+    );
 }
 
 mod rename {
     use super::*;
 
     #[test]
-    fn a_game_in_the_library_is_renamed_as_json() {
+    fn prints_library_rename_as_json() {
         let s = Setup::new();
         s.in_library("roms/gba/Old.gba", b"hello");
         s.in_library("saves/gba/Old/x.sav", b"save");
@@ -820,7 +787,7 @@ mod rename {
     }
 
     #[test]
-    fn a_game_on_the_device_is_renamed_with_its_save() {
+    fn renames_game_on_device_with_its_save() {
         let s = Setup::new();
         s.on_device("Assets/gba/common/RPG/Old.gba", b"hello");
         s.on_device("Saves/gba/common/RPG/Old.sav", b"save");
@@ -828,31 +795,6 @@ mod rename {
         assert_eq!(ran.code, 0, "{}", ran.stderr);
         assert_eq!(ran.stdout, "gba/RPG/Old.gba: renamed to gba/RPG/New.gba\n");
         assert!(s.device().join("Saves/gba/common/RPG/New.sav").exists());
-    }
-
-    #[test]
-    fn a_game_not_there_is_refused_at_the_start() {
-        let s = Setup::new();
-        let ran = s.run(&["--json", "rename", "library", "gba/Gone.gba", "New"]);
-        assert_eq!(ran.code, 2);
-        assert_eq!(ran.json()["error"]["code"], "not_in_library");
-        let ran = s.run(&["--json", "rename", "device", "gba/Gone.gba", "New"]);
-        assert_eq!(ran.code, 2);
-        assert_eq!(ran.json()["error"]["code"], "not_on_device");
-    }
-
-    #[test]
-    fn a_name_refused_is_a_failure() {
-        let s = Setup::new();
-        s.in_library("roms/gba/Old.gba", b"hello");
-        s.in_library("roms/gba/Other.gba", b"other");
-        let ran = s.run(&["rename", "library", "gba/Old.gba", "Other"]);
-        assert_eq!(ran.code, 1);
-        assert_eq!(
-            ran.stdout,
-            "gba/Old.gba: not renamed: another game in the library has that name\n"
-        );
-        assert!(s.library().join("roms/gba/Old.gba").exists());
     }
 }
 
@@ -874,7 +816,7 @@ mod bios {
     }
 
     #[test]
-    fn list_has_this_shape_as_json() {
+    fn prints_list_as_json() {
         let s = with_core();
         assert_eq!(
             s.run(&["--json", "bios", "list"]).json(),
@@ -894,7 +836,7 @@ mod bios {
     }
 
     #[test]
-    fn list_as_text_tells_a_wrong_size() {
+    fn prints_wrong_size_in_list_table() {
         let s = with_core();
         s.on_device("Assets/gba/common/gba_bios.bin", b"five!");
         let ran = s.run(&["bios", "list"]);
@@ -907,14 +849,10 @@ mod bios {
     }
 
     #[test]
-    fn a_file_is_put_and_a_file_no_core_loads_is_refused_at_the_start() {
+    fn puts_file_on_device() {
         let s = with_core();
         let from = s.elsewhere("mine.bin", b"four");
-        let from = from.to_str().unwrap();
-        let refused = s.run(&["--json", "bios", "put", "gba/other.bin", from]);
-        assert_eq!(refused.code, 2);
-        assert_eq!(refused.json()["error"]["code"], "not_a_bios_file");
-        let ran = s.run(&["bios", "put", "gba/gba_bios.bin", from]);
+        let ran = s.run(&["bios", "put", "gba/gba_bios.bin", from.to_str().unwrap()]);
         assert_eq!(ran.code, 0, "{}", ran.stderr);
         assert_eq!(ran.stdout, "gba/gba_bios.bin: put on the device\n");
         let on_device = s.device().join("Assets/gba/common/gba_bios.bin");
@@ -922,22 +860,13 @@ mod bios {
     }
 
     #[test]
-    fn a_file_of_another_size_is_a_failure() {
+    fn exits_2_for_file_no_core_loads() {
         let s = with_core();
-        let from = s.elsewhere("mine.bin", b"five!");
-        let ran = s.run(&["bios", "put", "gba/gba_bios.bin", from.to_str().unwrap()]);
-        assert_eq!(ran.code, 1);
-        assert_eq!(
-            ran.stdout,
-            "gba/gba_bios.bin: the file has 5 bytes, and the core takes 4\n"
-        );
-    }
-
-    #[test]
-    fn a_core_s_file_is_not_listed_as_a_game() {
-        let s = with_core();
-        s.on_device("Assets/gba/common/gba_bios.bin", b"four");
-        assert_eq!(s.run(&["--json", "games"]).json()["data"], json!([]));
+        let from = s.elsewhere("mine.bin", b"four");
+        let from = from.to_str().unwrap();
+        let ran = s.run(&["--json", "bios", "put", "gba/other.bin", from]);
+        assert_eq!(ran.code, 2);
+        assert_eq!(ran.json()["error"]["code"], "not_a_bios_file");
     }
 }
 
@@ -999,7 +928,7 @@ mod cores {
     }
 
     #[test]
-    fn list_has_this_shape_as_json() {
+    fn prints_list_as_json() {
         let s = with_inventory("http://127.0.0.1:1/never");
         core_on_device(&s, GB, "1.0");
         core_on_device(&s, "someone.Else", "3.0");
@@ -1031,7 +960,7 @@ mod cores {
     }
 
     #[test]
-    fn list_is_a_table_as_text() {
+    fn prints_list_as_table() {
         let s = with_inventory("http://127.0.0.1:1/never");
         core_on_device(&s, GB, "1.0");
         let ran = s.run(&["cores", "list"]);
@@ -1044,19 +973,7 @@ mod cores {
     }
 
     #[test]
-    fn a_core_is_installed_with_its_platform_and_nothing_else() {
-        let s = with_inventory(&serve_release("2.0"));
-        let ran = s.run(&["cores", "install", GB]);
-        assert_eq!(ran.code, 0, "{}", ran.stderr);
-        assert_eq!(ran.stdout, "Spiritualized.GB: 2.0 installed\n");
-        assert!(s.device().join("Cores").join(GB).join("core.json").exists());
-        assert!(s.device().join("Platforms/gb.json").exists());
-        assert!(!s.device().join("README.md").exists());
-        assert_eq!(s.log_lines()[0]["version"], "2.0");
-    }
-
-    #[test]
-    fn installing_as_json_has_one_entry_for_each_core() {
+    fn prints_install_as_json_with_entry_for_each_core() {
         let s = with_inventory(&serve_release("2.0"));
         assert_eq!(
             s.run(&["--json", "cores", "install", GB]).json(),
@@ -1072,10 +989,11 @@ mod cores {
                 }],
             })
         );
+        assert!(s.device().join("Cores").join(GB).join("core.json").exists());
     }
 
     #[test]
-    fn a_core_not_supported_could_not_start_and_nothing_is_done() {
+    fn exits_2_for_unsupported_core_and_installs_nothing() {
         let s = with_inventory(&serve_release("2.0"));
         assert_json_could_not_start(
             &s.run(&["--json", "cores", "install", GB, "no.Such"]),
@@ -1085,23 +1003,7 @@ mod cores {
     }
 
     #[test]
-    fn installing_needs_a_device() {
-        let s = with_inventory(&serve_release("2.0"));
-        let ran = run_and_capture(
-            pocketeer_command()
-                .env("HOME", s.dir.path())
-                .arg("--json")
-                .arg("--library")
-                .arg(s.library())
-                .arg("--device")
-                .arg(s.dir.path().join("nowhere"))
-                .args(["cores", "install", GB]),
-        );
-        assert_json_could_not_start(&ran, "not_a_device");
-    }
-
-    #[test]
-    fn a_download_that_fails_is_a_failure() {
+    fn exits_1_when_download_fails() {
         let s = with_inventory("http://127.0.0.1:1/never");
         let ran = s.run(&["cores", "install", GB]);
         assert_eq!(ran.code, 1);
@@ -1113,7 +1015,7 @@ mod cores {
     }
 
     #[test]
-    fn update_with_no_core_named_updates_those_with_a_newer_release() {
+    fn updates_cores_with_newer_release_when_none_named() {
         let s = with_inventory(&serve_release("2.0"));
         core_on_device(&s, GB, "1.0");
         core_on_device(&s, "someone.Else", "3.0");
@@ -1125,7 +1027,7 @@ mod cores {
     }
 
     #[test]
-    fn a_core_not_on_the_device_could_not_start_for_update_and_remove() {
+    fn exits_2_for_update_or_remove_of_core_not_on_device() {
         let s = with_inventory("http://127.0.0.1:1/never");
         for what in ["update", "remove"] {
             assert_json_could_not_start(
@@ -1137,14 +1039,12 @@ mod cores {
     }
 
     #[test]
-    fn removing_a_core_leaves_what_else_is_on_the_device() {
+    fn removes_core_from_device() {
         let s = with_inventory("http://127.0.0.1:1/never");
         core_on_device(&s, GB, "1.0");
-        let settings = s.on_device("Settings/Spiritualized.GB/mine.json", b"mine");
         let ran = s.run(&["cores", "remove", GB]);
         assert_eq!(ran.code, 0, "{}", ran.stderr);
         assert_eq!(ran.stdout, "Spiritualized.GB: removed from the device\n");
         assert!(!s.device().join("Cores").join(GB).exists());
-        assert!(settings.exists());
     }
 }

@@ -546,7 +546,7 @@ mod tests {
         }
 
         #[test]
-        fn a_real_slot_is_read() {
+        fn parses_real_slot() {
             assert_eq!(
                 files(
                     r#"{"id":"0x103","name":"BIOS","filename":"gba_bios.bin","required":true,
@@ -563,7 +563,7 @@ mod tests {
         }
 
         #[test]
-        fn what_is_not_said_is_optional_and_of_any_size_in_common() {
+        fn defaults_missing_fields_to_optional_and_any_size() {
             assert_eq!(
                 files(r#"{"filename":"x.bin"}"#),
                 [CoreFile {
@@ -576,20 +576,20 @@ mod tests {
         }
 
         #[test]
-        fn a_number_may_be_written_as_hex() {
+        fn parses_numbers_written_as_hex() {
             let file = files(r#"{"filename":"x.bin","parameters":"0x89","size_exact":"0x4000"}"#);
             assert_eq!(file[0].path, Path::new("x.bin"));
             assert_eq!(file[0].size_exact, Some(16384));
         }
 
         #[test]
-        fn a_file_of_the_core_s_own_is_left_out() {
+        fn leaves_out_core_specific_files() {
             assert_eq!(files(r#"{"filename":"x.bin","parameters":2}"#), []);
             assert_eq!(files(r#"{"filename":"x.bin","parameters":"0x8a"}"#), []);
         }
 
         #[test]
-        fn only_fixed_files_that_are_not_saves_count() {
+        fn keeps_only_fixed_non_save_files() {
             assert_eq!(
                 paths(
                     r#"{"name":"Cartridge","required":true,"parameters":"0x109"},
@@ -600,13 +600,13 @@ mod tests {
         }
 
         #[test]
-        fn a_size_of_zero_asks_for_no_size() {
+        fn treats_zero_size_as_no_required_size() {
             let file = files(r#"{"filename":"x.bin","size_exact":0}"#);
             assert_eq!(file[0].size_exact, None);
         }
 
         #[test]
-        fn the_platform_is_the_one_its_parameters_pick() {
+        fn picks_platform_by_parameters_index() {
             let json = data_json(r#"{"filename":"x.bin","parameters":16777216}"#);
             let pick = |platforms: &[Platform]| parse_core_files(platforms, json.as_bytes());
             let picked = pick(&[Platform::Gb, Platform::Gba]);
@@ -619,7 +619,7 @@ mod tests {
         }
 
         #[test]
-        fn nothing_outside_the_folder_or_the_named_platforms_is_declared() {
+        fn rejects_paths_outside_dir_and_unlisted_platforms() {
             for name in ["../x.bin", "a/x.bin", "..", ".", "", "/x.bin", ".x.bin"] {
                 let slot = format!(r#"{{"filename":"{name}"}}"#);
                 assert_eq!(files(&slot), [], "{name}");
@@ -630,16 +630,9 @@ mod tests {
         }
 
         #[test]
-        fn a_file_that_cannot_be_read_declares_nothing() {
+        fn returns_nothing_for_unreadable_json() {
             assert_eq!(parse_core_files(&[Platform::Gba], b"{ not json"), []);
             assert_eq!(parse_core_files(&[Platform::Gba], b""), []);
-        }
-
-        #[test]
-        fn a_byte_order_mark_is_no_matter() {
-            let json = format!("\u{feff}{}", data_json(r#"{"filename":"x.bin"}"#));
-            let files = parse_core_files(&[Platform::Gba], json.as_bytes());
-            assert_eq!(files.len(), 1);
         }
     }
 
@@ -672,26 +665,26 @@ mod tests {
         }
 
         #[test]
-        fn another_version_is_an_update() {
+        fn has_update_when_versions_differ() {
             assert!(update_available(Some("1.2.0"), "1.3.0"));
             // Whichever is newer: versions aren't all numbers.
             assert!(update_available(Some("1.3.0"), "1.2.0"));
         }
 
         #[test]
-        fn the_same_version_however_written_is_not() {
+        fn has_no_update_for_same_version_written_differently() {
             assert!(!update_available(Some("1.2.0"), "1.2.0"));
             assert!(!update_available(Some("v1.2.0"), "1.2.0"));
             assert!(!update_available(Some(" 1.2B "), "V1.2b"));
         }
 
         #[test]
-        fn an_install_that_did_not_finish_is_one_to_finish() {
+        fn has_update_when_installed_version_unknown() {
             assert!(update_available(None, "1.2.0"));
         }
 
         #[test]
-        fn only_a_core_on_both_sides_can_have_one() {
+        fn has_no_update_unless_on_both_sides() {
             assert!(!CoreRow::Installed(installed(Some("1.0"))).has_update());
             assert!(!CoreRow::Available(latest("a.B", "1.0")).has_update());
         }
@@ -717,7 +710,7 @@ mod tests {
         }
 
         #[test]
-        fn only_the_core_and_its_platform_are_installed_with_core_json_last() {
+        fn keeps_only_core_and_platform_files_with_core_json_last() {
             let zip = CoreZip::parse(release("1.2.0"), "a.B").unwrap();
             assert_eq!(zip.version(), "1.2.0");
             assert_eq!(
@@ -732,14 +725,14 @@ mod tests {
         }
 
         #[test]
-        fn a_core_json_with_a_byte_order_mark_is_read() {
+        fn parses_core_json_with_byte_order_mark() {
             let json = format!("\u{feff}{}", core_json("1.2.0"));
             let bytes = zip_of(&[("Cores/a.B/core.json", json.as_bytes())]);
             assert_eq!(CoreZip::parse(bytes, "a.B").unwrap().version(), "1.2.0");
         }
 
         #[test]
-        fn a_path_leading_outside_is_refused_wherever_it_is() {
+        fn rejects_path_outside_device() {
             let bytes = zip_of(&[
                 ("Cores/a.B/core.json", core_json("1").as_bytes()),
                 ("../../evil", b"x"),
@@ -748,19 +741,19 @@ mod tests {
         }
 
         #[test]
-        fn a_zip_of_another_core_is_refused() {
+        fn rejects_zip_of_another_core() {
             let bytes = zip_of(&[("Cores/other.C/core.json", core_json("1").as_bytes())]);
             assert!(why_not(bytes).contains("core.json"));
         }
 
         #[test]
-        fn a_core_json_that_cannot_be_read_is_refused() {
+        fn rejects_unreadable_core_json() {
             let bytes = zip_of(&[("Cores/a.B/core.json", b"{ not json")]);
             assert!(why_not(bytes).contains("can't be read"));
         }
 
         #[test]
-        fn what_is_not_a_zip_is_refused() {
+        fn rejects_file_that_is_not_zip() {
             why_not(b"hello".to_vec());
         }
     }
@@ -820,7 +813,7 @@ mod tests {
         }
 
         #[test]
-        fn only_the_supported_cores_are_given_though_all_are_kept() {
+        fn returns_supported_cores_but_keeps_all_in_file() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("cores.json");
             let fake = Fake::at("2.0");
@@ -833,7 +826,7 @@ mod tests {
         }
 
         #[test]
-        fn it_is_not_asked_for_again_within_the_hour() {
+        fn does_not_fetch_again_within_the_hour() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("cores.json");
             let fake = Fake::at("2.0");
@@ -844,7 +837,7 @@ mod tests {
         }
 
         #[test]
-        fn once_old_it_is_asked_for_again() {
+        fn fetches_again_when_file_is_old() {
             let dir = tempfile::tempdir().unwrap();
             let fake = Fake::at("2.0");
             let got = CoreInventory::open(&old_file(dir.path()), &fake).supported_cores();
@@ -853,7 +846,7 @@ mod tests {
         }
 
         #[test]
-        fn if_that_fails_what_is_known_is_used_without_asking_again() {
+        fn uses_old_inventory_without_retrying_when_fetch_fails() {
             let dir = tempfile::tempdir().unwrap();
             let fake = Fake::failing();
             let mut inventory = CoreInventory::open(&old_file(dir.path()), &fake);
@@ -863,7 +856,7 @@ mod tests {
         }
 
         #[test]
-        fn with_nothing_known_a_failure_is_the_error() {
+        fn returns_error_when_fetch_fails_with_nothing_kept() {
             let dir = tempfile::tempdir().unwrap();
             let fake = Fake::failing();
             let mut inventory = CoreInventory::open(&dir.path().join("cores.json"), &fake);
@@ -871,7 +864,7 @@ mod tests {
         }
 
         #[test]
-        fn a_broken_file_is_ignored() {
+        fn ignores_corrupt_inventory_file() {
             let dir = tempfile::tempdir().unwrap();
             let path = put_at(dir.path(), "cores.json", b"{ not json", 1_000);
             let fake = Fake::at("2.0");

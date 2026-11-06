@@ -194,7 +194,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_dat_name_is_encoded_as_one_path_segment() {
+    fn encodes_dat_name_as_one_path_segment() {
         assert_eq!(
             encode("Sega - Mega Drive - Genesis"),
             "Sega%20-%20Mega%20Drive%20-%20Genesis"
@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn a_symlink_is_the_file_name_of_a_png() {
+    fn reads_png_file_name_as_symlink_target() {
         assert_eq!(
             link_target(b"All-Star Baseball 2004 (USA).png"),
             Some("All-Star Baseball 2004 (USA)")
@@ -210,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn what_else_comes_is_not_a_symlink() {
+    fn rejects_other_contents_as_symlink() {
         for bytes in [
             &b"../Named_Titles/Foo.png"[..],
             b"..\\Foo.png",
@@ -225,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cover_is_named_without_what_file_names_cannot_hold() {
+    fn replaces_forbidden_characters_in_cover_name() {
         assert_eq!(
             Libretro.cover_name("Mario & Luigi: Superstar Saga (USA)"),
             "Mario _ Luigi_ Superstar Saga (USA)"

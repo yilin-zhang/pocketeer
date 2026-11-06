@@ -157,13 +157,13 @@ mod tests {
     }
 
     #[test]
-    fn a_png_is_a_cover() {
+    fn accepts_png() {
         let cover = Cover::from_bytes(png(3, 2)).unwrap();
         assert_eq!(cover.format(), ImageFormat::Png);
     }
 
     #[test]
-    fn other_bytes_are_not_a_cover() {
+    fn rejects_other_formats() {
         assert_eq!(Cover::from_bytes(b"GIF89a....".to_vec()), None);
         assert_eq!(Cover::from_bytes(b"hello".to_vec()), None);
     }
@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cover_is_looked_for_in_each_system_of_the_platform() {
+    fn searches_each_system_of_platform() {
         let dir = tempfile::tempdir().unwrap();
         let fake = fake();
         let mut index = CoverIndex::open(&dir.path().join("covers.json"), fake.clone());
@@ -252,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn a_system_is_asked_for_its_version_once_while_open() {
+    fn asks_for_version_once_while_open() {
         let dir = tempfile::tempdir().unwrap();
         let fake = fake();
         let mut index = CoverIndex::open(&dir.path().join("covers.json"), fake.clone());
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn a_list_is_downloaded_again_only_when_its_version_changes() {
+    fn refetches_list_only_when_version_changes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("covers.json");
         let fake = fake();
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn a_broken_index_file_is_ignored() {
+    fn ignores_corrupt_index_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("covers.json");
         fs::write(&path, b"{ not json").unwrap();
