@@ -13,7 +13,7 @@ use crate::{
         PutBiosError, RemoteCoreSource, RemoveCoreError, SUPPORTED,
     },
     cover::{Cover, CoverIndex, RemoteCoverSource},
-    dat::{DatEntry, DatMirror, RemoteDatSource, SyncReport},
+    dat::{DatMirror, RemoteDatSource, SyncReport},
     device::{
         DeleteSaveError, Device, DeviceEntry, EjectDeviceError, OpenDeviceError, OrphanDeviceSave,
         RenameOnDeviceError, ScanReport,
@@ -366,10 +366,6 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     pub fn sync_dats(&mut self) -> Result<SyncReport, SharedError> {
         let synced = self.dats.sync();
         self.log_result(synced, OperationReport::SyncDats)
-    }
-
-    pub fn find_dat_entry(&self, game: &Game) -> Option<&DatEntry> {
-        self.dats.lookup(game)
     }
 
     /// The name a game on the device gets in the library when pulled.

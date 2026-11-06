@@ -166,18 +166,18 @@ enum GamesPageFocus {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum RowKey {
     Game(Game),
-    OrphanInLibrary { platform: Platform, stem: String },
-    OrphanOnDevice { platform: Platform, path: PathBuf },
+    OrphanSaveInLibrary { platform: Platform, stem: String },
+    OrphanSaveOnDevice { platform: Platform, path: PathBuf },
 }
 
 fn key_of(row: &GamesTableRow) -> RowKey {
     match row {
-        GamesTableRow::Game { row, .. } => RowKey::Game(row.game().clone()),
-        GamesTableRow::OrphanInLibrary(orphan) => RowKey::OrphanInLibrary {
+        GamesTableRow::Game(game_row) => RowKey::Game(game_row.game().clone()),
+        GamesTableRow::OrphanSaveInLibrary(orphan) => RowKey::OrphanSaveInLibrary {
             platform: orphan.platform.clone(),
             stem: orphan.stem.clone(),
         },
-        GamesTableRow::OrphanOnDevice(orphan) => RowKey::OrphanOnDevice {
+        GamesTableRow::OrphanSaveOnDevice(orphan) => RowKey::OrphanSaveOnDevice {
             platform: orphan.platform.clone(),
             path: orphan.path.clone(),
         },
@@ -187,12 +187,12 @@ fn key_of(row: &GamesTableRow) -> RowKey {
 /// A row's name in the table, which is also what a search matches.
 pub fn name_of(row: &GamesTableRow) -> String {
     match row {
-        GamesTableRow::Game { row, .. } => match row {
+        GamesTableRow::Game(game_row) => match game_row {
             GameRow::InLibrary(local) | GameRow::Both { local, .. } => local.name.clone(),
             GameRow::OnDevice(on_device) => on_device.path.display().to_string(),
         },
-        GamesTableRow::OrphanInLibrary(orphan) => orphan.stem.clone(),
-        GamesTableRow::OrphanOnDevice(orphan) => orphan.path.display().to_string(),
+        GamesTableRow::OrphanSaveInLibrary(orphan) => orphan.stem.clone(),
+        GamesTableRow::OrphanSaveOnDevice(orphan) => orphan.path.display().to_string(),
     }
 }
 
@@ -235,10 +235,10 @@ impl GamesFilter {
         match self {
             GamesFilter::All => true,
             GamesFilter::InLibrary => {
-                row.local_entry().is_some() || matches!(row, GamesTableRow::OrphanInLibrary(_))
+                row.local_entry().is_some() || matches!(row, GamesTableRow::OrphanSaveInLibrary(_))
             }
             GamesFilter::OnDevice => {
-                row.device_entry().is_some() || matches!(row, GamesTableRow::OrphanOnDevice(_))
+                row.device_entry().is_some() || matches!(row, GamesTableRow::OrphanSaveOnDevice(_))
             }
         }
     }
@@ -327,7 +327,7 @@ impl GamesPage {
     }
 
     pub fn game_and_orphan_counts(&self) -> (usize, usize) {
-        let is_game = |row: &&GamesTableRow| matches!(row, GamesTableRow::Game { .. });
+        let is_game = |row: &&GamesTableRow| matches!(row, GamesTableRow::Game(_));
         let games = self.rows().iter().filter(is_game).count();
         (games, self.rows().len() - games)
     }
@@ -428,26 +428,6 @@ impl GamesPage {
             .collect();
         let inapplicable = rows.len() - entries.len();
         (entries, inapplicable)
-    }
-
-    /// The library games among the rows to act on whose name differs from their
-    /// DAT name, each paired with that name.
-    fn renames_to_standard_names(&self) -> Vec<(LocalEntry, String)> {
-        self.rows_to_act_on()
-            .iter()
-            .filter_map(|row| {
-                let GamesTableRow::Game {
-                    row,
-                    standard_name: Some(standard_name),
-                    ..
-                } = row
-                else {
-                    return None;
-                };
-                let local = row.local_entry()?;
-                (local.stem() != standard_name).then(|| (local.clone(), standard_name.clone()))
-            })
-            .collect()
     }
 
     /// The games in the library among the rows to act on, and how many rows
@@ -712,14 +692,25 @@ impl App {
             }
             // The event loop ends before this message gets here.
             WorkerMessage::LibraryOpenFailed(_) => {}
-            WorkerMessage::DuplicateGamesSkipped(lines) => {
-                let dialog = duplicates_dialog(lines);
-                if self.dialog.is_some() {
-                    self.next_dialog = Some(dialog);
-                } else {
-                    self.dialog = Some(dialog);
-                }
+            WorkerMessage::RenamesProposed(renames) if renames.is_empty() => {
+                self.inapplicable_row_count = 0;
+                self.show_status_message("no game to rename");
             }
+            WorkerMessage::RenamesProposed(renames) => {
+                self.open_dialog_when_free(renames_dialog(renames));
+            }
+            WorkerMessage::DuplicateGamesSkipped(lines) => {
+                self.open_dialog_when_free(duplicates_dialog(lines));
+            }
+        }
+    }
+
+    /// Opens `dialog` now, or once the open dialog closes if there is one.
+    fn open_dialog_when_free(&mut self, dialog: Dialog) {
+        if self.dialog.is_some() {
+            self.next_dialog = Some(dialog);
+        } else {
+            self.dialog = Some(dialog);
         }
     }
 
@@ -813,7 +804,7 @@ impl App {
             KeyCode::Char('S') => self.push_saves(),
             KeyCode::Char('n') => self.prompt_for_name_in_library(),
             KeyCode::Char('N') => self.prompt_for_name_on_device(),
-            KeyCode::Char('t') => self.confirm_rename_to_standard_names(),
+            KeyCode::Char('t') => self.propose_renames_to_standard_names(),
             KeyCode::Char('a') => self.send_for_library_rows(WorkerCommand::FetchCovers),
             KeyCode::Char('c') => self.prompt_for_cover_to_import(),
             KeyCode::Char('x') => self.confirm_trash_games(),
@@ -860,7 +851,7 @@ impl App {
     }
 
     fn open_panel(&mut self) {
-        if let Some(GamesTableRow::Game { .. }) = self.games.selected_row() {
+        if let Some(GamesTableRow::Game(_)) = self.games.selected_row() {
             self.games.focus = GamesPageFocus::SavesPanel(0);
         }
     }
@@ -1225,29 +1216,12 @@ impl App {
             self.confirm_trash_orphans();
             return;
         }
-        let rows = self.games.rows_to_act_on();
-        let mut files = Vec::new();
-        for row in rows {
-            if let GamesTableRow::Game {
-                files: game_files, ..
-            } = row
-            {
-                for file in game_files {
-                    if !files.contains(file) {
-                        files.push(file.clone());
-                    }
-                }
-            }
-        }
         let mut lines = vec![
-            "These go to the system's trash. Their saves stay.".to_string(),
+            "These go to the system's trash, with their covers. Their saves stay.".to_string(),
             String::new(),
         ];
         lines.extend(cut_short_for_dialog(
-            files
-                .iter()
-                .map(|file| file.display().to_string())
-                .collect(),
+            entries.iter().map(|local| local.name.clone()).collect(),
         ));
         self.inapplicable_row_count += inapplicable;
         self.dialog = Some(Dialog {
@@ -1262,45 +1236,21 @@ impl App {
         });
     }
 
-    /// Asks whether to rename the target games to their DAT names, showing the
-    /// new names first.
-    fn confirm_rename_to_standard_names(&mut self) {
+    /// Asks the worker what the target games would be renamed to. Its answer
+    /// opens the dialog. While it is busy that answer could take long to come,
+    /// so nothing is asked then.
+    fn propose_renames_to_standard_names(&mut self) {
         let (entries, inapplicable) = self.games.library_entries_to_act_on();
         if entries.is_empty() {
             self.show_status_message("nothing here is in the library");
             return;
         }
-        let renames = self.games.renames_to_standard_names();
-        if renames.is_empty() {
-            self.show_status_message("no game to rename");
+        if self.is_busy() {
+            self.show_status_message("busy; try again when this is done");
             return;
         }
-        let mut lines = vec![
-            "These get the names the DATs have; saves and covers go with them.".to_string(),
-            "The device isn't touched.".to_string(),
-            String::new(),
-        ];
-        // Each game takes two lines because names are long, so this shows half
-        // as many as other dialogs.
-        const SHOWN: usize = 5;
-        for (local, new) in renames.iter().take(SHOWN) {
-            lines.push(local.stem().to_string());
-            lines.push(format!("  → {new}"));
-        }
-        if renames.len() > SHOWN {
-            lines.push(format!("… and {} more", renames.len() - SHOWN));
-        }
         self.inapplicable_row_count += inapplicable;
-        self.dialog = Some(Dialog {
-            title: format!("Rename {}", pluralized(renames.len(), "game")),
-            lines,
-            buttons: vec![
-                DialogButton::new("Rename", Some(WorkerCommand::RenameGamesInLibrary(renames))),
-                DialogButton::new("Cancel", None),
-            ],
-            focused_button: 0,
-            is_irreversible: false,
-        });
+        self.worker.send(WorkerCommand::ProposeRenames(entries));
     }
 
     fn confirm_trash_orphans(&mut self) {
@@ -1379,15 +1329,11 @@ impl App {
         let mut lines = vec![format!(
             "This deletes {it} from the device for good: there is no trash there."
         )];
-        let only_here = self.games.rows_to_act_on().iter().any(|row| {
-            matches!(
-                row,
-                GamesTableRow::Game {
-                    row: GameRow::OnDevice(_),
-                    ..
-                }
-            )
-        });
+        let only_here = self
+            .games
+            .rows_to_act_on()
+            .iter()
+            .any(|row| matches!(row, GamesTableRow::Game(GameRow::OnDevice(_))));
         if only_here {
             lines.push(format!("{them} in the library."));
         }
@@ -1455,7 +1401,7 @@ impl App {
         ];
         let unsaved =
             self.games.rows_to_act_on().iter().any(
-                |table_row| matches!(table_row, GamesTableRow::Game { row, .. } if row.has_new_save_on_device()),
+                |table_row| matches!(table_row, GamesTableRow::Game(row) if row.has_new_save_on_device()),
             );
         if unsaved {
             lines.push("The library doesn't have this save.".to_string());
@@ -1517,10 +1463,7 @@ impl App {
         let entries: Vec<DeviceEntry> = targets
             .iter()
             .filter_map(|row| match row {
-                GamesTableRow::Game {
-                    row: GameRow::Both { on_device, .. },
-                    ..
-                } => Some(on_device.clone()),
+                GamesTableRow::Game(GameRow::Both { on_device, .. }) => Some(on_device.clone()),
                 _ => None,
             })
             .collect();
@@ -1594,6 +1537,35 @@ fn translate_emacs_key(key: KeyEvent) -> KeyEvent {
         _ => return key,
     };
     KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+/// Asks whether to rename games to their DAT names, showing the new names first.
+fn renames_dialog(renames: Vec<(LocalEntry, String)>) -> Dialog {
+    let mut lines = vec![
+        "These get the names the DATs have; saves and covers go with them.".to_string(),
+        "The device isn't touched.".to_string(),
+        String::new(),
+    ];
+    // Each game takes two lines because names are long, so this shows half as
+    // many as other dialogs.
+    const SHOWN: usize = 5;
+    for (local, new) in renames.iter().take(SHOWN) {
+        lines.push(local.stem().to_string());
+        lines.push(format!("  → {new}"));
+    }
+    if renames.len() > SHOWN {
+        lines.push(format!("… and {} more", renames.len() - SHOWN));
+    }
+    Dialog {
+        title: format!("Rename {}", pluralized(renames.len(), "game")),
+        lines,
+        buttons: vec![
+            DialogButton::new("Rename", Some(WorkerCommand::RenameGamesInLibrary(renames))),
+            DialogButton::new("Cancel", None),
+        ],
+        focused_button: 0,
+        is_irreversible: false,
+    }
 }
 
 fn duplicates_dialog(duplicates: Vec<String>) -> Dialog {
@@ -1716,29 +1688,17 @@ mod tests {
         }
     }
 
-    fn row(row: GameRow) -> GamesTableRow {
-        GamesTableRow::Game {
-            files: row
-                .local_entry()
-                .iter()
-                .map(|local| PathBuf::from(format!("roms/gba/{}", local.name)))
-                .collect(),
-            row,
-            standard_name: None,
-        }
-    }
-
     /// One row only in the library, one on both sides, one only on the device,
     /// and an orphan save.
     fn rows() -> Vec<GamesTableRow> {
         vec![
-            row(GameRow::InLibrary(local("Alpha.gba", 1, &[]))),
-            row(GameRow::Both {
+            GamesTableRow::Game(GameRow::InLibrary(local("Alpha.gba", 1, &[]))),
+            GamesTableRow::Game(GameRow::Both {
                 local: local("Both.gba", 2, &[b"old", b"new"]),
                 on_device: on_device("Both.gba", 2, Some(b"new")),
             }),
-            row(GameRow::OnDevice(on_device("Hack.gba", 3, None))),
-            GamesTableRow::OrphanOnDevice(OrphanDeviceSave {
+            GamesTableRow::Game(GameRow::OnDevice(on_device("Hack.gba", 3, None))),
+            GamesTableRow::OrphanSaveOnDevice(OrphanDeviceSave {
                 platform: Platform::Gba,
                 path: PathBuf::from("Gone.sav"),
                 save: Save::from_bytes(b"x", UNIX_EPOCH),
@@ -2018,7 +1978,7 @@ mod tests {
         fn with_orphan_in_library() -> (App, Receiver<QueuedCommand>) {
             let (mut app, rx) = app();
             let mut rows = rows();
-            rows.push(GamesTableRow::OrphanInLibrary(OrphanLocalSave {
+            rows.push(GamesTableRow::OrphanSaveInLibrary(OrphanLocalSave {
                 platform: Platform::Gba,
                 stem: "Lost".to_string(),
                 save: SaveHistory::from_saves(vec![Save::from_bytes(b"x", UNIX_EPOCH)]).unwrap(),
@@ -2283,16 +2243,11 @@ mod tests {
         }
 
         #[test]
-        fn x_lists_files_before_trashing() {
+        fn x_lists_games_before_trashing() {
             let (mut app, rx) = app();
             press(&mut app, "x");
             let dialog = app.dialog().unwrap();
-            assert!(
-                dialog
-                    .lines
-                    .iter()
-                    .any(|line| line.contains("roms/gba/Alpha.gba"))
-            );
+            assert!(dialog.lines.iter().any(|line| line == "Alpha.gba"));
             press(&mut app, "y");
             assert!(matches!(sent(&rx)[..], [WorkerCommand::TrashGames(_)]));
         }
@@ -2504,35 +2459,12 @@ mod tests {
             assert!(app.prompt().is_none());
         }
 
-        /// The rows, with Alpha and Hack named differently in the DATs, and
-        /// Both the same.
-        fn app_with_standard_names() -> (App, Receiver<QueuedCommand>) {
-            let (mut app, rx) = app();
-            let standard_name_of = |name: &str| match name {
-                "Alpha.gba" => Some("Alpha (USA)".to_string()),
-                "Both.gba" => Some("Both".to_string()),
-                "Hack.gba" => Some("Hack (USA)".to_string()),
-                _ => None,
-            };
-            let rows = rows()
-                .into_iter()
-                .map(|row| {
-                    let standard_name = standard_name_of(&name_of(&row));
-                    match row {
-                        GamesTableRow::Game { row, files, .. } => GamesTableRow::Game {
-                            standard_name,
-                            row,
-                            files,
-                        },
-                        orphan => orphan,
-                    }
-                })
-                .collect();
-            app.handle_worker_message(WorkerMessage::GamesPageChanged(GamesPageData {
-                rows,
-                device_root: Some(PathBuf::from("/Volumes/POCKET")),
-            }));
-            (app, rx)
+        /// The worker's answer that Alpha has another name in the DATs.
+        fn answer_renaming_alpha(app: &mut App) {
+            app.handle_worker_message(WorkerMessage::RenamesProposed(vec![(
+                local("Alpha.gba", 1, &[]),
+                "Alpha (USA)".to_string(),
+            )]));
         }
 
         fn names_in(renames: &[(LocalEntry, String)]) -> Vec<(&str, &str)> {
@@ -2543,9 +2475,48 @@ mod tests {
         }
 
         #[test]
-        fn t_shows_new_name_and_sends_rename_when_confirmed() {
-            let (mut app, rx) = app_with_standard_names();
+        fn t_asks_worker_about_games_in_library() {
+            let (mut app, rx) = app();
+            press(&mut app, "Mt");
+            let [WorkerCommand::ProposeRenames(games)] = &sent(&rx)[..] else {
+                panic!()
+            };
+            let names: Vec<&str> = games.iter().map(|game| game.name.as_str()).collect();
+            assert_eq!(names, ["Alpha.gba", "Both.gba"]);
+            assert!(app.dialog().is_none());
+        }
+
+        #[test]
+        fn t_asks_nothing_while_worker_is_busy() {
+            let (mut app, rx) = app();
+            app.handle_worker_message(WorkerMessage::CommandStarted {
+                label: "pulling games".to_string(),
+                total: 1,
+            });
             press(&mut app, "t");
+            assert!(sent(&rx).is_empty());
+            assert_eq!(
+                app.status_message().unwrap().text,
+                "busy; try again when this is done"
+            );
+        }
+
+        #[test]
+        fn t_reports_game_only_on_device() {
+            let (mut app, rx) = app();
+            press(&mut app, "jjt");
+            assert!(app.dialog().is_none());
+            assert_eq!(
+                app.status_message().unwrap().text,
+                "nothing here is in the library"
+            );
+            assert!(sent(&rx).is_empty());
+        }
+
+        #[test]
+        fn answer_shows_new_name_and_sends_rename_when_confirmed() {
+            let (mut app, rx) = app();
+            answer_renaming_alpha(&mut app);
             let dialog = app.dialog().unwrap();
             assert_eq!(dialog.title, "Rename 1 game");
             assert_eq!(dialog.lines[3..], ["Alpha", "  → Alpha (USA)"]);
@@ -2558,20 +2529,12 @@ mod tests {
         }
 
         #[test]
-        fn t_shows_five_games_and_counts_rest() {
+        fn answer_shows_five_games_and_counts_rest() {
             let (mut app, rx) = app();
-            let rows = (0..7)
-                .map(|i| GamesTableRow::Game {
-                    row: GameRow::InLibrary(local(&format!("{i}.gba"), i, &[])),
-                    standard_name: Some(format!("Game {i}")),
-                    files: Vec::new(),
-                })
+            let renames = (0..7)
+                .map(|i| (local(&format!("{i}.gba"), i, &[]), format!("Game {i}")))
                 .collect();
-            app.handle_worker_message(WorkerMessage::GamesPageChanged(GamesPageData {
-                rows,
-                device_root: None,
-            }));
-            press(&mut app, "Mt");
+            app.handle_worker_message(WorkerMessage::RenamesProposed(renames));
             let dialog = app.dialog().unwrap();
             assert_eq!(dialog.title, "Rename 7 games");
             assert_eq!(dialog.lines.last().unwrap(), "… and 2 more");
@@ -2583,51 +2546,50 @@ mod tests {
         }
 
         #[test]
-        fn t_sends_nothing_when_canceled() {
-            let (mut app, rx) = app_with_standard_names();
-            press(&mut app, "t\x1b");
-            assert!(app.dialog().is_none());
-            assert!(sent(&rx).is_empty());
-        }
-
-        #[test]
-        fn t_leaves_out_marked_rows_with_nothing_to_rename() {
-            let (mut app, rx) = app_with_standard_names();
-            press(&mut app, "Mt\n");
-            let [WorkerCommand::RenameGamesInLibrary(games)] = &sent(&rx)[..] else {
-                panic!()
-            };
-            assert_eq!(names_in(games), [("Alpha.gba", "Alpha (USA)")]);
-        }
-
-        #[test]
-        fn t_reports_game_already_called_standard_name() {
-            let (mut app, rx) = app_with_standard_names();
-            press(&mut app, "jt");
-            assert!(app.dialog().is_none());
-            assert_eq!(app.status_message().unwrap().text, "no game to rename");
-            assert!(sent(&rx).is_empty());
-        }
-
-        #[test]
-        fn t_reports_game_unknown_to_dats() {
+        fn answer_sends_nothing_when_canceled() {
             let (mut app, rx) = app();
-            press(&mut app, "t");
+            answer_renaming_alpha(&mut app);
+            press(&mut app, "\x1b");
             assert!(app.dialog().is_none());
-            assert_eq!(app.status_message().unwrap().text, "no game to rename");
             assert!(sent(&rx).is_empty());
         }
 
         #[test]
-        fn t_reports_game_only_on_device() {
-            let (mut app, rx) = app_with_standard_names();
-            press(&mut app, "jjt");
+        fn answer_waits_for_open_dialog_to_close() {
+            let (mut app, _rx) = app();
+            press(&mut app, "jjX");
+            let asking = app.dialog().unwrap().title.clone();
+            answer_renaming_alpha(&mut app);
+            assert_eq!(app.dialog().unwrap().title, asking);
+            press(&mut app, "\x1b");
+            assert_eq!(app.dialog().unwrap().title, "Rename 1 game");
+        }
+
+        #[test]
+        fn counts_rows_left_out_of_renames() {
+            let (mut app, _rx) = app();
+            press(&mut app, "Mt");
+            answer_renaming_alpha(&mut app);
+            press(&mut app, "\n");
+            app.handle_worker_message(WorkerMessage::CommandFinished {
+                summary: "renamed".to_string(),
+                failed: false,
+            });
+            assert_eq!(app.status_message().unwrap().text, "renamed (2 left out)");
+        }
+
+        #[test]
+        fn empty_answer_reports_no_game_and_forgets_rows_left_out() {
+            let (mut app, _rx) = app();
+            press(&mut app, "Mt");
+            app.handle_worker_message(WorkerMessage::RenamesProposed(Vec::new()));
             assert!(app.dialog().is_none());
-            assert_eq!(
-                app.status_message().unwrap().text,
-                "nothing here is in the library"
-            );
-            assert!(sent(&rx).is_empty());
+            assert_eq!(app.status_message().unwrap().text, "no game to rename");
+            app.handle_worker_message(WorkerMessage::CommandFinished {
+                summary: "next".to_string(),
+                failed: false,
+            });
+            assert_eq!(app.status_message().unwrap().text, "next");
         }
 
         #[test]
@@ -2674,10 +2636,7 @@ mod tests {
             // Marks the first and moves on to the second, which goes first.
             press(&mut app, "m");
             let mut rows = rows();
-            let GamesTableRow::Game { row, .. } = &mut rows[1] else {
-                panic!()
-            };
-            let GameRow::Both { local, .. } = row else {
+            let GamesTableRow::Game(GameRow::Both { local, .. }) = &mut rows[1] else {
                 panic!()
             };
             local.name = "Aaa.gba".to_string();

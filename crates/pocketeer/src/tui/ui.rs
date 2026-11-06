@@ -534,42 +534,42 @@ fn centered_cell(text: &'static str) -> Cell<'static> {
 fn game_table_row(app: &App, row: &GamesTableRow, compact: bool) -> TableRow<'static> {
     let name = Cell::from(name_of(row));
     let mut cells = match row {
-        GamesTableRow::Game { row, .. } => {
-            let place = match row {
+        GamesTableRow::Game(game_row) => {
+            let place = match game_row {
                 GameRow::Both { .. } => Cell::from("lib + device").style(Palette::Good.style()),
                 GameRow::InLibrary(_) => Cell::from("lib"),
                 GameRow::OnDevice(_) => Cell::from("device"),
             };
-            let art = match row.local_entry() {
+            let art = match game_row.local_entry() {
                 Some(local) if local.cover_path.is_some() => {
                     centered_cell("▣").style(Palette::Good.style())
                 }
                 Some(_) => centered_cell("–").style(Palette::Muted.style()),
                 None => Cell::from(""),
             };
-            let has_device_save = row
+            let has_device_save = game_row
                 .device_entry()
                 .is_some_and(|on_device| on_device.save.is_some());
-            let save = if row.has_new_save_on_device() {
+            let save = if game_row.has_new_save_on_device() {
                 centered_cell("←").style(Palette::Warn.style())
             } else if has_device_save {
                 centered_cell("✓").style(Palette::Good.style())
-            } else if row.saves_kept() > 0 {
+            } else if game_row.saves_kept() > 0 {
                 centered_cell("·").style(Palette::Muted.style())
             } else {
                 Cell::from("")
             };
-            let platform = platform_cell(&row.game().platform);
+            let platform = platform_cell(&game_row.game().platform);
             vec![platform, name, place, art, save]
         }
-        GamesTableRow::OrphanInLibrary(orphan) => vec![
+        GamesTableRow::OrphanSaveInLibrary(orphan) => vec![
             platform_cell(&orphan.platform),
             name,
             Cell::from("lib save"),
             Cell::from(""),
             centered_cell("?"),
         ],
-        GamesTableRow::OrphanOnDevice(orphan) => vec![
+        GamesTableRow::OrphanSaveOnDevice(orphan) => vec![
             platform_cell(&orphan.platform),
             name,
             Cell::from("device save"),
@@ -582,8 +582,8 @@ fn game_table_row(app: &App, row: &GamesTableRow, compact: bool) -> TableRow<'st
     }
     let marked = Style::new().bg(Palette::Rule.color());
     let style = match (row, app.games.is_marked(row)) {
-        (GamesTableRow::Game { .. }, false) => Style::new(),
-        (GamesTableRow::Game { .. }, true) => marked,
+        (GamesTableRow::Game(_), false) => Style::new(),
+        (GamesTableRow::Game(_), true) => marked,
         // Gray all over, because they are saves with no game.
         (_, false) => Palette::Faint.style(),
         // Lighter than that, to show on the mark's gray.
@@ -604,11 +604,8 @@ fn draw_cover(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(block, area);
     let Some(path) = path else {
         let (what, keys): (_, &[KeyHint]) = match app.games.selected_row() {
-            Some(GamesTableRow::Game {
-                row: GameRow::OnDevice(_),
-                ..
-            }) => ("on the device only", &[]),
-            Some(GamesTableRow::Game { .. }) => (
+            Some(GamesTableRow::Game(GameRow::OnDevice(_))) => ("on the device only", &[]),
+            Some(GamesTableRow::Game(_)) => (
                 "no cover yet",
                 &[("a", "download it"), ("c", "use an image file")],
             ),
@@ -678,17 +675,12 @@ fn draw_cover_placeholder(frame: &mut Frame, area: Rect, what: &str, keys: &[Key
 fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines = Vec::new();
     match app.games.selected_row() {
-        Some(GamesTableRow::Game {
-            row, standard_name, ..
-        }) => {
+        Some(GamesTableRow::Game(row)) => {
             if let Some(local) = row.local_entry() {
                 lines.push(labeled_text("Library", local.name.clone()));
             }
             if let Some(on_device) = row.device_entry() {
                 lines.push(labeled_text("Device", on_device.path.display().to_string()));
-            }
-            if let Some(name) = standard_name {
-                lines.push(labeled_text("Standard", name.clone()));
             }
             let Files::Single(rom) = row.game().files;
             lines.push(labeled_text("Size", format!("{} bytes", rom.size)));
@@ -706,7 +698,7 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
                 },
             ));
         }
-        Some(GamesTableRow::OrphanInLibrary(orphan)) => {
+        Some(GamesTableRow::OrphanSaveInLibrary(orphan)) => {
             lines.push(labeled_text("Saves of", orphan.stem.clone()));
             lines.push(labeled_text("Kept", orphan.save.iter().count().to_string()));
             lines.push(labeled_text("Newest", orphan.save.current.timestamp()));
@@ -715,7 +707,7 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
                 "The library has no game of this name. A game put there under it has them again.",
             )));
         }
-        Some(GamesTableRow::OrphanOnDevice(orphan)) => {
+        Some(GamesTableRow::OrphanSaveOnDevice(orphan)) => {
             lines.push(labeled_text("Save", orphan.path.display().to_string()));
             lines.push(labeled_text("Size", format!("{} bytes", orphan.save.size)));
             lines.push(labeled_text("Written", orphan.save.timestamp()));

@@ -56,6 +56,9 @@ pub enum WorkerCommand {
     RemoveCores(Vec<String>),
     /// The file to copy to where the row says.
     PutBios(BiosRow, PathBuf),
+    /// Asks what the DATs would rename these games in the library to. The answer
+    /// comes as `WorkerMessage::RenamesProposed`.
+    ProposeRenames(Vec<LocalEntry>),
     /// Games in the library, and what to call them.
     RenameGamesInLibrary(Vec<(LocalEntry, String)>),
     /// The game on the device, and what to call it.
@@ -64,22 +67,16 @@ pub enum WorkerCommand {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GamesTableRow {
-    Game {
-        row: GameRow,
-        /// The game's name in the DATs.
-        standard_name: Option<String>,
-        /// The files that trashing it would move.
-        files: Vec<PathBuf>,
-    },
-    OrphanInLibrary(OrphanLocalSave),
-    OrphanOnDevice(OrphanDeviceSave),
+    Game(GameRow),
+    OrphanSaveInLibrary(OrphanLocalSave),
+    OrphanSaveOnDevice(OrphanDeviceSave),
 }
 
 impl GamesTableRow {
     /// The game's copy in the library, if this is a game and it has one.
     pub fn local_entry(&self) -> Option<&LocalEntry> {
         match self {
-            GamesTableRow::Game { row, .. } => row.local_entry(),
+            GamesTableRow::Game(row) => row.local_entry(),
             _ => None,
         }
     }
@@ -87,21 +84,21 @@ impl GamesTableRow {
     /// The game's copy on the device, if this is a game and it has one.
     pub fn device_entry(&self) -> Option<&DeviceEntry> {
         match self {
-            GamesTableRow::Game { row, .. } => row.device_entry(),
+            GamesTableRow::Game(row) => row.device_entry(),
             _ => None,
         }
     }
 
     pub fn orphan_in_library(&self) -> Option<&OrphanLocalSave> {
         match self {
-            GamesTableRow::OrphanInLibrary(orphan) => Some(orphan),
+            GamesTableRow::OrphanSaveInLibrary(orphan) => Some(orphan),
             _ => None,
         }
     }
 
     pub fn orphan_on_device(&self) -> Option<&OrphanDeviceSave> {
         match self {
-            GamesTableRow::OrphanOnDevice(orphan) => Some(orphan),
+            GamesTableRow::OrphanSaveOnDevice(orphan) => Some(orphan),
             _ => None,
         }
     }
@@ -157,6 +154,9 @@ pub enum WorkerMessage {
         summary: String,
         failed: bool,
     },
+    /// The answer to `WorkerCommand::ProposeRenames`: the games whose name differs
+    /// from their DAT name, each with that name.
+    RenamesProposed(Vec<(LocalEntry, String)>),
     /// The copies a scan left out, one line each. Only sent when there are some
     /// and the device was opened or reloaded on request.
     DuplicateGamesSkipped(Vec<String>),
@@ -430,6 +430,12 @@ impl WorkerState<'_> {
             self.send_cores(pocketeer);
             return;
         }
+        if let WorkerCommand::ProposeRenames(games) = &command {
+            (self.send_message)(WorkerMessage::RenamesProposed(
+                pocketeer.renames_to_dat_names(games),
+            ));
+            return;
+        }
         let mut running_command = RunningCommand {
             send_message: self.send_message,
             orphan_saves: &self.orphan_saves,
@@ -509,8 +515,10 @@ impl WorkerState<'_> {
                 .delete_orphan_saves_on_device(&orphan_saves, |pocketeer, log_entry| {
                     running_command.report_step(pocketeer, log_entry.report)
                 }),
-            // Handled above, since it isn't a job to report.
-            WorkerCommand::ShowCores => Ok(ControlFlow::Continue(())),
+            // Handled above, since they aren't jobs to report.
+            WorkerCommand::ShowCores | WorkerCommand::ProposeRenames(_) => {
+                Ok(ControlFlow::Continue(()))
+            }
             WorkerCommand::InstallCores(ids) => pocketeer
                 .install_cores(&ids, |pocketeer, log_entry| {
                     running_command.report_step(pocketeer, log_entry.report)
@@ -611,29 +619,21 @@ fn games_page_data(pocketeer: &Pocketeer, orphan_saves: &OrphanSaves) -> GamesPa
     let mut rows: Vec<GamesTableRow> = pocketeer
         .game_rows()
         .into_iter()
-        .map(|row| GamesTableRow::Game {
-            standard_name: pocketeer
-                .find_dat_entry(row.game())
-                .map(|dat_entry| dat_entry.name.clone()),
-            files: row
-                .local_entry()
-                .map_or(Vec::new(), |local| pocketeer.library().files_of(local)),
-            row,
-        })
+        .map(GamesTableRow::Game)
         .collect();
     rows.extend(
         orphan_saves
             .in_library
             .iter()
             .cloned()
-            .map(GamesTableRow::OrphanInLibrary),
+            .map(GamesTableRow::OrphanSaveInLibrary),
     );
     rows.extend(
         orphan_saves
             .on_device
             .iter()
             .cloned()
-            .map(GamesTableRow::OrphanOnDevice),
+            .map(GamesTableRow::OrphanSaveOnDevice),
     );
     GamesPageData {
         rows,
@@ -681,6 +681,7 @@ fn job_label(command: &WorkerCommand) -> &'static str {
         WorkerCommand::Reload => "reading everything again",
         WorkerCommand::Eject => "ejecting the device",
         WorkerCommand::ShowCores => "reading the cores",
+        WorkerCommand::ProposeRenames(_) => "finding standard names",
         WorkerCommand::InstallCores(_) => "installing cores",
         WorkerCommand::RemoveCores(_) => "removing cores",
         WorkerCommand::PutBios(..) => "putting a file on the device",
@@ -701,7 +702,7 @@ fn target_count(command: &WorkerCommand) -> usize {
         | WorkerCommand::TrashGames(games) => games.len(),
         WorkerCommand::TrashOrphanSaves(orphan_saves) => orphan_saves.len(),
         WorkerCommand::InstallCores(ids) | WorkerCommand::RemoveCores(ids) => ids.len(),
-        WorkerCommand::ShowCores => 0,
+        WorkerCommand::ShowCores | WorkerCommand::ProposeRenames(_) => 0,
         WorkerCommand::DeleteOrphanSaves(orphan_saves) => orphan_saves.len(),
         WorkerCommand::RenameGamesInLibrary(games) => games.len(),
         WorkerCommand::PushSaveVersion(..)
@@ -966,7 +967,7 @@ mod tests {
         assert_eq!(games_page_data.rows.len(), 4);
         assert!(matches!(
             games_page_data.rows[3],
-            GamesTableRow::OrphanOnDevice(_)
+            GamesTableRow::OrphanSaveOnDevice(_)
         ));
         assert!(matches!(opening[1], WorkerMessage::DeviceReadStarted(_)));
         // Reading it successfully isn't a job to report.
@@ -1077,7 +1078,8 @@ mod tests {
     fn deletes_orphan_save_from_device() {
         let (_dir, mut worker, rx) = started();
         let opening = until_device_read(&rx);
-        let GamesTableRow::OrphanOnDevice(orphan) = last_games_page_data(&opening).rows[3].clone()
+        let GamesTableRow::OrphanSaveOnDevice(orphan) =
+            last_games_page_data(&opening).rows[3].clone()
         else {
             panic!()
         };
@@ -1088,6 +1090,37 @@ mod tests {
             ("gba/Gone.sav: save deleted from the device", false)
         );
         assert_eq!(last_games_page_data(&messages).rows.len(), 3);
+    }
+
+    #[test]
+    fn answers_with_names_dats_give_without_reporting_job() {
+        let (_dir, library, device) = empty_library_and_device();
+        put(
+            &library,
+            "dats/Nintendo - Game Boy Advance.dat",
+            br#"clrmamepro ( name "Nintendo - Game Boy Advance" )
+game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686 ) )"#,
+        );
+        put(&library, "roms/gba/Old.gba", b"hello");
+        put(&library, "roms/gba/Mine.gba", b"unknown");
+        let (mut worker, rx) = worker_on(library, Some(device));
+        let opening = until_device_read(&rx);
+        worker.send(WorkerCommand::ProposeRenames(locals(last_games_page_data(
+            &opening,
+        ))));
+        let messages = messages_until(&rx, |message| {
+            matches!(message, WorkerMessage::RenamesProposed(_))
+        });
+        let [WorkerMessage::RenamesProposed(renames)] = &messages[..] else {
+            panic!("{messages:?}")
+        };
+        let [(game, new)] = &renames[..] else {
+            panic!("{renames:?}")
+        };
+        assert_eq!(
+            (game.name.as_str(), new.as_str()),
+            ("Old.gba", "Tetris (World)")
+        );
     }
 
     #[test]
