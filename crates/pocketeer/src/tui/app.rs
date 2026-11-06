@@ -339,16 +339,25 @@ impl GamesPage {
     }
 
     /// Marks the row, or not, and moves on to the next.
-    fn set_mark_and_move_on(&mut self, mark: bool) {
+    fn toggle_mark_and_move_on(&mut self) {
         let Some(key) = self.selected_row().map(key_of) else {
             return;
         };
-        if mark {
+        if !self.marked_rows.remove(&key) {
             self.marked_rows.insert(key);
-        } else {
-            self.marked_rows.remove(&key);
         }
         self.move_selection_by(1);
+    }
+
+    /// Marks the rows shown; if they all are already, clears every mark, also
+    /// those of rows a search hides.
+    fn mark_all_shown_or_clear_marks(&mut self) {
+        let shown: Vec<RowKey> = self.visible_rows().map(key_of).collect();
+        if shown.iter().all(|key| self.marked_rows.contains(key)) {
+            self.marked_rows.clear();
+        } else {
+            self.marked_rows.extend(shown);
+        }
     }
 
     /// What a key acts on: the rows marked, seen or not, or else the one
@@ -737,23 +746,19 @@ impl App {
             KeyCode::PageUp => self.games.move_selection_by(-PAGE),
             KeyCode::Char('g') | KeyCode::Home => self.games.select_row(0),
             KeyCode::Char('G') | KeyCode::End => self.games.select_row(usize::MAX),
-            KeyCode::Char('m') => self.games.set_mark_and_move_on(true),
-            KeyCode::Char('u') => self.games.set_mark_and_move_on(false),
-            KeyCode::Char('M') => {
-                let keys: Vec<RowKey> = self.games.visible_rows().map(key_of).collect();
-                self.games.marked_rows.extend(keys);
-            }
-            KeyCode::Char('U') => self.games.marked_rows.clear(),
-            KeyCode::Char('i') => self.send_for_device_rows(Command::PullGames),
-            KeyCode::Char('b') => self.send_for_device_rows(Command::PullSaves),
-            KeyCode::Char('I') => self.prompt_for_import_path(ImportTarget::Game),
+            KeyCode::Char('m') => self.games.toggle_mark_and_move_on(),
+            KeyCode::Char('M') => self.games.mark_all_shown_or_clear_marks(),
+            // Lowercase changes the library, Shift changes the device.
+            KeyCode::Char('i') => self.prompt_for_import_path(ImportTarget::Game),
+            KeyCode::Char('p') => self.send_for_device_rows(Command::PullGames),
+            KeyCode::Char('P') => self.send_for_library_rows(Command::PushGames),
+            KeyCode::Char('s') => self.send_for_device_rows(Command::PullSaves),
+            KeyCode::Char('S') => self.push_saves(),
             KeyCode::Char('n') => self.prompt_for_name_in_library(),
             KeyCode::Char('N') => self.prompt_for_name_on_device(),
-            KeyCode::Char('D') => self.confirm_rename_to_standard_names(),
-            KeyCode::Char('s') => self.send_for_library_rows(Command::PushGames),
+            KeyCode::Char('t') => self.confirm_rename_to_standard_names(),
             KeyCode::Char('f') => self.send_for_library_rows(Command::FetchCovers),
             KeyCode::Char('c') => self.prompt_for_cover_to_import(),
-            KeyCode::Char('p') => self.push_saves(),
             KeyCode::Char('x') => self.confirm_trash_games(),
             KeyCode::Char('X') => self.confirm_delete_games(),
             KeyCode::Char('d') => self.worker.send(Command::SyncDats),
@@ -784,9 +789,9 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.games.focus = GamesPageFocus::SavesPanel(selected.saturating_sub(1))
             }
-            KeyCode::Char('b') => self.send_for_device_rows(Command::PullSaves),
-            KeyCode::Char('p') => self.push_save_version(selected),
-            KeyCode::Char('I') => self.prompt_for_save_to_import(),
+            KeyCode::Char('i') => self.prompt_for_save_to_import(),
+            KeyCode::Char('s') => self.send_for_device_rows(Command::PullSaves),
+            KeyCode::Char('S') => self.push_save_version(selected),
             KeyCode::Char('x') => self.confirm_trash_version(selected),
             KeyCode::Char('X') => self.confirm_delete_save(),
             KeyCode::Char('?') => self.dialog = Some(help_dialog()),
@@ -825,9 +830,9 @@ impl App {
         match key.code {
             KeyCode::Char('1') => self.current_page = Page::Games,
             KeyCode::Tab | KeyCode::Char('3') => self.current_page = Page::Bios,
-            KeyCode::Char('u') => self.install_selected_core(),
-            KeyCode::Char('U') => self.update_every_core(),
-            KeyCode::Char('x') => self.confirm_remove_core(),
+            KeyCode::Char('U') => self.install_selected_core(),
+            KeyCode::Char('A') => self.update_every_core(),
+            KeyCode::Char('X') => self.confirm_remove_core(),
             KeyCode::Char('r') => self.worker.send(Command::Reload),
             KeyCode::Char('?') => self.dialog = Some(help_dialog()),
             KeyCode::Char('q') => self.should_quit = true,
@@ -1531,24 +1536,24 @@ fn row_after_key(key: KeyEvent, at: usize) -> Option<usize> {
 fn help_dialog() -> Dialog {
     let lines = [
         "Move      j k, arrows, C-n C-p; C-v M-v page; g G top, bottom",
-        "Mark      m mark, u unmark; M mark all shown, U unmark all",
+        "Mark      m mark or unmark; M mark all shown, again to clear every mark",
         "          Keys act on what is marked, or else on the selected row.",
         "",
-        "Library   i pull the game; b back up the save; I import a game from a file",
-        "Device    s push the game; p push the newest save; E eject",
-        "Covers    f download; c choose a file; d update the DATs, which name games",
-        "Rename    n in the library; N on the device; saves and cover go with it",
-        "          D in the library, to what the DATs call them; it asks",
-        "Remove    x game and cover to the system's trash",
+        "          Lowercase changes the library, Shift changes the device.",
+        "Library   i import a game from a file; p pull the game; s back up the save",
+        "          n rename; t rename to what the DATs call it; it asks",
+        "          x game and cover to the system's trash",
+        "Device    P push the game; S push the newest save; N rename; E eject",
         "          X delete from the device: for good, it asks",
-        "          On an orphan save, they remove the save.",
+        "          On an orphan save, x and X remove the save.",
+        "Covers    f download; c choose a file; d update the DATs, which name games",
         "",
-        "Saves     Enter opens them; there p pushes the version selected,",
+        "Saves     Enter opens them; there S pushes the version selected,",
         "          x trashes it, X deletes the device's save,",
-        "          I imports one from a file, Esc goes back",
+        "          i imports one from a file, Esc goes back",
         "",
         "Pages     Tab the next one; 1 games, 2 cores, 3 BIOS",
-        "Cores     u installs or updates, U updates all, x deletes from the device",
+        "Cores     U installs or updates, A updates all, X deletes from the device",
         "BIOS      I puts a file of yours where the cores look for it",
         "",
         "Others    / search; r read everything again; ? this; q quit",
@@ -1753,9 +1758,9 @@ mod tests {
     }
 
     #[test]
-    fn i_reports_row_not_on_device_without_sending() {
+    fn p_reports_row_not_on_device_without_sending() {
         let (mut app, rx) = app();
-        press(&mut app, "i");
+        press(&mut app, "p");
         assert!(sent(&rx).is_empty());
         assert_eq!(
             app.status_message().unwrap().text,
@@ -1770,7 +1775,7 @@ mod tests {
         press(&mut app, "mk");
         press(&mut app, "j\n");
         assert_eq!(app.games.selected_save_versions().len(), 2);
-        press(&mut app, "jp");
+        press(&mut app, "jS");
         let [Command::PushSaveVersion(game, version)] = &sent(&rx)[..] else {
             panic!()
         };
@@ -1790,7 +1795,7 @@ mod tests {
     #[test]
     fn escape_cancels_running_job() {
         let (mut app, rx) = app();
-        press(&mut app, "ji");
+        press(&mut app, "jp");
         let (cancel_token, _) = rx.try_recv().unwrap();
         assert!(!cancel_token.load(Ordering::Relaxed));
         app.update(Update::Started {
@@ -1898,7 +1903,7 @@ mod tests {
         #[test]
         fn acts_on_selected_row_without_marks() {
             let (mut app, rx) = app();
-            press(&mut app, "ji");
+            press(&mut app, "jp");
             let [Command::PullGames(games)] = &sent(&rx)[..] else {
                 panic!()
             };
@@ -1909,7 +1914,7 @@ mod tests {
         fn acts_on_all_marked_rows_and_clears_marks() {
             let (mut app, rx) = app();
             // Each mark moves on.
-            press(&mut app, "jmmb");
+            press(&mut app, "jmms");
             let [Command::PullSaves(games)] = &sent(&rx)[..] else {
                 panic!()
             };
@@ -1918,19 +1923,45 @@ mod tests {
         }
 
         #[test]
-        fn u_unmarks_selected_row() {
+        fn m_unmarks_row_already_marked() {
             let (mut app, _rx) = app();
             press(&mut app, "mm");
             assert_eq!(app.games.marked_count(), 2);
-            press(&mut app, "ku");
+            press(&mut app, "km");
             assert_eq!(app.games.marked_count(), 1);
         }
 
         #[test]
-        fn shift_u_unmarks_all_rows() {
+        fn shift_m_unmarks_all_rows_when_all_shown_are_marked() {
             let (mut app, _rx) = app();
-            press(&mut app, "mmU");
+            press(&mut app, "MM");
             assert_eq!(app.games.marked_count(), 0);
+        }
+
+        #[test]
+        fn u_leaves_marks_alone() {
+            let (mut app, _rx) = app();
+            press(&mut app, "mku");
+            assert_eq!(app.games.marked_count(), 1);
+        }
+
+        #[test]
+        fn shift_m_clears_marks_of_rows_hidden_by_search() {
+            let (mut app, _rx) = app();
+            press(&mut app, "jjm/alpha\nM");
+            assert_eq!(app.games.marked_count(), 2);
+            press(&mut app, "M");
+            assert_eq!(app.games.marked_count(), 0);
+        }
+
+        #[test]
+        fn shift_s_pushes_newest_save_of_selected_row() {
+            let (mut app, rx) = app();
+            press(&mut app, "jS");
+            let [Command::PushSaves(games)] = &sent(&rx)[..] else {
+                panic!()
+            };
+            assert_eq!(paths(games), [Path::new("Both.gba")]);
         }
 
         #[test]
@@ -1943,7 +1974,7 @@ mod tests {
         #[test]
         fn acts_on_marked_rows_hidden_by_search() {
             let (mut app, rx) = app();
-            press(&mut app, "jjm/alpha\nms");
+            press(&mut app, "jjm/alpha\nmP");
             let [Command::PushGames(games)] = &sent(&rx)[..] else {
                 panic!()
             };
@@ -2043,7 +2074,7 @@ mod tests {
         #[test]
         fn imports_game_without_asking_when_extension_gives_platform() {
             let (mut app, rx) = app();
-            press(&mut app, "I");
+            press(&mut app, "i");
             retype(&mut app, "/some/Mine.GBA\n");
             let [Command::ImportGame(path, None)] = &sent(&rx)[..] else {
                 panic!()
@@ -2055,7 +2086,7 @@ mod tests {
         #[test]
         fn imports_dir_without_asking_for_platform() {
             let (mut app, rx) = app();
-            press(&mut app, "I");
+            press(&mut app, "i");
             retype(&mut app, "/some/roms/\n");
             let [Command::ImportGame(path, None)] = &sent(&rx)[..] else {
                 panic!()
@@ -2067,7 +2098,7 @@ mod tests {
         #[test]
         fn asks_for_platform_when_extension_gives_none() {
             let (mut app, rx) = app();
-            press(&mut app, "I");
+            press(&mut app, "i");
             retype(&mut app, "/some/x.bin\n");
             assert!(sent(&rx).is_empty());
             assert!(matches!(app.prompt(), Some(Prompt::Platform(_))));
@@ -2082,7 +2113,7 @@ mod tests {
         #[test]
         fn ctrl_n_moves_down_platform_list() {
             let (mut app, rx) = app();
-            press(&mut app, "I");
+            press(&mut app, "i");
             retype(&mut app, "/some/x.bin\n");
             app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
             press(&mut app, "\n");
@@ -2094,7 +2125,7 @@ mod tests {
         #[test]
         fn sends_keys_to_dialog_before_import_window() {
             let (mut app, rx) = app();
-            press(&mut app, "I");
+            press(&mut app, "i");
             retype(&mut app, "/some/Mine.gba");
             app.update(Update::Duplicates(vec!["a line".to_string()]));
             press(&mut app, "\n");
@@ -2111,7 +2142,7 @@ mod tests {
         #[test]
         fn escape_in_platform_list_imports_nothing() {
             let (mut app, rx) = app();
-            press(&mut app, "I");
+            press(&mut app, "i");
             retype(&mut app, "/some/x.bin\n\x1b");
             assert!(app.prompt().is_none());
             assert!(sent(&rx).is_empty());
@@ -2146,7 +2177,7 @@ mod tests {
         #[test]
         fn enter_on_dir_keeps_save_window_open() {
             let (mut app, rx) = app();
-            press(&mut app, "j\nI\n");
+            press(&mut app, "j\ni\n");
             assert!(app.prompt().is_some());
             assert!(sent(&rx).is_empty());
         }
@@ -2154,7 +2185,7 @@ mod tests {
         #[test]
         fn imports_save_for_game_of_selected_row() {
             let (mut app, rx) = app();
-            press(&mut app, "j\nI");
+            press(&mut app, "j\ni");
             assert!(app.prompt().is_some());
             // Keys are text here, whatever they do elsewhere.
             press(&mut app, "x");
@@ -2174,7 +2205,7 @@ mod tests {
             std::fs::write(dir.path().join("Mine.sav"), b"").unwrap();
             let typed = format!("{}/", dir.path().display());
             let (mut app, rx) = app();
-            press(&mut app, "j\nI");
+            press(&mut app, "j\ni");
             type_path(&mut app, &typed);
             app.handle_key(KeyEvent::from(KeyCode::Down));
             press(&mut app, "\n");
@@ -2192,7 +2223,7 @@ mod tests {
             std::fs::write(dir.path().join("Mine.sav"), b"").unwrap();
             let typed = format!("{}/", dir.path().display());
             let (mut app, rx) = app();
-            press(&mut app, "j\nI");
+            press(&mut app, "j\ni");
             type_path(&mut app, &typed);
             app.handle_key(KeyEvent::from(KeyCode::Down));
             press(&mut app, "\x1b");
@@ -2207,9 +2238,9 @@ mod tests {
         }
 
         #[test]
-        fn shift_i_in_saves_panel_reports_game_not_in_library() {
+        fn i_in_saves_panel_reports_game_not_in_library() {
             let (mut app, rx) = app();
-            press(&mut app, "jj\nI");
+            press(&mut app, "jj\ni");
             assert!(app.prompt().is_none());
             assert!(sent(&rx).is_empty());
             assert_eq!(
@@ -2280,9 +2311,9 @@ mod tests {
         }
 
         #[test]
-        fn shift_d_shows_new_name_and_sends_rename_when_confirmed() {
+        fn t_shows_new_name_and_sends_rename_when_confirmed() {
             let (mut app, rx) = app_with_standard_names();
-            press(&mut app, "D");
+            press(&mut app, "t");
             let dialog = app.dialog().unwrap();
             assert_eq!(dialog.title, "Rename 1 game");
             assert_eq!(dialog.lines[3..], ["Alpha", "  → Alpha (USA)"]);
@@ -2295,7 +2326,7 @@ mod tests {
         }
 
         #[test]
-        fn shift_d_shows_five_games_and_counts_rest() {
+        fn t_shows_five_games_and_counts_rest() {
             let (mut app, rx) = app();
             let rows = (0..7)
                 .map(|i| Row::Game {
@@ -2305,7 +2336,7 @@ mod tests {
                 })
                 .collect();
             app.update(Update::Snapshot(Snapshot { rows, device: None }));
-            press(&mut app, "MD");
+            press(&mut app, "Mt");
             let dialog = app.dialog().unwrap();
             assert_eq!(dialog.title, "Rename 7 games");
             assert_eq!(dialog.lines.last().unwrap(), "… and 2 more");
@@ -2317,17 +2348,17 @@ mod tests {
         }
 
         #[test]
-        fn shift_d_sends_nothing_when_cancelled() {
+        fn t_sends_nothing_when_cancelled() {
             let (mut app, rx) = app_with_standard_names();
-            press(&mut app, "D\x1b");
+            press(&mut app, "t\x1b");
             assert!(app.dialog().is_none());
             assert!(sent(&rx).is_empty());
         }
 
         #[test]
-        fn shift_d_leaves_out_marked_rows_with_nothing_to_rename() {
+        fn t_leaves_out_marked_rows_with_nothing_to_rename() {
             let (mut app, rx) = app_with_standard_names();
-            press(&mut app, "MD\n");
+            press(&mut app, "Mt\n");
             let [Command::RenameGamesInLibrary(games)] = &sent(&rx)[..] else {
                 panic!()
             };
@@ -2335,27 +2366,27 @@ mod tests {
         }
 
         #[test]
-        fn shift_d_reports_game_already_called_standard_name() {
+        fn t_reports_game_already_called_standard_name() {
             let (mut app, rx) = app_with_standard_names();
-            press(&mut app, "jD");
+            press(&mut app, "jt");
             assert!(app.dialog().is_none());
             assert_eq!(app.status_message().unwrap().text, "no game to rename");
             assert!(sent(&rx).is_empty());
         }
 
         #[test]
-        fn shift_d_reports_game_unknown_to_dats() {
+        fn t_reports_game_unknown_to_dats() {
             let (mut app, rx) = app();
-            press(&mut app, "D");
+            press(&mut app, "t");
             assert!(app.dialog().is_none());
             assert_eq!(app.status_message().unwrap().text, "no game to rename");
             assert!(sent(&rx).is_empty());
         }
 
         #[test]
-        fn shift_d_reports_game_only_on_device() {
+        fn t_reports_game_only_on_device() {
             let (mut app, rx) = app_with_standard_names();
-            press(&mut app, "jjD");
+            press(&mut app, "jjt");
             assert!(app.dialog().is_none());
             assert_eq!(
                 app.status_message().unwrap().text,
@@ -2445,23 +2476,23 @@ mod tests {
         }
 
         #[test]
-        fn u_installs_new_core_or_updates_installed_one() {
+        fn shift_u_installs_new_core_or_updates_installed_one() {
             let (mut app, rx) = on_cores_page();
-            press(&mut app, "u");
+            press(&mut app, "U");
             assert_eq!(sent(&rx), [Command::InstallCores(ids(&["new.Core"]))]);
-            press(&mut app, "ju");
+            press(&mut app, "jU");
             assert_eq!(sent(&rx), [Command::InstallCores(ids(&["old.Core"]))]);
         }
 
         #[test]
-        fn u_reports_why_when_core_cannot_be_installed() {
+        fn shift_u_reports_why_when_core_cannot_be_installed() {
             let (mut app, rx) = on_cores_page();
-            press(&mut app, "jju");
+            press(&mut app, "jjU");
             assert_eq!(
                 app.status_message().unwrap().text,
                 "the device has the newest version"
             );
-            press(&mut app, "ju");
+            press(&mut app, "jU");
             assert_eq!(
                 app.status_message().unwrap().text,
                 "only the cores with a latest version can be installed"
@@ -2470,32 +2501,40 @@ mod tests {
         }
 
         #[test]
-        fn u_reports_no_device() {
+        fn shift_u_reports_no_device() {
             let (mut app, rx) = on_cores_page();
             app.update(Update::Snapshot(Snapshot {
                 rows: Vec::new(),
                 device: None,
             }));
-            press(&mut app, "u");
+            press(&mut app, "U");
             assert_eq!(app.status_message().unwrap().text, "no device is open");
             assert_eq!(sent(&rx), []);
         }
 
         #[test]
-        fn shift_u_updates_cores_with_newer_release() {
+        fn lowercase_keys_of_device_actions_do_nothing() {
             let (mut app, rx) = on_cores_page();
-            press(&mut app, "U");
+            press(&mut app, "ux");
+            assert!(app.dialog().is_none());
+            assert!(sent(&rx).is_empty());
+        }
+
+        #[test]
+        fn shift_a_updates_cores_with_newer_release() {
+            let (mut app, rx) = on_cores_page();
+            press(&mut app, "A");
             assert_eq!(sent(&rx), [Command::InstallCores(ids(&["old.Core"]))]);
         }
 
         #[test]
-        fn shift_u_reports_every_core_up_to_date() {
+        fn shift_a_reports_every_core_up_to_date() {
             let (mut app, rx) = on_cores_page();
             app.update(Update::Cores {
                 rows: vec![core_row("same.Core", Some("2"), Some("2"))],
                 failure: None,
             });
-            press(&mut app, "U");
+            press(&mut app, "A");
             assert_eq!(
                 app.status_message().unwrap().text,
                 "every core is up to date"
@@ -2504,22 +2543,22 @@ mod tests {
         }
 
         #[test]
-        fn x_confirms_before_removing_and_defaults_to_cancel() {
+        fn shift_x_confirms_before_removing_and_defaults_to_cancel() {
             let (mut app, rx) = on_cores_page();
-            press(&mut app, "jx");
+            press(&mut app, "jX");
             let dialog = app.dialog().unwrap();
             assert!(dialog.is_irreversible);
             assert_eq!(dialog.focused_button, 1);
             press(&mut app, "\n");
             assert_eq!(sent(&rx), []);
-            press(&mut app, "xh\n");
+            press(&mut app, "Xh\n");
             assert_eq!(sent(&rx), [Command::RemoveCores(ids(&["old.Core"]))]);
         }
 
         #[test]
-        fn x_reports_core_not_on_device() {
+        fn shift_x_reports_core_not_on_device() {
             let (mut app, rx) = on_cores_page();
-            press(&mut app, "x");
+            press(&mut app, "X");
             assert!(app.dialog().is_none());
             assert_eq!(
                 app.status_message().unwrap().text,
@@ -2695,6 +2734,47 @@ mod tests {
             }
         }
 
+        /// The text on the screen's last `count` lines.
+        fn last_lines(terminal: &Terminal<TestBackend>, count: u16) -> Vec<String> {
+            let buffer = terminal.backend().buffer();
+            let height = buffer.area.height;
+            ((height - count)..height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string()
+                })
+                .collect()
+        }
+
+        #[test]
+        fn shows_every_key_of_games_page_at_80_columns() {
+            let (mut app, _rx) = app();
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+            assert_eq!(
+                last_lines(&terminal, 3),
+                [
+                    " LIBRARY  i  import   p  pull   s  save   n  rename   t  standard   x  trash",
+                    " DEVICE               P  push   S  save   N  rename   E  eject      X  delete",
+                    " GENERAL  ↵  saves    m  mark   d  DATs   r  reload   ?  help       q  quit",
+                ]
+            );
+        }
+
+        #[test]
+        fn shows_cover_keys_in_middle_of_panel_without_cover() {
+            let (mut app, _rx) = app();
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+            let screen = last_lines(&terminal, 24).join("\n");
+            assert!(screen.contains("no cover yet"), "{screen}");
+            assert!(screen.contains(" f  download it"), "{screen}");
+            assert!(screen.contains(" c  use an image file"), "{screen}");
+        }
+
         /// Every screen draws, at sizes down to a tiny terminal.
         #[test]
         fn draws_every_state_at_any_size() {
@@ -2718,14 +2798,14 @@ mod tests {
                 draw(&mut app);
                 press(&mut app, "\x1b/x");
                 draw(&mut app);
-                press(&mut app, "\x1b\x1bj\nI");
+                press(&mut app, "\x1b\x1bj\ni");
                 draw(&mut app);
                 type_path(&mut app, "/");
                 draw(&mut app);
                 app.handle_key(KeyEvent::from(KeyCode::Down));
                 draw(&mut app);
                 press(&mut app, "\x1b\x1b\x1b");
-                press(&mut app, "\x1bI");
+                press(&mut app, "\x1bi");
                 retype(&mut app, "/x.bin\n");
                 draw(&mut app);
                 press(&mut app, "jjjjjjjjj");
@@ -2752,7 +2832,7 @@ mod tests {
                     failure: Some("no network".into()),
                 });
                 draw(&mut app);
-                press(&mut app, "jx");
+                press(&mut app, "jX");
                 draw(&mut app);
                 press(&mut app, "n3");
                 draw(&mut app);

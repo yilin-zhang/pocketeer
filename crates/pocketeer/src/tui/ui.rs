@@ -57,7 +57,6 @@ enum Palette {
     // legend reads as one bar with a few soft blocks.
     KeyLibrary,
     KeyDevice,
-    KeyEdit,
     KeyRemove,
 }
 
@@ -75,7 +74,6 @@ impl Palette {
             Palette::Bad => 167,
             Palette::KeyLibrary => 65,
             Palette::KeyDevice => 60,
-            Palette::KeyEdit => 96,
             Palette::KeyRemove => 95,
         })
     }
@@ -137,17 +135,8 @@ fn panel_block(title: impl Into<String>) -> Block<'static> {
         ))
 }
 
-/// A key in a legend, tinted by what it does: sage brings something into
-/// the library, slate writes to the device, mauve changes covers, rose
-/// removes; the rest are grey.
-fn keycap(key: &str) -> Span<'static> {
-    let tint = match key {
-        "i" | "b" | "I" | "n" | "D" => Palette::KeyLibrary,
-        "s" | "p" | "E" | "u" | "U" | "N" => Palette::KeyDevice,
-        "f" | "c" | "d" => Palette::KeyEdit,
-        "x" | "X" => Palette::KeyRemove,
-        _ => Palette::Keycap,
-    };
+/// A key in a legend, in the tint of what it changes.
+fn keycap(key: &str, tint: Palette) -> Span<'static> {
     Span::styled(
         format!(" {key} "),
         Palette::Ink
@@ -179,7 +168,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(3),
-        Constraint::Length(2),
+        Constraint::Length(4),
     ])
     .areas(frame.area());
     draw_header(frame, app, header);
@@ -502,7 +491,7 @@ fn game_table_row(app: &App, row: &Row, compact: bool) -> TableRow<'static> {
             };
             let art = match row.local_entry() {
                 Some(l) if l.cover_path.is_some() => {
-                    centered_cell("✓").style(Palette::Good.style())
+                    centered_cell("▣").style(Palette::Good.style())
                 }
                 Some(_) => centered_cell("–").style(Palette::Muted.style()),
                 None => Cell::from(""),
@@ -558,16 +547,19 @@ fn draw_cover(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(path) = path else {
-        let what = match app.games.selected_row() {
+        let (what, keys): (_, &[KeyHint]) = match app.games.selected_row() {
             Some(Row::Game {
                 row: GameRow::OnDevice(_),
                 ..
-            }) => "on the device only",
-            Some(Row::Game { .. }) => "no cover yet",
-            Some(_) => "a save with no game",
-            None => "no games",
+            }) => ("on the device only", &[]),
+            Some(Row::Game { .. }) => (
+                "no cover yet",
+                &[("f", "download it"), ("c", "use an image file")],
+            ),
+            Some(_) => ("", &[]),
+            None => ("no games", &[]),
         };
-        draw_cover_placeholder(frame, inner, what);
+        draw_cover_placeholder(frame, inner, what, keys);
         return;
     };
     match app.covers.show(&path, &around, inner.as_size()) {
@@ -589,8 +581,8 @@ fn draw_cover(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Where a cover would be: a dot-matrix field, the Pocket's screen, with a
-/// short line in the middle.
-fn draw_cover_placeholder(frame: &mut Frame, area: Rect, what: &str) {
+/// short line and the keys that give it a cover in the middle.
+fn draw_cover_placeholder(frame: &mut Frame, area: Rect, what: &str, keys: &[KeyHint]) {
     let dots: Vec<Line> = (0..area.height)
         .map(|y| {
             let row: String = (0..area.width)
@@ -600,15 +592,27 @@ fn draw_cover_placeholder(frame: &mut Frame, area: Rect, what: &str) {
         })
         .collect();
     frame.render_widget(Paragraph::new(dots), area);
-    let width = (what.chars().count() as u16).min(area.width);
+    let mut lines = vec![Line::from(Palette::Muted.span(what.to_string()))];
+    if !keys.is_empty() {
+        lines.push(Line::default());
+    }
+    for (key, what) in keys {
+        lines.push(Line::from(vec![
+            keycap(key, Palette::Keycap),
+            Palette::Muted.span(format!(" {what}")),
+        ]));
+    }
+    let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0);
+    let width = width.min(area.width);
+    let height = lines.len() as u16;
     let text = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
         width,
-        height: 1.min(area.height),
+        height: height.min(area.height),
     };
     frame.render_widget(Clear, text);
-    frame.render_widget(Paragraph::new(Palette::Muted.span(what.to_string())), text);
+    frame.render_widget(Paragraph::new(lines), text);
 }
 
 fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
@@ -752,8 +756,8 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize)
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let [status, keys] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+    let [status, library_keys, device_keys, general_keys] =
+        Layout::vertical([Constraint::Length(1); 4]).areas(area);
     let mut line = match (app.job_status(), app.status_message()) {
         (Some(job), _) => {
             let progress = match job.total_count {
@@ -761,16 +765,18 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 total => format!("  {}/{total}", job.done_count),
             };
             let game = job.last_game.clone().unwrap_or_default();
-            let stop = if job.is_cancelling {
-                "  stopping…"
-            } else {
-                ""
-            };
-            Line::from(Palette::Ink.span(format!(
-                " {} {}{progress}  {game}{stop}",
+            let mut line = Line::from(Palette::Ink.span(format!(
+                " {} {}{progress}  {game}  ",
                 spinner_frame(),
                 job.description
-            )))
+            )));
+            if job.is_cancelling {
+                line.push_span(Palette::Muted.span("stopping…"));
+            } else {
+                line.push_span(keycap("Esc", Palette::Keycap));
+                line.push_span(Palette::Muted.span(" stop"));
+            }
+            line
         }
         (
             None,
@@ -798,18 +804,31 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         line.push_span(Palette::Warn.span(format!("   {} marked", app.games.marked_count())));
     }
     frame.render_widget(Paragraph::new(line), status);
-    frame.render_widget(
-        Paragraph::new(key_line(&legend(app), keys.width as usize)),
-        keys,
-    );
+    let [library_line, device_line, general_line] = legend_lines(&legend(app), area.width as usize);
+    frame.render_widget(Paragraph::new(library_line), library_keys);
+    frame.render_widget(Paragraph::new(device_line), device_keys);
+    frame.render_widget(Paragraph::new(general_line), general_keys);
 }
 
-/// What the keys do here, in one order so that keys of a kind sit together
-/// and their tints form runs: open or back, library, device, covers, remove,
-/// then search, help and quit. Keep new keys in this order.
-fn legend(app: &App) -> Vec<(&'static str, &'static str)> {
+/// A key and what it does; [`NO_KEY`] leaves its place in the grid empty.
+type KeyHint = (&'static str, &'static str);
+
+const NO_KEY: KeyHint = ("", "");
+
+/// The keys to show, by what they change. They are drawn as a grid, so a key
+/// sits above the same key with Shift. Each row stays as it is, whatever is
+/// selected: a key that doesn't apply says why when pressed.
+#[derive(Default)]
+struct Legend {
+    library: Vec<KeyHint>,
+    device: Vec<KeyHint>,
+    general: Vec<KeyHint>,
+}
+
+/// What the keys do here.
+fn legend(app: &App) -> Legend {
     if app.games.is_searching() {
-        return vec![("Enter", "done"), ("Esc", "clear")];
+        return only_general(vec![("↵", "done"), ("Esc", "clear")]);
     }
     match app.prompt() {
         Some(Prompt::Import(import)) => {
@@ -817,161 +836,138 @@ fn legend(app: &App) -> Vec<(&'static str, &'static str)> {
                 ImportTarget::Bios(_) => "put on the device",
                 _ => "import",
             };
-            return vec![
-                ("Enter", enter),
+            return only_general(vec![
+                ("↵", enter),
                 ("Esc", "cancel"),
                 ("Tab", "complete"),
                 ("↑↓", "pick"),
-            ];
+            ]);
         }
         Some(Prompt::Platform(_)) => {
-            return vec![("Enter", "import"), ("Esc", "cancel"), ("↑↓", "pick")];
+            return only_general(vec![("↵", "import"), ("Esc", "cancel"), ("↑↓", "pick")]);
         }
-        Some(Prompt::Rename(_)) => return vec![("Enter", "rename"), ("Esc", "cancel")],
+        Some(Prompt::Rename(_)) => {
+            return only_general(vec![("↵", "rename"), ("Esc", "cancel")]);
+        }
         None => {}
     }
+    let page_keys = vec![("r", "reload"), ("?", "help"), ("q", "quit")];
     if app.current_page() == Page::Cores {
-        return cores_legend(app);
+        return Legend {
+            device: vec![
+                ("U", "install or update"),
+                ("A", "update all"),
+                ("X", "delete"),
+            ],
+            general: page_keys,
+            ..Legend::default()
+        };
     }
     if app.current_page() == Page::Bios {
-        return bios_legend(app);
+        return Legend {
+            device: vec![("I", "put a file")],
+            general: page_keys,
+            ..Legend::default()
+        };
     }
     if app.games.selected_version().is_some() {
-        return vec![
-            ("Esc", "back"),
-            ("b", "back up"),
-            ("I", "import"),
-            ("p", "push this one"),
-            ("x", "trash this one"),
-            ("X", "delete on device"),
+        return Legend {
+            library: vec![("i", "import"), ("s", "save"), ("x", "trash")],
+            device: vec![NO_KEY, ("S", "push"), ("X", "delete")],
+            general: vec![("Esc", "back"), ("?", "help"), ("q", "quit")],
+        };
+    }
+    Legend {
+        library: vec![
+            ("i", "import"),
+            ("p", "pull"),
+            ("s", "save"),
+            ("n", "rename"),
+            ("t", "standard"),
+            ("x", "trash"),
+        ],
+        device: vec![
+            NO_KEY,
+            ("P", "push"),
+            ("S", "save"),
+            ("N", "rename"),
+            ("E", "eject"),
+            ("X", "delete"),
+        ],
+        general: vec![
+            ("↵", "saves"),
+            ("m", "mark"),
+            ("d", "DATs"),
+            ("r", "reload"),
             ("?", "help"),
             ("q", "quit"),
-        ];
+        ],
     }
-    let mut keys = Vec::new();
-    if app.job_status().is_some() {
-        keys.push(("Esc", "stop"));
-    }
-    if let Some(Row::Game { row, .. }) = app.games.selected_row() {
-        let (local, on_device) = (row.local_entry(), row.device_entry());
-        keys.push(("Enter", "saves"));
-        if on_device.is_some() {
-            if local.is_none() {
-                keys.push(("i", "pull"));
-            }
-            keys.push(("b", "back up save"));
-        }
-        keys.push(("I", "import"));
-        if local.is_some() {
-            keys.push(("n", "rename"));
-            keys.push(("D", "standard name"));
-            if on_device.is_none() && app.device_root().is_some() {
-                keys.push(("s", "push"));
-            }
-            if on_device.is_some() {
-                keys.push(("p", "push save"));
-            }
-            keys.push(("f", "download cover"));
-            keys.push(("c", "choose cover"));
-            keys.push(("x", "trash"));
-        }
-        if on_device.is_some() {
-            keys.push(("N", "rename on device"));
-            keys.push(("X", "delete on device"));
-        }
-    }
-    match app.games.selected_row() {
-        Some(Row::Game { .. }) => {}
-        Some(Row::OrphanInLibrary(_)) => keys.extend([("I", "import"), ("x", "trash")]),
-        Some(Row::OrphanOnDevice(_)) => keys.extend([("I", "import"), ("X", "delete on device")]),
-        None => keys.push(("I", "import")),
-    }
-    keys.push(("m", "mark"));
-    keys.push(("Tab", "cores"));
-    keys.push(("/", "search"));
-    keys.push(("?", "help"));
-    keys.push(("q", "quit"));
-    keys
 }
 
-/// What the keys do on the Cores page, in the same order as [`legend`].
-fn cores_legend(app: &App) -> Vec<(&'static str, &'static str)> {
-    let mut keys = Vec::new();
-    if app.job_status().is_some() {
-        keys.push(("Esc", "stop"));
+fn only_general(general: Vec<KeyHint>) -> Legend {
+    Legend {
+        general,
+        ..Legend::default()
     }
-    match app.cores.selected_row() {
-        Some(CoreRow::Available(_)) => keys.push(("u", "install")),
-        Some(row) if row.has_update() => keys.push(("u", "update")),
-        _ => {}
-    }
-    let rows = app.cores.core_list().map_or(&[][..], |c| &c.rows);
-    if rows.iter().any(CoreRow::has_update) {
-        keys.push(("U", "update all"));
-    }
-    if app
-        .cores
-        .selected_row()
-        .is_some_and(|r| r.installed().is_some())
-    {
-        keys.push(("x", "delete on device"));
-    }
-    keys.push(("Tab", "BIOS"));
-    keys.push(("?", "help"));
-    keys.push(("q", "quit"));
-    keys
 }
 
-/// What the keys do on the BIOS page, in the same order as [`legend`].
-fn bios_legend(app: &App) -> Vec<(&'static str, &'static str)> {
-    let mut keys = Vec::new();
-    if app.job_status().is_some() {
-        keys.push(("Esc", "stop"));
+/// The legend's rows, with a tag each and the keys in columns as wide as the
+/// widest key in them. Columns that don't fit in `width` are left out from the
+/// end, rather than cut mid-word; a row with no keys is empty.
+fn legend_lines(legend: &Legend, width: usize) -> [Line<'static>; 3] {
+    const COLUMN_GAP: usize = 2;
+    fn cell_width((key, what): &KeyHint) -> usize {
+        match key.is_empty() {
+            true => 0,
+            false => key.chars().count() + 3 + what.chars().count(),
+        }
     }
-    if app
-        .bios
-        .selected_row()
-        .is_some_and(|r| r.status == BiosStatus::Missing)
-    {
-        keys.push(("I", "put a file"));
-    }
-    keys.push(("Tab", "games"));
-    keys.push(("?", "help"));
-    keys.push(("q", "quit"));
-    keys
-}
-
-/// ` [key] what  [key] what …`. When it is wider than `width`, keys are left
-/// out from the end rather than cut mid-word; help and quit always stay,
-/// since `?` lists the rest.
-fn key_line(keys: &[(&str, &str)], width: usize) -> Line<'static> {
-    fn key_entry(key: &str, what: &str) -> [Span<'static>; 2] {
-        [keycap(key), Palette::Muted.span(format!(" {what}  "))]
-    }
-    fn key_entry_width(e: &[Span<'static>; 2]) -> usize {
-        e.iter().map(Span::width).sum()
-    }
-    let kept = |key: &str| matches!(key, "?" | "q");
-    let reserved: usize = keys
+    let rows = [
+        (" LIBRARY ", &legend.library, Palette::KeyLibrary),
+        (" DEVICE  ", &legend.device, Palette::KeyDevice),
+        (" GENERAL ", &legend.general, Palette::Keycap),
+    ];
+    let column_count = rows
         .iter()
-        .filter(|(k, _)| kept(k))
-        .map(|(k, w)| key_entry_width(&key_entry(k, w)))
-        .sum();
-    let mut room = width.saturating_sub(1 + reserved);
-    let mut spans = vec![Span::raw(" ")];
-    for (k, what) in keys.iter().filter(|(k, _)| !kept(k)) {
-        let e = key_entry(k, what);
-        let w = key_entry_width(&e);
-        if w > room {
-            break;
+        .map(|(_, keys, _)| keys.len())
+        .max()
+        .unwrap_or(0);
+    let column_widths: Vec<usize> = (0..column_count)
+        .map(|column| {
+            let widths = rows.iter().filter_map(|(_, keys, _)| keys.get(column));
+            widths.map(cell_width).max().unwrap_or(0)
+        })
+        .collect();
+    rows.map(|(tag, keys, tint)| {
+        if keys.is_empty() {
+            return Line::default();
         }
-        room -= w;
-        spans.extend(e);
-    }
-    for (k, what) in keys.iter().filter(|(k, _)| kept(k)) {
-        spans.extend(key_entry(k, what));
-    }
-    Line::from(spans)
+        let mut room = width.saturating_sub(tag.len());
+        let mut spans = vec![Palette::Faint.span(tag)];
+        for (hint, column_width) in keys.iter().zip(&column_widths) {
+            if *column_width > room {
+                break;
+            }
+            room -= *column_width;
+            let padding = column_width - cell_width(hint);
+            if hint.0.is_empty() {
+                spans.push(Span::raw(" ".repeat(padding)));
+            } else {
+                // Removing stands out, whichever side it is on.
+                let tint = match hint.0 {
+                    "x" | "X" => Palette::KeyRemove,
+                    _ => tint,
+                };
+                spans.push(keycap(hint.0, tint));
+                spans.push(Palette::Muted.span(format!(" {}{}", hint.1, " ".repeat(padding))));
+            }
+            let gap = COLUMN_GAP.min(room);
+            room -= gap;
+            spans.push(Span::raw(" ".repeat(gap)));
+        }
+        Line::from(spans)
+    })
 }
 
 /// A rectangle of at most this size in the middle of `area`.
@@ -1005,7 +1001,6 @@ fn draw_window(frame: &mut Frame, width: u16, height: u16, title: &str, border: 
 /// What a window that takes a file ends with.
 fn import_buttons(action: &str) -> Paragraph<'static> {
     Paragraph::new(Line::from(vec![
-        Span::raw(" "),
         Span::styled(format!(" {action} "), selected_style()),
         Span::raw("  "),
         Span::styled(
@@ -1013,6 +1008,7 @@ fn import_buttons(action: &str) -> Paragraph<'static> {
             Palette::Muted.style().bg(Palette::Keycap.color()),
         ),
     ]))
+    .centered()
 }
 
 fn draw_import(frame: &mut Frame, import: &ImportPrompt) {
@@ -1041,31 +1037,18 @@ fn draw_import(frame: &mut Frame, import: &ImportPrompt) {
 }
 
 fn draw_rename(frame: &mut Frame, rename: &RenamePrompt) {
-    let (title, note) = match &rename.target {
-        RenameTarget::InLibrary(_) => ("Rename in the library", None),
-        RenameTarget::OnDevice(_) => (
-            "Rename on the device",
-            Some(" The Pocket's recent games and a game put to sleep keep the old name."),
-        ),
+    let title = match &rename.target {
+        RenameTarget::InLibrary(_) => "Rename in the library",
+        RenameTarget::OnDevice(_) => "Rename on the device",
     };
-    let inner = draw_window(frame, 76, 7, title, Palette::Muted);
-    let [name, note_area, buttons] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
+    let inner = draw_window(frame, 76, 5, title, Palette::Muted);
+    let [name, buttons] =
+        Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).areas(inner);
     let (before, after) = rename.text_around_cursor();
     frame.render_widget(
         Paragraph::new(typed_line(before, &after, name.width as usize)),
         name,
     );
-    if let Some(note) = note {
-        frame.render_widget(
-            Paragraph::new(Palette::Muted.span(note)).wrap(Wrap { trim: false }),
-            note_area,
-        );
-    }
     frame.render_widget(import_buttons("Rename"), buttons);
 }
 
@@ -1201,15 +1184,17 @@ fn draw_dialog(frame: &mut Frame, app: &App) {
         .map(|l| Line::from(Span::raw(format!(" {l}"))))
         .collect();
     frame.render_widget(Paragraph::new(lines), text);
-    let mut spans = vec![Span::raw(" ")];
+    let mut spans = Vec::new();
     for (i, button) in dialog.buttons.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
         let style = if i == dialog.focused_button {
             selected_style()
         } else {
             Palette::Muted.style().bg(Palette::Keycap.color())
         };
         spans.push(Span::styled(format!(" {} ", button.label), style));
-        spans.push(Span::raw("  "));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), buttons);
+    frame.render_widget(Paragraph::new(Line::from(spans)).centered(), buttons);
 }
