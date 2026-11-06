@@ -40,6 +40,7 @@ pub enum Command {
     /// The file, for this platform or else what its extension says.
     ImportGame(PathBuf, Option<Platform>),
     ImportSave(LocalEntry, PathBuf),
+    ImportCover(LocalEntry, PathBuf),
     TrashSaveVersion(LocalEntry, Save),
     TrashOrphanSaves(Vec<OrphanLocalSave>),
     DeleteGames(Vec<DeviceEntry>),
@@ -55,7 +56,7 @@ pub enum Command {
     /// The file to copy to where the row says.
     PutBios(BiosRow, PathBuf),
     /// The game in the library, and what to call it.
-    RenameInLibrary(LocalEntry, String),
+    RenameGamesInLibrary(Vec<(LocalEntry, String)>),
     /// The game on the device, and what to call it.
     RenameOnDevice(DeviceEntry, String),
 }
@@ -330,7 +331,10 @@ impl State<'_> {
 
     fn open_device(&mut self, p: &mut Pocketeer, root: &Path) {
         (self.send)(Update::ReadingDevice(root.to_path_buf()));
-        let opened = p.open_device(root).and_then(|()| p.scan_device());
+        let opened = p
+            .open_device(root)
+            .map_err(|e| e.to_string())
+            .and_then(|()| p.scan_device().map_err(|e| e.to_string()));
         let failure = match opened {
             Ok(report) => {
                 send_duplicates(self.send, p, &report.duplicates);
@@ -412,6 +416,9 @@ impl State<'_> {
             Command::ImportSave(game, from) => {
                 p.import_saves(&[(game, from)], |p, e| batch.report_step(p, e.report))
             }
+            Command::ImportCover(game, from) => {
+                p.import_covers(&[(game, from)], |p, e| batch.report_step(p, e.report))
+            }
             Command::TrashGames(games) => {
                 p.trash_games_in_library(&games, |p, e| batch.report_step(p, e.report))
             }
@@ -442,8 +449,8 @@ impl State<'_> {
             Command::PutBios(row, from) => {
                 p.put_bios_files(&[(row, from)], |p, e| batch.report_step(p, e.report))
             }
-            Command::RenameInLibrary(game, new) => {
-                p.rename_games_in_library(&[(game, new)], |p, e| batch.report_step(p, e.report))
+            Command::RenameGamesInLibrary(games) => {
+                p.rename_games_in_library(&games, |p, e| batch.report_step(p, e.report))
             }
             Command::RenameOnDevice(game, new) => {
                 p.rename_games_on_device(&[(game, new)], |p, e| batch.report_step(p, e.report))
@@ -563,6 +570,7 @@ fn job_label(command: &Command) -> &'static str {
         Command::FetchCovers(_) => "downloading covers",
         Command::ImportGame(..) => "importing games",
         Command::ImportSave(..) => "importing a save",
+        Command::ImportCover(..) => "importing a cover",
         Command::TrashGames(_) => "putting games in the trash",
         Command::TrashSaveVersion(..) => "putting a save in the trash",
         Command::TrashOrphanSaves(_) => "putting saves in the trash",
@@ -575,7 +583,8 @@ fn job_label(command: &Command) -> &'static str {
         Command::InstallCores(_) => "installing cores",
         Command::RemoveCores(_) => "removing cores",
         Command::PutBios(..) => "putting a file on the device",
-        Command::RenameInLibrary(..) | Command::RenameOnDevice(..) => "renaming a game",
+        Command::RenameGamesInLibrary(_) => "renaming games",
+        Command::RenameOnDevice(..) => "renaming a game",
     }
 }
 
@@ -591,12 +600,13 @@ fn target_count(command: &Command) -> usize {
         Command::InstallCores(ids) | Command::RemoveCores(ids) => ids.len(),
         Command::ShowCores => 0,
         Command::DeleteOrphanSaves(o) => o.len(),
+        Command::RenameGamesInLibrary(g) => g.len(),
         Command::PushSaveVersion(..)
         | Command::PutBios(..)
-        | Command::RenameInLibrary(..)
         | Command::RenameOnDevice(..)
         | Command::ImportGame(..)
         | Command::ImportSave(..)
+        | Command::ImportCover(..)
         | Command::TrashSaveVersion(..)
         | Command::SyncDats
         | Command::Reload
@@ -913,7 +923,10 @@ mod tests {
         let (_dir, mut worker, rx) = started();
         let opening = until_device_read(&rx);
         let local = locals(last_snapshot(&opening)).remove(0);
-        worker.send(Command::RenameInLibrary(local, "Renamed".to_string()));
+        worker.send(Command::RenameGamesInLibrary(vec![(
+            local,
+            "Renamed".to_string(),
+        )]));
         let updates = until_finished(&rx);
         assert_eq!(
             finished(&updates),
@@ -924,6 +937,27 @@ mod tests {
             .map(|l| l.name)
             .collect();
         assert_eq!(names, ["B.gba", "Renamed.gba"]);
+    }
+
+    #[test]
+    fn counts_games_renamed_in_library() {
+        let (_dir, mut worker, rx) = started();
+        let opening = until_device_read(&rx);
+        let renames = locals(last_snapshot(&opening))
+            .into_iter()
+            .map(|local| {
+                let new = format!("New {}", local.stem());
+                (local, new)
+            })
+            .collect();
+        worker.send(Command::RenameGamesInLibrary(renames));
+        let updates = until_finished(&rx);
+        assert_eq!(finished(&updates), ("renaming games: 2 done", false));
+        let names: Vec<String> = locals(last_snapshot(&updates))
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        assert_eq!(names, ["New A.gba", "New B.gba"]);
     }
 
     #[test]
@@ -1048,7 +1082,7 @@ mod tests {
     #[test]
     fn summarizes_how_command_went() {
         let ok = || OperationReport::Reload(Ok(()));
-        let bad = || OperationReport::Reload(Err(pocketeer_core::error::BaseError::NoDevice));
+        let bad = || OperationReport::Reload(Err(pocketeer_core::error::SharedError::NoDevice));
         assert_eq!(
             summary("reading", 1, &[ok()]),
             ("everything: read again".to_string(), false)

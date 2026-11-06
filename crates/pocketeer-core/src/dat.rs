@@ -13,7 +13,7 @@ use fs_err as fs;
 use strum::IntoEnumIterator;
 
 use crate::{
-    error::BaseError,
+    error::SharedError,
     files::write_atomically,
     game::{Files, Game, Rom},
     platform::Platform,
@@ -82,10 +82,10 @@ pub trait RemoteDatSource {
     fn systems(&self, platform: &Platform) -> &'static [&'static str];
 
     /// Every DAT the source has now.
-    fn list(&self) -> Result<Vec<RemoteDat>, BaseError>;
+    fn list(&self) -> Result<Vec<RemoteDat>, SharedError>;
 
     /// The text of the DAT called `name`.
-    fn fetch(&self, name: &str) -> Result<String, BaseError>;
+    fn fetch(&self, name: &str) -> Result<String, SharedError>;
 
     fn parse(&self, text: &str) -> Result<Dat, ParseError>;
 }
@@ -119,7 +119,7 @@ impl<S: RemoteDatSource> DatMirror<S> {
     /// The DATs already in `dir`, without going online; none if it is empty
     /// or doesn't exist. A file that doesn't parse is left out, and the next
     /// sync replaces it.
-    pub fn open(dir: &Path, source: S) -> Result<Self, BaseError> {
+    pub fn open(dir: &Path, source: S) -> Result<Self, SharedError> {
         let mut mirror = Self {
             dir: dir.to_path_buf(),
             source,
@@ -146,7 +146,7 @@ impl<S: RemoteDatSource> DatMirror<S> {
 
     /// Brings the DATs up to date, on disk and in memory: downloads those
     /// that are missing, didn't parse, or have a new version.
-    pub fn sync(&mut self) -> Result<SyncReport, BaseError> {
+    pub fn sync(&mut self) -> Result<SyncReport, SharedError> {
         let listed: HashMap<String, String> = self
             .source
             .list()?
@@ -169,10 +169,13 @@ impl<S: RemoteDatSource> DatMirror<S> {
                     continue;
                 }
                 let text = self.source.fetch(name)?;
-                let dat = self.source.parse(&text).map_err(|e| BaseError::Remote {
-                    from: name.into(),
-                    message: e.to_string(),
-                })?;
+                let dat = self
+                    .source
+                    .parse(&text)
+                    .map_err(|e| SharedError::BadResponse {
+                        from: name.into(),
+                        message: e.to_string(),
+                    })?;
                 // The DAT first, then its version: stopped in between, the
                 // next sync downloads it again.
                 write_atomically(&self.dat_path(name), text.as_bytes(), None)?;
@@ -214,7 +217,7 @@ impl<S: RemoteDatSource> DatMirror<S> {
     }
 
     /// A missing or unreadable record means nothing is known to be current.
-    fn versions(&self) -> Result<BTreeMap<String, String>, BaseError> {
+    fn versions(&self) -> Result<BTreeMap<String, String>, SharedError> {
         let path = self.versions_path();
         match fs::read_to_string(&path) {
             Ok(text) => Ok(serde_json::from_str(&text).unwrap_or_default()),
@@ -223,7 +226,7 @@ impl<S: RemoteDatSource> DatMirror<S> {
         }
     }
 
-    fn write_versions(&self, versions: &BTreeMap<String, String>) -> Result<(), BaseError> {
+    fn write_versions(&self, versions: &BTreeMap<String, String>) -> Result<(), SharedError> {
         let json = serde_json::to_string_pretty(versions).expect("a map of strings serializes");
         write_atomically(&self.versions_path(), json.as_bytes(), None)
     }
@@ -379,7 +382,7 @@ mod tests {
             }
         }
 
-        fn list(&self) -> Result<Vec<RemoteDat>, BaseError> {
+        fn list(&self) -> Result<Vec<RemoteDat>, SharedError> {
             Ok(self
                 .dats
                 .borrow()
@@ -391,7 +394,7 @@ mod tests {
                 .collect())
         }
 
-        fn fetch(&self, name: &str) -> Result<String, BaseError> {
+        fn fetch(&self, name: &str) -> Result<String, SharedError> {
             self.fetched.borrow_mut().push(name.into());
             Ok(self.dats.borrow()[name].1.clone())
         }
@@ -525,7 +528,10 @@ game (
         fn reports_corrupt_download_and_keeps_old_dat() {
             let (_dir, fake, mut mirror) = synced();
             fake.set("sgx", "2", "game (");
-            assert!(matches!(mirror.sync(), Err(BaseError::Remote { .. })));
+            assert!(matches!(
+                mirror.sync(),
+                Err(SharedError::BadResponse { .. })
+            ));
             assert_eq!(
                 mirror.lookup(&pce(8, 0xB)).unwrap().name,
                 "Daimakaimura (Japan)"

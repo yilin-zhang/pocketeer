@@ -9,7 +9,7 @@ use fs_err as fs;
 use image::ImageFormat;
 use serde::{Deserialize, Serialize};
 
-use crate::{error::BaseError, files::write_atomically, platform::Platform};
+use crate::{error::SharedError, files::write_atomically, platform::Platform};
 
 /// The formats a cover can be in, in the order a game's cover is looked for.
 pub const COVER_FORMATS: [ImageFormat; 3] =
@@ -50,16 +50,16 @@ pub trait RemoteCoverSource {
 
     /// Which version of `system`'s covers the source has now; a different
     /// string means different covers.
-    fn version(&self, system: &str) -> Result<String, BaseError>;
+    fn version(&self, system: &str) -> Result<String, SharedError>;
 
     /// The name of every cover of `system` at `version`.
-    fn names(&self, system: &str, version: &str) -> Result<Vec<String>, BaseError>;
+    fn names(&self, system: &str, version: &str) -> Result<Vec<String>, SharedError>;
 
     /// What the cover of the game with the standard name `game_name` is
     /// called.
     fn cover_name(&self, game_name: &str) -> String;
 
-    fn fetch(&self, system: &str, cover_name: &str) -> Result<Cover, BaseError>;
+    fn fetch(&self, system: &str, cover_name: &str) -> Result<Cover, SharedError>;
 }
 
 #[derive(Serialize, Deserialize)]
@@ -103,7 +103,7 @@ impl<S: RemoteCoverSource> CoverIndex<S> {
         &mut self,
         platform: &Platform,
         game_name: &str,
-    ) -> Result<Option<Cover>, BaseError> {
+    ) -> Result<Option<Cover>, SharedError> {
         let cover_name = self.source.cover_name(game_name);
         for &system in self.source.systems(platform) {
             self.update_list_of(system)?;
@@ -115,7 +115,7 @@ impl<S: RemoteCoverSource> CoverIndex<S> {
     }
 
     /// Brings `system`'s list up to date, if it wasn't since this was opened.
-    fn update_list_of(&mut self, system: &'static str) -> Result<(), BaseError> {
+    fn update_list_of(&mut self, system: &'static str) -> Result<(), SharedError> {
         if self.checked.contains(system) {
             return Ok(());
         }
@@ -199,12 +199,12 @@ mod tests {
             }
         }
 
-        fn version(&self, system: &str) -> Result<String, BaseError> {
+        fn version(&self, system: &str) -> Result<String, SharedError> {
             self.asked.borrow_mut().push(format!("version {system}"));
             Ok(self.systems.borrow()[system].version.clone())
         }
 
-        fn names(&self, system: &str, version: &str) -> Result<Vec<String>, BaseError> {
+        fn names(&self, system: &str, version: &str) -> Result<Vec<String>, SharedError> {
             self.asked.borrow_mut().push(format!("names {system}"));
             let listed = &self.systems.borrow()[system];
             assert_eq!(listed.version, version);
@@ -215,7 +215,7 @@ mod tests {
             game_name.replace(':', "_")
         }
 
-        fn fetch(&self, system: &str, cover_name: &str) -> Result<Cover, BaseError> {
+        fn fetch(&self, system: &str, cover_name: &str) -> Result<Cover, SharedError> {
             self.asked
                 .borrow_mut()
                 .push(format!("fetch {system} {cover_name}"));

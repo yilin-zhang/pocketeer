@@ -12,15 +12,18 @@ use crate::{
         BiosRow, CoreInventory, CoreRow, CoreZip, InstallCoreError, InstallCoreOutcome,
         PutBiosError, RemoteCoreSource, RemoveCoreError, SUPPORTED,
     },
-    cover::{CoverIndex, RemoteCoverSource},
+    cover::{Cover, CoverIndex, RemoteCoverSource},
     dat::{DatEntry, DatMirror, RemoteDatSource, SyncReport},
     device::{
-        DeleteSaveError, Device, DeviceEntry, OrphanDeviceSave, RenameOnDeviceError, ScanReport,
+        DeleteSaveError, Device, DeviceEntry, EjectDeviceError, OpenDeviceError, OrphanDeviceSave,
+        RenameOnDeviceError, ScanReport,
     },
-    error::{BaseError, trash_failed},
+    error::SharedError,
     files::list_files_recursive,
     game::{Game, Save},
-    library::{AddGameError, Library, LocalEntry, OrphanLocalSave, RenameInLibraryError},
+    library::{
+        AddGameError, Library, LocalEntry, OpenLibraryError, OrphanLocalSave, RenameInLibraryError,
+    },
     log::{FrontEnd, LogEntry, Logger, OperationReport},
     platform::Platform,
     sources::{libretro::Libretro, openfpga::OpenFpga},
@@ -36,7 +39,7 @@ use crate::{
 
 /// How a batch ended: whether what it was given broke, or the error if the
 /// log can't be written.
-pub type BatchResult = Result<ControlFlow<()>, BaseError>;
+pub type BatchResult = Result<ControlFlow<()>, SharedError>;
 
 // ============================================================================
 // What operations return
@@ -55,7 +58,16 @@ pub enum TrashSaveError {
     #[error("more than one version of the save was written at {at}")]
     AmbiguousVersion { at: String },
     #[error(transparent)]
-    Other(#[from] BaseError),
+    Shared(#[from] SharedError),
+}
+
+/// Why a file wasn't made a game's cover.
+#[derive(Debug, thiserror::Error)]
+pub enum ImportCoverError {
+    #[error("not a PNG, JPEG or WebP file")]
+    NotAnImage,
+    #[error(transparent)]
+    Shared(#[from] SharedError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,7 +83,7 @@ pub enum FetchCoverError {
     #[error("no cover found for it")]
     NoCover,
     #[error(transparent)]
-    Other(#[from] BaseError),
+    Shared(#[from] SharedError),
 }
 
 /// What importing a save did.
@@ -101,6 +113,8 @@ pub enum ImportGameError {
     UnknownPlatform,
     #[error(transparent)]
     Add(#[from] AddGameError),
+    #[error(transparent)]
+    Shared(#[from] SharedError),
 }
 
 // ============================================================================
@@ -174,16 +188,16 @@ impl Pocketeer {
     /// The library at `library`, with the DATs it keeps, without going
     /// online. No device is open. What is done is logged as done through
     /// `front_end`.
-    pub fn open(library: &Path, front_end: FrontEnd) -> Result<Self, BaseError> {
+    pub fn open(library: &Path, front_end: FrontEnd) -> Result<Self, OpenLibraryError> {
         Pocketeer::open_with(library, front_end, Libretro, Libretro, OpenFpga)
     }
 
     /// `Pocketeer Library` in the home folder, made if there is none: the only
     /// library that is.
-    pub fn default_library_path() -> Result<PathBuf, BaseError> {
-        let home = std::env::home_dir().ok_or(BaseError::NoHome)?;
+    pub fn default_library_path() -> Result<PathBuf, OpenLibraryError> {
+        let home = std::env::home_dir().ok_or(OpenLibraryError::NoHome)?;
         let library = home.join("Pocketeer Library");
-        fs::create_dir_all(&library)?;
+        fs::create_dir_all(&library).map_err(SharedError::from)?;
         Ok(library)
     }
 }
@@ -199,7 +213,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         dats: D,
         covers: C,
         cores: I,
-    ) -> Result<Self, BaseError> {
+    ) -> Result<Self, OpenLibraryError> {
         let library = Library::open(library)?;
         let dats = DatMirror::open(&library.layout().dats(), dats)?;
         let covers = CoverIndex::open(&library.layout().cover_index(), covers);
@@ -229,7 +243,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     /// Opens the device at `root`, in place of any open one. It is not
     /// scanned yet.
-    pub fn open_device(&mut self, root: &Path) -> Result<(), BaseError> {
+    pub fn open_device(&mut self, root: &Path) -> Result<(), OpenDeviceError> {
         self.device = Some(Device::open(root)?);
         Ok(())
     }
@@ -237,11 +251,11 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     /// Opens the device mounted now, if there is one, in place of any open
     /// one; whether there was. It is not scanned yet. With more than one
     /// mounted, none is opened: which one is not for pocketeer to guess.
-    pub fn open_mounted_device(&mut self) -> Result<bool, BaseError> {
+    pub fn open_mounted_device(&mut self) -> Result<bool, OpenDeviceError> {
         match &Device::find_mounted()[..] {
             [] => Ok(false),
             [root] => self.open_device(root).map(|()| true),
-            found => Err(BaseError::ManyDevices {
+            found => Err(OpenDeviceError::ManyDevices {
                 found: found.to_vec(),
             }),
         }
@@ -251,19 +265,18 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         self.device = None;
     }
 
-    pub fn scan_device(&mut self) -> Result<ScanReport, BaseError> {
-        self.device.as_mut().ok_or(BaseError::NoDevice)?.scan()
+    pub fn scan_device(&mut self) -> Result<ScanReport, SharedError> {
+        self.device.as_mut().ok_or(SharedError::NoDevice)?.scan()
     }
 
     /// Ejects the open device and closes it; if the system won't eject it, it
     /// stays open.
-    pub fn eject_device(&mut self) -> Result<(), BaseError> {
+    pub fn eject_device(&mut self) -> Result<(), EjectDeviceError> {
         let root = self.device.as_ref().map(|d| d.root().to_path_buf());
-        let ejected = self
-            .device
-            .as_ref()
-            .ok_or(BaseError::NoDevice)
-            .and_then(Device::eject);
+        let ejected = match &self.device {
+            Some(device) => device.eject(),
+            None => Err(SharedError::NoDevice.into()),
+        };
         if ejected.is_ok() {
             self.device = None;
         }
@@ -274,7 +287,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     /// Reads the library's folder again, and the open device's, for changes
     /// made outside pocketeer.
-    pub fn reload(&mut self) -> Result<ScanReport, BaseError> {
+    pub fn reload(&mut self) -> Result<ScanReport, SharedError> {
         let read = self.reload_library().and_then(|()| match self.device {
             Some(_) => self.scan_device(),
             None => Ok(ScanReport::default()),
@@ -282,7 +295,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         self.log_result(read, |read| OperationReport::Reload(read.map(|_| ())))
     }
 
-    fn reload_library(&mut self) -> Result<(), BaseError> {
+    fn reload_library(&mut self) -> Result<(), SharedError> {
         self.library.reload()
     }
 
@@ -351,7 +364,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     // ---- DATs -------------------------------------------------------------------
 
-    pub fn sync_dats(&mut self) -> Result<SyncReport, BaseError> {
+    pub fn sync_dats(&mut self) -> Result<SyncReport, SharedError> {
         let synced = self.dats.sync();
         self.log_result(synced, OperationReport::SyncDats)
     }
@@ -380,6 +393,18 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         }
     }
 
+    /// Each of `games` whose name isn't what the DATs call it, with that name.
+    /// Games the DATs don't know are left out.
+    pub fn renames_to_dat_names(&self, games: &[LocalEntry]) -> Vec<(LocalEntry, String)> {
+        games
+            .iter()
+            .filter_map(|local| {
+                let dat = self.dats.lookup(&local.game)?;
+                (local.stem() != dat.name).then(|| (local.clone(), dat.name.clone()))
+            })
+            .collect()
+    }
+
     // ---- Games ------------------------------------------------------------------
 
     pub fn pull_games(
@@ -399,7 +424,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     fn pull_game(&mut self, on_device: &DeviceEntry) -> Result<PullGameOutcome, AddGameError> {
         let on_device = self.current_device_entry(on_device)?;
         let name = self.name_for_pull(&on_device);
-        let device = self.device.as_ref().ok_or(BaseError::NoDevice)?;
+        let device = self.device.as_ref().ok_or(SharedError::NoDevice)?;
         transfer::pull_game(&mut self.library, device, &on_device, &name)
     }
 
@@ -417,7 +442,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     fn push_game(&mut self, local: &LocalEntry) -> Result<PushGameOutcome, PushGameError> {
         let local = self.current_local_entry(local)?;
-        let device = self.device.as_mut().ok_or(BaseError::NoDevice)?;
+        let device = self.device.as_mut().ok_or(SharedError::NoDevice)?;
         transfer::push_game(&self.library, device, &local)
     }
 
@@ -458,7 +483,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         let named = platform.filter(|p| !matches!(p, Platform::Other(_)));
         let platform = named.cloned().or_else(by_extension);
         let platform = platform.ok_or(ImportGameError::UnknownPlatform)?;
-        let game = Game::read(platform, from).map_err(|e| AddGameError::Other(e.into()))?;
+        let game = Game::read(platform, from).map_err(SharedError::from)?;
         if let Some(entry) = self.library.entry_for(&game) {
             return Ok(ImportGameOutcome::AlreadyHad(entry.clone()));
         }
@@ -523,7 +548,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         new: &str,
     ) -> Result<DeviceEntry, RenameOnDeviceError> {
         let on_device = self.current_device_entry(on_device)?;
-        let device = self.device.as_mut().ok_or(BaseError::NoDevice)?;
+        let device = self.device.as_mut().ok_or(SharedError::NoDevice)?;
         device.rename_game(&on_device, new)
     }
 
@@ -559,6 +584,48 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         Ok(FetchCoverOutcome::Fetched)
     }
 
+    /// Makes each file the cover of the game it comes with. A cover the game
+    /// has already goes in the system's trash.
+    pub fn import_covers(
+        &mut self,
+        covers: &[(LocalEntry, PathBuf)],
+        on_entry_logged: impl FnMut(&Self, LogEntry) -> ControlFlow<()>,
+    ) -> BatchResult {
+        self.for_each_item(
+            covers,
+            |p, (local, from)| {
+                let result = p.import_cover(local, from);
+                // The log outlives the folder the command was run in.
+                let from = std::path::absolute(from).unwrap_or_else(|_| from.clone());
+                OperationReport::ImportCover(local.clone(), from, result)
+            },
+            on_entry_logged,
+        )
+    }
+
+    /// A cover of another format is trashed once the new one is written, so
+    /// the game has one if writing fails; one of the same format has its file
+    /// name, so it has to go first.
+    fn import_cover(&mut self, local: &LocalEntry, from: &Path) -> Result<(), ImportCoverError> {
+        let local = self.current_local_entry(local)?;
+        let bytes = fs::read(from).map_err(SharedError::from)?;
+        let cover = Cover::from_bytes(bytes).ok_or(ImportCoverError::NotAnImage)?;
+        let platform = &local.game.platform;
+        let new_path = self
+            .library
+            .layout()
+            .cover(platform, local.stem(), cover.format());
+        let old_path = local.cover_path.as_ref();
+        if old_path == Some(&new_path) {
+            trash::delete(&new_path).map_err(SharedError::from)?;
+        }
+        self.library.add_cover(platform, &local.name, &cover)?;
+        if let Some(old_path) = old_path.filter(|path| **path != new_path) {
+            trash::delete(old_path).map_err(SharedError::from)?;
+        }
+        Ok(())
+    }
+
     pub fn trash_games_in_library(
         &mut self,
         games: &[LocalEntry],
@@ -573,10 +640,10 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     /// Puts `local`'s file and cover in the system's trash, from where they
     /// can be put back. Its saves stay, for a game put there under its name.
-    fn trash_game_in_library(&mut self, local: &LocalEntry) -> Result<(), BaseError> {
+    fn trash_game_in_library(&mut self, local: &LocalEntry) -> Result<(), SharedError> {
         let local = self.current_local_entry(local)?;
         let files = self.library.files_of(&local);
-        trash::delete_all(&files).map_err(trash_failed)?;
+        trash::delete_all(&files)?;
         self.library.forget_game(&local.game.platform, &local.name);
         Ok(())
     }
@@ -598,9 +665,9 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     /// Deletes the file of `on_device` from the device for good. Its save
     /// stays there.
-    fn delete_game_on_device(&mut self, on_device: &DeviceEntry) -> Result<(), BaseError> {
+    fn delete_game_on_device(&mut self, on_device: &DeviceEntry) -> Result<(), SharedError> {
         let on_device = self.current_device_entry(on_device)?;
-        let device = self.device.as_mut().ok_or(BaseError::NoDevice)?;
+        let device = self.device.as_mut().ok_or(SharedError::NoDevice)?;
         device.remove_game(&on_device)
     }
 
@@ -620,7 +687,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     fn pull_save(&mut self, on_device: &DeviceEntry) -> Result<PullSaveOutcome, PullSaveError> {
         let on_device = self.current_device_entry(on_device)?;
-        let device = self.device.as_ref().ok_or(BaseError::NoDevice)?;
+        let device = self.device.as_ref().ok_or(SharedError::NoDevice)?;
         transfer::pull_save(&mut self.library, device, &on_device)
     }
 
@@ -646,7 +713,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     /// The newest version of `game`'s save in the library.
     fn newest_save(&self, game: &Game) -> Result<Save, PushSaveError> {
         let entry = self.library.entry_for(game);
-        let entry = entry.ok_or(BaseError::NotInLibrary)?;
+        let entry = entry.ok_or(PushSaveError::NotInLibrary)?;
         let history = entry.save.as_ref().ok_or(PushSaveError::NoSuchVersion)?;
         Ok(history.current.clone())
     }
@@ -673,7 +740,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         at: &str,
     ) -> Result<PushSaveOutcome, PushSaveError> {
         let local = self.library.entry_for(&game.game);
-        let local = local.ok_or(BaseError::NotInLibrary)?;
+        let local = local.ok_or(PushSaveError::NotInLibrary)?;
         match &saves_written_at(local, at)[..] {
             [] => Err(PushSaveError::NoSuchVersion),
             [version] => self.push_save(game, version),
@@ -702,7 +769,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         version: &Save,
     ) -> Result<PushSaveOutcome, PushSaveError> {
         let on_device = self.current_device_entry(on_device)?;
-        let device = self.device.as_mut().ok_or(BaseError::NoDevice)?;
+        let device = self.device.as_mut().ok_or(SharedError::NoDevice)?;
         transfer::push_save(&self.library, device, &on_device, version)
     }
 
@@ -730,7 +797,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         &mut self,
         local: &LocalEntry,
         from: &Path,
-    ) -> Result<ImportSaveOutcome, BaseError> {
+    ) -> Result<ImportSaveOutcome, SharedError> {
         let local = self.current_local_entry(local)?;
         let added = self
             .library
@@ -823,7 +890,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         local: &LocalEntry,
         files: &[PathBuf],
     ) -> Result<(), TrashSaveError> {
-        trash::delete_all(files).map_err(trash_failed)?;
+        trash::delete_all(files).map_err(SharedError::from)?;
         self.library
             .reread_saves(&local.game.platform, &local.name)?;
         Ok(())
@@ -845,19 +912,19 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     /// not the library has it.
     fn delete_save_on_device(&mut self, on_device: &DeviceEntry) -> Result<(), DeleteSaveError> {
         let on_device = self.current_device_entry(on_device)?;
-        let device = self.device.as_mut().ok_or(BaseError::NoDevice)?;
+        let device = self.device.as_mut().ok_or(SharedError::NoDevice)?;
         device.remove_save(&on_device)
     }
 
     // ---- Orphan saves -----------------------------------------------------------
 
     /// The saves in the library with no game.
-    pub fn find_orphan_saves_in_library(&self) -> Result<Vec<OrphanLocalSave>, BaseError> {
+    pub fn find_orphan_saves_in_library(&self) -> Result<Vec<OrphanLocalSave>, SharedError> {
         self.library.find_orphan_saves()
     }
 
     /// The saves on the device with no game; none if no device is open.
-    pub fn find_orphan_saves_on_device(&self) -> Result<Vec<OrphanDeviceSave>, BaseError> {
+    pub fn find_orphan_saves_on_device(&self) -> Result<Vec<OrphanDeviceSave>, SharedError> {
         self.device
             .as_ref()
             .map_or(Ok(Vec::new()), Device::find_orphan_saves)
@@ -889,7 +956,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         if files.is_empty() {
             return Err(TrashSaveError::NoSave);
         }
-        trash::delete_all(&files).map_err(trash_failed)?;
+        trash::delete_all(&files).map_err(SharedError::from)?;
         Ok(())
     }
 
@@ -914,7 +981,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         &mut self,
         orphan: &OrphanDeviceSave,
     ) -> Result<(), DeleteSaveError> {
-        let device = self.device.as_ref().ok_or(BaseError::NoDevice)?;
+        let device = self.device.as_ref().ok_or(SharedError::NoDevice)?;
         device.remove_orphan_save(orphan)
     }
 
@@ -925,7 +992,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     /// Every core: those that can be installed, then the others on the device.
     /// If the inventory can't be had that is told too, with the cores on the
     /// device alone.
-    pub fn load_core_rows(&mut self) -> Result<(Vec<CoreRow>, Option<BaseError>), BaseError> {
+    pub fn load_core_rows(&mut self) -> Result<(Vec<CoreRow>, Option<SharedError>), SharedError> {
         let installed = match &self.device {
             Some(device) => device.installed_cores()?,
             None => Vec::new(),
@@ -938,7 +1005,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     }
 
     /// The cores on the device with another version in the inventory.
-    pub fn find_cores_with_updates(&mut self) -> Result<Vec<String>, BaseError> {
+    pub fn find_cores_with_updates(&mut self) -> Result<Vec<String>, SharedError> {
         let (rows, failure) = self.load_core_rows()?;
         if let Some(failure) = failure {
             return Err(failure);
@@ -966,7 +1033,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         if !SUPPORTED.contains(&id) {
             return Err(InstallCoreError::NotSupported);
         }
-        let device = self.device.as_ref().ok_or(BaseError::NoDevice)?;
+        let device = self.device.as_ref().ok_or(SharedError::NoDevice)?;
         let installed = device.installed_cores()?;
         let latest = self
             .cores
@@ -1000,17 +1067,17 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     }
 
     fn remove_core(&mut self, id: &str) -> Result<(), RemoveCoreError> {
-        let device = self.device.as_ref().ok_or(BaseError::NoDevice)?;
+        let device = self.device.as_ref().ok_or(SharedError::NoDevice)?;
         device.remove_core(id)
     }
 
     // ---- BIOS files -------------------------------------------------------------
 
     /// The files the cores on the device load.
-    pub fn read_bios_rows(&self) -> Result<Vec<BiosRow>, BaseError> {
+    pub fn read_bios_rows(&self) -> Result<Vec<BiosRow>, SharedError> {
         self.device
             .as_ref()
-            .ok_or(BaseError::NoDevice)?
+            .ok_or(SharedError::NoDevice)?
             .read_bios_rows()
     }
 
@@ -1035,7 +1102,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     /// Copies the file at `from` to where `row` says. The file stays where it
     /// is.
     fn put_bios_file(&mut self, row: &BiosRow, from: &Path) -> Result<(), PutBiosError> {
-        let device = self.device.as_ref().ok_or(BaseError::NoDevice)?;
+        let device = self.device.as_ref().ok_or(SharedError::NoDevice)?;
         device.put_bios(&row.platform, &row.path, from)
     }
 
@@ -1046,7 +1113,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     /// Notes how `result` went, and returns it. If it went well but can't be
     /// noted, that is the error.
-    fn log_result<T: Clone, E: Clone + From<BaseError>>(
+    fn log_result<T: Clone, E: Clone + From<SharedError>>(
         &self,
         result: Result<T, E>,
         to_report: impl FnOnce(Result<T, E>) -> OperationReport,
@@ -1099,17 +1166,17 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     // they may have changed or gone since.
 
     /// `entry` as the device has it now, which may not be what the caller saw.
-    fn current_device_entry(&self, entry: &DeviceEntry) -> Result<DeviceEntry, BaseError> {
-        let device = self.device.as_ref().ok_or(BaseError::NoDevice)?;
+    fn current_device_entry(&self, entry: &DeviceEntry) -> Result<DeviceEntry, SharedError> {
+        let device = self.device.as_ref().ok_or(SharedError::NoDevice)?;
         let current = device.entry_at(&entry.game.platform, &entry.path);
-        current.cloned().ok_or(BaseError::NotOnDevice)
+        current.cloned().ok_or(SharedError::NotOnDevice)
     }
 
     /// `entry` as the library has it now, which may not be what the caller
     /// saw.
-    fn current_local_entry(&self, entry: &LocalEntry) -> Result<LocalEntry, BaseError> {
+    fn current_local_entry(&self, entry: &LocalEntry) -> Result<LocalEntry, SharedError> {
         let current = self.library.entry_named(&entry.game.platform, &entry.name);
-        current.cloned().ok_or(BaseError::NotInLibrary)
+        current.cloned().ok_or(SharedError::NotInLibrary)
     }
 }
 
@@ -1119,7 +1186,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
 /// `paths` with each folder replaced by every file under it whose extension
 /// tells its platform; a file stays as it is.
-pub fn expand_import_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, BaseError> {
+pub fn expand_import_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, SharedError> {
     let tells_platform = |file: &PathBuf| {
         let extension = file.extension().and_then(|e| e.to_str());
         extension.and_then(Platform::from_extension).is_some()
@@ -1169,11 +1236,11 @@ mod tests {
             }
         }
 
-        fn version(&self, _: &str) -> Result<String, BaseError> {
+        fn version(&self, _: &str) -> Result<String, SharedError> {
             Ok("1".into())
         }
 
-        fn names(&self, _: &str, _: &str) -> Result<Vec<String>, BaseError> {
+        fn names(&self, _: &str, _: &str) -> Result<Vec<String>, SharedError> {
             Ok(vec!["Tetris (World)".into(), "My Hack".into()])
         }
 
@@ -1181,7 +1248,7 @@ mod tests {
             game_name.into()
         }
 
-        fn fetch(&self, _: &str, _: &str) -> Result<Cover, BaseError> {
+        fn fetch(&self, _: &str, _: &str) -> Result<Cover, SharedError> {
             let mut png = Vec::new();
             image::RgbaImage::new(1, 1)
                 .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
@@ -1198,7 +1265,7 @@ mod tests {
     }
 
     impl RemoteCoreSource for CoreSource {
-        fn inventory(&self) -> Result<Vec<InventoryCore>, BaseError> {
+        fn inventory(&self) -> Result<Vec<InventoryCore>, SharedError> {
             Ok(vec![InventoryCore {
                 id: "Spiritualized.GB".into(),
                 version: "2.0".into(),
@@ -1207,7 +1274,7 @@ mod tests {
             }])
         }
 
-        fn download(&self, url: &str) -> Result<Vec<u8>, BaseError> {
+        fn download(&self, url: &str) -> Result<Vec<u8>, SharedError> {
             self.downloaded.set(self.downloaded.get() + 1);
             match url {
                 "core.zip" => Ok(zip_of(&[
@@ -1423,11 +1490,11 @@ mod tests {
             assert_eq!(s.pocketeer.game_rows().len(), 1);
             assert!(matches!(
                 s.pocketeer.push_game(&local),
-                Err(PushGameError::Other(BaseError::NoDevice))
+                Err(PushGameError::Shared(SharedError::NoDevice))
             ));
             assert!(matches!(
                 s.pocketeer.pull_game(&on_device),
-                Err(AddGameError::Other(BaseError::NoDevice))
+                Err(AddGameError::Shared(SharedError::NoDevice))
             ));
         }
 
@@ -1444,13 +1511,13 @@ mod tests {
             s.pocketeer.scan_device().unwrap();
             assert!(matches!(
                 s.pocketeer.pull_save(&on_device),
-                Err(PullSaveError::Other(BaseError::NotOnDevice))
+                Err(PullSaveError::Shared(SharedError::NotOnDevice))
             ));
             fs::remove_file(s.pocketeer.library().game_path(&local)).unwrap();
             s.pocketeer.reload_library().unwrap();
             assert!(matches!(
                 s.pocketeer.fetch_cover(&local),
-                Err(FetchCoverError::Other(BaseError::NotInLibrary))
+                Err(FetchCoverError::Shared(SharedError::NotInLibrary))
             ));
         }
 
@@ -1673,6 +1740,72 @@ mod tests {
         }
     }
 
+    mod import_covers {
+        use super::*;
+
+        /// The start of a PNG file: enough to be told as one.
+        const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+        /// A library with the game `A.gba`, and a folder apart from it.
+        fn to_import_into() -> (Setup, tempfile::TempDir, LocalEntry) {
+            let s = setup(&[], &[("roms/gba/A.gba", b"a")]);
+            let local = s.pocketeer.library().entries()[0].clone();
+            (s, tempfile::tempdir().unwrap(), local)
+        }
+
+        #[test]
+        fn imports_cover_for_game_without_one() {
+            let (mut s, elsewhere, local) = to_import_into();
+            let from = put(elsewhere.path(), "mine.dat", PNG);
+            let covers = [(local, from.clone())];
+            let lines =
+                lines_of(|on_entry_logged| s.pocketeer.import_covers(&covers, on_entry_logged));
+            assert_eq!(lines, ["gba/A.gba: cover imported"]);
+            let root = s.pocketeer.library().root();
+            let cover = root.join("covers/gba/A.png");
+            assert_eq!(fs::read(&cover).unwrap(), PNG);
+            let entry = &s.pocketeer.library().entries()[0];
+            assert_eq!(entry.cover_path, Some(cover));
+            assert!(from.exists());
+            assert_eq!(log_lines(&s)[0]["from"], from.display().to_string());
+        }
+
+        #[test]
+        fn rejects_file_that_is_not_image() {
+            let (mut s, elsewhere, local) = to_import_into();
+            let covers = [(local, put(elsewhere.path(), "mine.png", b"not an image"))];
+            let lines =
+                lines_of(|on_entry_logged| s.pocketeer.import_covers(&covers, on_entry_logged));
+            assert_eq!(lines, ["gba/A.gba: not a PNG, JPEG or WebP file"]);
+            assert!(!s.pocketeer.library().root().join("covers").exists());
+        }
+
+        #[test]
+        fn rejects_non_image_and_keeps_existing_cover() {
+            let mut s = setup(&[], &[("roms/gba/A.gba", b"a"), ("covers/gba/A.png", PNG)]);
+            let local = s.pocketeer.library().entries()[0].clone();
+            let elsewhere = tempfile::tempdir().unwrap();
+            let covers = [(local, put(elsewhere.path(), "mine.png", b"not an image"))];
+            lines_of(|on_entry_logged| s.pocketeer.import_covers(&covers, on_entry_logged));
+            let cover = s.pocketeer.library().root().join("covers/gba/A.png");
+            assert_eq!(fs::read(cover).unwrap(), PNG);
+        }
+
+        #[test]
+        fn reports_game_no_longer_in_library() {
+            let (mut s, elsewhere, local) = to_import_into();
+            fs::remove_file(s.pocketeer.library().game_path(&local)).unwrap();
+            s.pocketeer.reload_library().unwrap();
+            let covers = [(local, put(elsewhere.path(), "mine.png", PNG))];
+            let lines =
+                lines_of(|on_entry_logged| s.pocketeer.import_covers(&covers, on_entry_logged));
+            assert_eq!(
+                lines,
+                ["gba/A.gba: error: the library doesn't have the game"]
+            );
+        }
+    }
+
     mod import_saves {
         use super::*;
 
@@ -1843,6 +1976,20 @@ mod tests {
             let root = s.pocketeer.library().root();
             assert!(!root.join("roms/gba/.hidden.gba").exists());
         }
+
+        #[test]
+        fn reports_read_failure_of_missing_file() {
+            let mut s = setup(&[], &[]);
+            let dir = tempfile::tempdir().unwrap();
+            let from = dir.path().join("Gone.gba");
+            let files = [from.clone()];
+            let lines =
+                lines_of(|on_entry_logged| s.pocketeer.import_games(&files, None, on_entry_logged));
+            assert_eq!(lines.len(), 1);
+            let expected_start =
+                format!("Gone.gba: error: failed to open file `{}`", from.display());
+            assert!(lines[0].starts_with(&expected_start), "{}", lines[0]);
+        }
     }
 
     mod logging {
@@ -1858,7 +2005,7 @@ mod tests {
                 seen.push(entry.report.subject());
                 ControlFlow::Continue(())
             });
-            assert!(matches!(batch_result, Err(BaseError::LogFailed { .. })));
+            assert!(matches!(batch_result, Err(SharedError::LogFailed { .. })));
             assert_eq!(seen, ["gba/A.gba"]);
             assert_eq!(s.pocketeer.games_on_device().len(), 1);
         }
@@ -1871,7 +2018,7 @@ mod tests {
             fs::create_dir(s.pocketeer.library().layout().log()).unwrap();
             assert!(matches!(
                 s.pocketeer.reload(),
-                Err(BaseError::LogFailed { .. })
+                Err(SharedError::LogFailed { .. })
             ));
             assert_eq!(s.pocketeer.library().entries().len(), 3);
         }
@@ -1883,7 +2030,7 @@ mod tests {
             fs::create_dir(s.pocketeer.library().layout().log()).unwrap();
             assert!(matches!(
                 s.pocketeer.eject_device(),
-                Err(BaseError::NoDevice)
+                Err(EjectDeviceError::Shared(SharedError::NoDevice))
             ));
         }
     }
@@ -1903,6 +2050,70 @@ mod tests {
             let local = s.pocketeer.library().entries()[0].clone();
             let on_device = s.pocketeer.games_on_device().remove(0);
             (s, local, on_device)
+        }
+
+        /// What `renames_to_dat_names` makes of the one game in the library.
+        fn renames_of(s: &Setup) -> Vec<(String, String)> {
+            s.pocketeer
+                .renames_to_dat_names(s.pocketeer.library().entries())
+                .into_iter()
+                .map(|(local, new)| (local.name, new))
+                .collect()
+        }
+
+        #[test]
+        fn finds_dat_name_of_game_called_something_else() {
+            let s = setup(&[], &[("roms/gba/Old.gba", b"hello")]);
+            assert_eq!(
+                renames_of(&s),
+                [("Old.gba".to_string(), "Tetris (World)".to_string())]
+            );
+        }
+
+        #[test]
+        fn finds_dat_name_differing_only_in_case() {
+            let s = setup(&[], &[("roms/gba/tetris (world).gba", b"hello")]);
+            assert_eq!(
+                renames_of(&s),
+                [(
+                    "tetris (world).gba".to_string(),
+                    "Tetris (World)".to_string()
+                )]
+            );
+        }
+
+        #[test]
+        fn leaves_out_game_already_called_dat_name() {
+            let s = setup(&[], &[("roms/gba/Tetris (World).gba", b"hello")]);
+            assert_eq!(renames_of(&s), []);
+        }
+
+        #[test]
+        fn leaves_out_game_unknown_to_dats() {
+            let s = setup(&[], &[("roms/gba/Mine.gba", b"not in the DAT")]);
+            assert_eq!(renames_of(&s), []);
+        }
+
+        #[test]
+        fn renames_to_dat_name_with_save_and_cover_and_leaves_device() {
+            let (mut s, _, _) = on_both();
+            let root = s.pocketeer.library().root().to_path_buf();
+            put(&root, "saves/gba/Old/x.sav", b"save");
+            put(&root, "covers/gba/Old.png", b"cover");
+            s.pocketeer.reload_library().unwrap();
+            let renames = s
+                .pocketeer
+                .renames_to_dat_names(s.pocketeer.library().entries());
+            let lines = lines_of(|on_entry_logged| {
+                s.pocketeer
+                    .rename_games_in_library(&renames, on_entry_logged)
+            });
+            assert_eq!(lines, ["gba/Old.gba: renamed to gba/Tetris (World).gba"]);
+            assert!(root.join("roms/gba/Tetris (World).gba").exists());
+            assert!(root.join("saves/gba/Tetris (World)/x.sav").exists());
+            assert!(root.join("covers/gba/Tetris (World).png").exists());
+            let row = s.pocketeer.game_rows().remove(0);
+            assert_eq!(row.device_entry().unwrap().path, Path::new("Old.gba"));
         }
 
         #[test]
@@ -2001,7 +2212,7 @@ mod tests {
             s.pocketeer.close_device();
             assert!(matches!(
                 s.pocketeer.read_bios_rows(),
-                Err(BaseError::NoDevice)
+                Err(SharedError::NoDevice)
             ));
         }
 

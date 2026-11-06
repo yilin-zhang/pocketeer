@@ -7,13 +7,13 @@ use std::{sync::Arc, time::Duration};
 
 use serde::de::DeserializeOwned;
 
-use crate::error::BaseError;
+use crate::error::SharedError;
 
 /// How long a server gets to answer at all: what else is to be done waits.
 const CONNECT: Duration = Duration::from_secs(15);
 
-pub(crate) fn get(url: &str) -> Result<Vec<u8>, BaseError> {
-    let http = |source| BaseError::Http {
+pub(crate) fn get(url: &str) -> Result<Vec<u8>, SharedError> {
+    let http = |source| SharedError::Http {
         url: url.into(),
         source: Arc::new(source),
     };
@@ -31,8 +31,8 @@ pub(crate) fn get(url: &str) -> Result<Vec<u8>, BaseError> {
         .map_err(http)
 }
 
-pub(crate) fn get_json<T: DeserializeOwned>(url: &str) -> Result<T, BaseError> {
-    serde_json::from_slice(&get(url)?).map_err(|e| BaseError::Remote {
+pub(crate) fn get_json<T: DeserializeOwned>(url: &str) -> Result<T, SharedError> {
+    serde_json::from_slice(&get(url)?).map_err(|e| SharedError::BadResponse {
         from: url.into(),
         message: e.to_string(),
     })

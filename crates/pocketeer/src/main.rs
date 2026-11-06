@@ -14,8 +14,7 @@ use pocketeer_core::{
     Pocketeer,
     cores::{BiosStatus, CoreRow, SUPPORTED},
     device::{Device, DeviceEntry},
-    error::BaseError,
-    library::LocalEntry,
+    library::{LocalEntry, OpenLibraryError},
     log::{
         FrontEnd, LogEntry, bios_ref, device_orphan_ref, device_ref, library_orphan_ref,
         library_ref,
@@ -39,8 +38,8 @@ use strum::IntoEnumIterator;
 ///
 /// Exits with 0 when all went well, 1 when something it was for didn't, and
 /// 2 when it couldn't start. With `--json` it prints one object:
-/// `{"schema_version": 1, "ok": …, "data": …}`, with `"error": {"code",
-/// "message"}` in place of `data` when it couldn't start. `games` also has
+/// `{"schema_version": 1, "ok": …, "data": …}`, with `"error": "…"` in place
+/// of `data` when it couldn't start. `games` also has
 /// `"duplicates": [{"device", "same_game_as"}]`. A command written wrong is
 /// told as text on stderr, with nothing on stdout, and exits with 2.
 ///
@@ -116,7 +115,7 @@ enum Command {
         #[command(subcommand)]
         what: DeleteOnDevice,
     },
-    /// Download covers for games in the library
+    /// Covers of games in the library
     Cover {
         #[command(subcommand)]
         what: Cover,
@@ -149,6 +148,13 @@ enum Rename {
         game: String,
         /// The new name
         name: String,
+    },
+    /// Games in the library, to what the DATs call them; saves and covers go
+    /// with them, and the device isn't touched. Names you chose yourself are
+    /// replaced too; games the DATs don't know stay as they are
+    Standard {
+        /// The games, as <platform>/<name>; every game in the library if none
+        games: Vec<String>,
     },
 }
 
@@ -315,6 +321,14 @@ enum Cover {
         /// without a cover]
         games: Vec<String>,
     },
+    /// Make a PNG, JPEG or WebP file a game's cover; a cover it has already
+    /// goes in the system's trash, and the file stays where it is
+    Import {
+        /// The game in the library, as <platform>/<name>
+        game: String,
+        /// The image
+        image: PathBuf,
+    },
 }
 
 /// How to tell what a command has to say.
@@ -326,24 +340,15 @@ enum PrintFormat {
 
 /// Why a command didn't all go well.
 enum CliError {
-    /// It couldn't start, and this has yet to be said.
-    CouldNotStart { code: &'static str, message: String },
+    /// It couldn't start, for this reason, which has yet to be said.
+    CouldNotStart(String),
     /// It ran and some of it failed, as it has said already.
     SomeFailed,
 }
 
-impl CliError {
-    fn could_not_start(code: &'static str, message: impl Into<String>) -> Self {
-        CliError::CouldNotStart {
-            code,
-            message: message.into(),
-        }
-    }
-}
-
-impl From<BaseError> for CliError {
-    fn from(e: BaseError) -> Self {
-        CliError::could_not_start(e.code(), e.to_string())
+impl<E: std::error::Error> From<E> for CliError {
+    fn from(e: E) -> Self {
+        CliError::CouldNotStart(e.to_string())
     }
 }
 
@@ -362,11 +367,11 @@ fn main() -> ExitCode {
     match run_command(&cli, command, format) {
         Ok(()) => ExitCode::SUCCESS,
         Err(CliError::SomeFailed) => ExitCode::from(1),
-        Err(CliError::CouldNotStart { code, message }) => {
+        Err(CliError::CouldNotStart(message)) => {
             match format {
                 PrintFormat::Json => print_envelope(json!({
                     "ok": false,
-                    "error": { "code": code, "message": message },
+                    "error": message,
                 })),
                 PrintFormat::Text => eprintln!("error: {message}"),
             }
@@ -400,7 +405,7 @@ fn run_terminal_ui(cli: &Cli) -> ExitCode {
 }
 
 /// The library given, or else the default one.
-fn library_path(cli: &Cli) -> Result<PathBuf, BaseError> {
+fn library_path(cli: &Cli) -> Result<PathBuf, OpenLibraryError> {
     match &cli.library {
         Some(library) => Ok(library.clone()),
         None => Pocketeer::default_library_path(),
@@ -456,6 +461,7 @@ fn run_command(cli: &Cli, command: &Command, format: PrintFormat) -> CliResult<(
             Rename::Device { game, name } => {
                 open(DeviceUse::Scanned)?.rename_game_on_device(game, name)
             }
+            Rename::Standard { games } => open(DeviceUse::None)?.rename_games_to_dat_names(games),
         },
         Command::Bios { what } => match what {
             Bios::List => open(DeviceUse::Unscanned)?.print_bios(),
@@ -463,9 +469,10 @@ fn run_command(cli: &Cli, command: &Command, format: PrintFormat) -> CliResult<(
         },
         Command::Eject => open(DeviceUse::Unscanned)?.eject(),
         Command::Dat { what: Dat::Sync } => open(DeviceUse::None)?.sync_dats(),
-        Command::Cover {
-            what: Cover::Fetch { games },
-        } => open(DeviceUse::None)?.fetch_covers(games),
+        Command::Cover { what } => match what {
+            Cover::Fetch { games } => open(DeviceUse::None)?.fetch_covers(games),
+            Cover::Import { game, image } => open(DeviceUse::None)?.import_cover(game, image),
+        },
     }
 }
 
@@ -521,9 +528,8 @@ impl CliSession {
                 (false, DeviceUse::IfMounted | DeviceUse::IfMountedUnscanned)
                 | (true, DeviceUse::Unscanned | DeviceUse::IfMountedUnscanned) => {}
                 (false, _) => {
-                    return Err(CliError::could_not_start(
-                        "no_device",
-                        "no device found; give one with --device",
+                    return Err(CliError::CouldNotStart(
+                        "no device found; give one with --device".to_string(),
                     ));
                 }
                 (true, _) => duplicates = p.scan_device()?.duplicates,
@@ -810,6 +816,11 @@ impl CliSession {
         self.run_batch(|p, on_entry_logged| p.import_saves(&saves, on_entry_logged))
     }
 
+    fn import_cover(&mut self, game: &str, image: &Path) -> CliResult<()> {
+        let covers = [(self.local_entry(game)?.clone(), image.to_path_buf())];
+        self.run_batch(|p, on_entry_logged| p.import_covers(&covers, on_entry_logged))
+    }
+
     fn trash_games(&mut self, refs: &[String]) -> CliResult<()> {
         let games = self.entries_in_library(refs)?;
         self.run_batch(|p, on_entry_logged| p.trash_games_in_library(&games, on_entry_logged))
@@ -959,7 +970,7 @@ impl CliSession {
     fn install_cores(&mut self, ids: &[String]) -> CliResult<()> {
         if let Some(id) = ids.iter().find(|id| !SUPPORTED.contains(&id.as_str())) {
             let message = format!("{id}: not a core that can be installed, as `cores list` shows");
-            return Err(CliError::could_not_start("unsupported_core", message));
+            return Err(CliError::CouldNotStart(message));
         }
         self.run_batch(|p, on_entry_logged| p.install_cores(ids, on_entry_logged))
     }
@@ -988,10 +999,7 @@ impl CliSession {
         let device = self.p.device().expect("the device is open");
         let cores = device.installed_cores()?;
         match ids.iter().find(|id| !cores.iter().any(|c| c.id == **id)) {
-            Some(id) => Err(CliError::could_not_start(
-                "core_not_on_device",
-                format!("{id}: not on the device"),
-            )),
+            Some(id) => Err(CliError::CouldNotStart(format!("{id}: not on the device"))),
             None => Ok(()),
         }
     }
@@ -999,6 +1007,18 @@ impl CliSession {
     fn rename_game_in_library(&mut self, game: &str, name: &str) -> CliResult<()> {
         let games = [(self.local_entry(game)?.clone(), name.to_string())];
         self.run_batch(|p, on_entry_logged| p.rename_games_in_library(&games, on_entry_logged))
+    }
+
+    fn rename_games_to_dat_names(&mut self, refs: &[String]) -> CliResult<()> {
+        let games = match refs {
+            [] => self.p.library().entries().to_vec(),
+            refs => self.entries_in_library(refs)?,
+        };
+        let renames = self.p.renames_to_dat_names(&games);
+        if renames.is_empty() && matches!(self.format, PrintFormat::Text) {
+            println!("no game to rename");
+        }
+        self.run_batch(|p, on_entry_logged| p.rename_games_in_library(&renames, on_entry_logged))
     }
 
     fn rename_game_on_device(&mut self, game: &str, name: &str) -> CliResult<()> {
@@ -1078,7 +1098,7 @@ impl CliSession {
         let rows = self.p.read_bios_rows()?;
         let Some(row) = rows.into_iter().find(|r| bios_ref(r) == file) else {
             let message = format!("{file}: no core on the device loads it, as `bios list` shows");
-            return Err(CliError::could_not_start("not_a_bios_file", message));
+            return Err(CliError::CouldNotStart(message));
         };
         let files = [(row, from.to_path_buf())];
         self.run_batch(|p, on_entry_logged| p.put_bios_files(&files, on_entry_logged))
@@ -1131,7 +1151,7 @@ impl CliSession {
                 if let Some(duplicate) = self.duplicates.iter().find(is_it) {
                     let first = device_ref(self.first_copy(duplicate));
                     let message = format!("{r}: the same game as {first}, the copy that is used");
-                    return Err(CliError::could_not_start("duplicate_on_device", message));
+                    return Err(CliError::CouldNotStart(message));
                 }
                 let found = device.entry_at(&platform, path);
                 found.cloned().ok_or_else(|| not_on_device(r))
@@ -1146,8 +1166,7 @@ impl CliSession {
 
     fn local_entry(&self, r: &str) -> CliResult<&LocalEntry> {
         let (platform, name) = split_ref(r)?;
-        let not_there =
-            || CliError::could_not_start("not_in_library", format!("{r}: not in the library"));
+        let not_there = || CliError::CouldNotStart(format!("{r}: not in the library"));
         self.p
             .library()
             .entry_named(&platform, name)
@@ -1156,7 +1175,7 @@ impl CliSession {
 }
 
 fn not_on_device(r: &str) -> CliError {
-    CliError::could_not_start("not_on_device", format!("{r}: not on the device"))
+    CliError::CouldNotStart(format!("{r}: not on the device"))
 }
 
 /// The orphan saves written in `refs`, as `orphan-saves` shows them: they name
@@ -1171,7 +1190,7 @@ fn pick_orphans<T: Clone>(
             let found = orphans.iter().find(|o| ref_of(o) == *r).cloned();
             found.ok_or_else(|| {
                 let message = format!("{r}: not an orphan save, as `orphan-saves` shows them");
-                CliError::could_not_start("not_an_orphan_save", message)
+                CliError::CouldNotStart(message)
             })
         })
         .collect()
@@ -1182,7 +1201,7 @@ fn parse_platform(id: &str) -> CliResult<Platform> {
     Platform::iter().find(|p| p.id() == id).ok_or_else(|| {
         let ids: Vec<String> = Platform::iter().map(|p| p.id().to_string()).collect();
         let message = format!("{id}: not a platform; these are: {}", ids.join(", "));
-        CliError::could_not_start("unknown_platform", message)
+        CliError::CouldNotStart(message)
     })
 }
 
@@ -1190,7 +1209,7 @@ fn parse_platform(id: &str) -> CliResult<Platform> {
 fn split_ref(r: &str) -> CliResult<(Platform, &str)> {
     let (id, rest) = r.split_once('/').ok_or_else(|| {
         let how = "write a game as <platform>/<name>, as `pocketeer games` shows it";
-        CliError::could_not_start("bad_game", format!("{r}: {how}"))
+        CliError::CouldNotStart(format!("{r}: {how}"))
     })?;
     Ok((Platform::from_id(id), rest))
 }

@@ -142,9 +142,9 @@ fn panel_block(title: impl Into<String>) -> Block<'static> {
 /// removes; the rest are grey.
 fn keycap(key: &str) -> Span<'static> {
     let tint = match key {
-        "i" | "b" | "I" | "n" => Palette::KeyLibrary,
+        "i" | "b" | "I" | "n" | "D" => Palette::KeyLibrary,
         "s" | "p" | "E" | "u" | "U" | "N" => Palette::KeyDevice,
-        "f" | "d" => Palette::KeyEdit,
+        "f" | "c" | "d" => Palette::KeyEdit,
         "x" | "X" => Palette::KeyRemove,
         _ => Palette::Keycap,
     };
@@ -864,13 +864,15 @@ fn legend(app: &App) -> Vec<(&'static str, &'static str)> {
         keys.push(("I", "import"));
         if local.is_some() {
             keys.push(("n", "rename"));
+            keys.push(("D", "standard name"));
             if on_device.is_none() && app.device_root().is_some() {
                 keys.push(("s", "push"));
             }
             if on_device.is_some() {
                 keys.push(("p", "push save"));
             }
-            keys.push(("f", "cover"));
+            keys.push(("f", "download cover"));
+            keys.push(("c", "choose cover"));
             keys.push(("x", "trash"));
         }
         if on_device.is_some() {
@@ -1017,6 +1019,7 @@ fn draw_import(frame: &mut Frame, import: &ImportPrompt) {
     let (title, action) = match &import.target {
         ImportTarget::Game => ("Import a game or a folder".to_string(), "Import"),
         ImportTarget::Save(local) => (format!("Import a save for {}", local.name), "Import"),
+        ImportTarget::Cover(local) => (format!("Import a cover for {}", local.name), "Import"),
         ImportTarget::Bios(row) => {
             let name = row.path.file_name().unwrap_or_default().to_string_lossy();
             (format!("Your {name}, to put on the device"), "Put")

@@ -94,6 +94,8 @@ pub enum ImportTarget {
     Game,
     /// A version of this game's save.
     Save(LocalEntry),
+    /// This game's cover.
+    Cover(LocalEntry),
     /// The file this row asks for.
     Bios(BiosRow),
 }
@@ -370,6 +372,26 @@ impl GamesPage {
             .collect();
         let inapplicable = rows.len() - entries.len();
         (entries, inapplicable)
+    }
+
+    /// The games in the library among the rows to act on that aren't called
+    /// what the DATs call them, with that name.
+    fn renames_to_standard_names(&self) -> Vec<(LocalEntry, String)> {
+        self.rows_to_act_on()
+            .iter()
+            .filter_map(|row| {
+                let Row::Game {
+                    row,
+                    standard_name: Some(standard_name),
+                    ..
+                } = row
+                else {
+                    return None;
+                };
+                let local = row.local_entry()?;
+                (local.stem() != standard_name).then(|| (local.clone(), standard_name.clone()))
+            })
+            .collect()
     }
 
     /// The games in the library among the rows to act on, and how many rows
@@ -727,8 +749,10 @@ impl App {
             KeyCode::Char('I') => self.prompt_for_import_path(ImportTarget::Game),
             KeyCode::Char('n') => self.prompt_for_name_in_library(),
             KeyCode::Char('N') => self.prompt_for_name_on_device(),
+            KeyCode::Char('D') => self.confirm_rename_to_standard_names(),
             KeyCode::Char('s') => self.send_for_library_rows(Command::PushGames),
             KeyCode::Char('f') => self.send_for_library_rows(Command::FetchCovers),
+            KeyCode::Char('c') => self.prompt_for_cover_to_import(),
             KeyCode::Char('p') => self.push_saves(),
             KeyCode::Char('x') => self.confirm_trash_games(),
             KeyCode::Char('X') => self.confirm_delete_games(),
@@ -916,6 +940,7 @@ impl App {
         let path = import.input.path();
         match import.target {
             ImportTarget::Save(local) => self.worker.send(Command::ImportSave(local, path)),
+            ImportTarget::Cover(local) => self.worker.send(Command::ImportCover(local, path)),
             ImportTarget::Bios(row) => self.worker.send(Command::PutBios(row, path)),
             ImportTarget::Game => {
                 let extension = path.extension().and_then(|e| e.to_str());
@@ -945,7 +970,9 @@ impl App {
             let new = rename.input.value().trim().to_string();
             if new != rename.stem() {
                 self.worker.send(match rename.target {
-                    RenameTarget::InLibrary(local) => Command::RenameInLibrary(local, new),
+                    RenameTarget::InLibrary(local) => {
+                        Command::RenameGamesInLibrary(vec![(local, new)])
+                    }
                     RenameTarget::OnDevice(on_device) => Command::RenameOnDevice(on_device, new),
                 });
             }
@@ -1022,16 +1049,25 @@ impl App {
     }
 
     fn prompt_for_save_to_import(&mut self) {
-        let Some(local) = self
-            .games
-            .selected_row()
-            .and_then(Row::local_entry)
-            .cloned()
-        else {
+        if let Some(local) = self.selected_local_entry_or_say_none() {
+            self.prompt_for_import_path(ImportTarget::Save(local));
+        }
+    }
+
+    fn prompt_for_cover_to_import(&mut self) {
+        if let Some(local) = self.selected_local_entry_or_say_none() {
+            self.prompt_for_import_path(ImportTarget::Cover(local));
+        }
+    }
+
+    /// The selected game in the library; if there is none, the status says so.
+    fn selected_local_entry_or_say_none(&mut self) -> Option<LocalEntry> {
+        let selected = self.games.selected_row().and_then(Row::local_entry);
+        let local = selected.cloned();
+        if local.is_none() {
             self.show_status_message("nothing here is in the library");
-            return;
-        };
-        self.prompt_for_import_path(ImportTarget::Save(local));
+        }
+        local
     }
 
     fn prompt_for_import_path(&mut self, target: ImportTarget) {
@@ -1119,6 +1155,46 @@ impl App {
             lines,
             buttons: vec![
                 DialogButton::new("Trash", Some(Command::TrashGames(entries))),
+                DialogButton::new("Cancel", None),
+            ],
+            focused_button: 0,
+            is_irreversible: false,
+        });
+    }
+
+    /// Asks whether to call the games among the targets what the DATs call
+    /// them, showing the names first.
+    fn confirm_rename_to_standard_names(&mut self) {
+        let (entries, inapplicable) = self.games.library_entries_to_act_on();
+        if entries.is_empty() {
+            self.show_status_message("nothing here is in the library");
+            return;
+        }
+        let renames = self.games.renames_to_standard_names();
+        if renames.is_empty() {
+            self.show_status_message("no game to rename");
+            return;
+        }
+        let mut lines = vec![
+            "These get the names the DATs have; saves and covers go with them.".to_string(),
+            "The device isn't touched.".to_string(),
+            String::new(),
+        ];
+        // Two lines each, as names are long: half as many as other dialogs show.
+        const SHOWN: usize = 5;
+        for (local, new) in renames.iter().take(SHOWN) {
+            lines.push(local.stem().to_string());
+            lines.push(format!("  → {new}"));
+        }
+        if renames.len() > SHOWN {
+            lines.push(format!("… and {} more", renames.len() - SHOWN));
+        }
+        self.inapplicable_row_count += inapplicable;
+        self.dialog = Some(Dialog {
+            title: format!("Rename {}", pluralized(renames.len(), "game")),
+            lines,
+            buttons: vec![
+                DialogButton::new("Rename", Some(Command::RenameGamesInLibrary(renames))),
                 DialogButton::new("Cancel", None),
             ],
             focused_button: 0,
@@ -1460,8 +1536,9 @@ fn help_dialog() -> Dialog {
         "",
         "Library   i pull the game; b back up the save; I import a game from a file",
         "Device    s push the game; p push the newest save; E eject",
-        "Covers    f download; d update the DATs, which name games",
+        "Covers    f download; c choose a file; d update the DATs, which name games",
         "Rename    n in the library; N on the device; saves and cover go with it",
+        "          D in the library, to what the DATs call them; it asks",
         "Remove    x game and cover to the system's trash",
         "          X delete from the device: for good, it asks",
         "          On an orphan save, they remove the save.",
@@ -2041,6 +2118,32 @@ mod tests {
         }
 
         #[test]
+        fn c_imports_cover_for_selected_game() {
+            let (mut app, rx) = app();
+            press(&mut app, "c");
+            assert!(app.prompt().is_some());
+            retype(&mut app, "/some/mine.png\n");
+            let [Command::ImportCover(game, path)] = &sent(&rx)[..] else {
+                panic!()
+            };
+            assert_eq!(game.name, "Alpha.gba");
+            assert_eq!(path, Path::new("/some/mine.png"));
+            assert!(app.prompt().is_none());
+        }
+
+        #[test]
+        fn c_reports_game_not_in_library() {
+            let (mut app, rx) = app();
+            press(&mut app, "jjc");
+            assert!(app.prompt().is_none());
+            assert!(sent(&rx).is_empty());
+            assert_eq!(
+                app.status_message().unwrap().text,
+                "nothing here is in the library"
+            );
+        }
+
+        #[test]
         fn enter_on_dir_keeps_save_window_open() {
             let (mut app, rx) = app();
             press(&mut app, "j\nI\n");
@@ -2130,11 +2233,135 @@ mod tests {
             assert_eq!((before.as_str(), after.as_str()), ("Alpha", ""));
             // Keys are text here, whatever they do elsewhere.
             press(&mut app, "qx\n");
-            let [Command::RenameInLibrary(game, new)] = &sent(&rx)[..] else {
+            let [Command::RenameGamesInLibrary(games)] = &sent(&rx)[..] else {
                 panic!()
             };
+            let [(game, new)] = &games[..] else { panic!() };
             assert_eq!((game.name.as_str(), new.as_str()), ("Alpha.gba", "Alphaqx"));
             assert!(app.prompt().is_none());
+        }
+
+        /// The rows, with Alpha and Hack named differently in the DATs, and
+        /// Both the same.
+        fn app_with_standard_names() -> (App, Receiver<Sent>) {
+            let (mut app, rx) = app();
+            let standard_name_of = |name: &str| match name {
+                "Alpha.gba" => Some("Alpha (USA)".to_string()),
+                "Both.gba" => Some("Both".to_string()),
+                "Hack.gba" => Some("Hack (USA)".to_string()),
+                _ => None,
+            };
+            let rows = rows()
+                .into_iter()
+                .map(|row| {
+                    let standard_name = standard_name_of(&name_of(&row));
+                    match row {
+                        Row::Game { row, files, .. } => Row::Game {
+                            standard_name,
+                            row,
+                            files,
+                        },
+                        orphan => orphan,
+                    }
+                })
+                .collect();
+            app.update(Update::Snapshot(Snapshot {
+                rows,
+                device: Some(PathBuf::from("/Volumes/POCKET")),
+            }));
+            (app, rx)
+        }
+
+        fn names_in(renames: &[(LocalEntry, String)]) -> Vec<(&str, &str)> {
+            renames
+                .iter()
+                .map(|(local, new)| (local.name.as_str(), new.as_str()))
+                .collect()
+        }
+
+        #[test]
+        fn shift_d_shows_new_name_and_sends_rename_when_confirmed() {
+            let (mut app, rx) = app_with_standard_names();
+            press(&mut app, "D");
+            let dialog = app.dialog().unwrap();
+            assert_eq!(dialog.title, "Rename 1 game");
+            assert_eq!(dialog.lines[3..], ["Alpha", "  → Alpha (USA)"]);
+            assert!(sent(&rx).is_empty());
+            press(&mut app, "\n");
+            let [Command::RenameGamesInLibrary(games)] = &sent(&rx)[..] else {
+                panic!()
+            };
+            assert_eq!(names_in(games), [("Alpha.gba", "Alpha (USA)")]);
+        }
+
+        #[test]
+        fn shift_d_shows_five_games_and_counts_rest() {
+            let (mut app, rx) = app();
+            let rows = (0..7)
+                .map(|i| Row::Game {
+                    row: GameRow::InLibrary(local(&format!("{i}.gba"), i, &[])),
+                    standard_name: Some(format!("Game {i}")),
+                    files: Vec::new(),
+                })
+                .collect();
+            app.update(Update::Snapshot(Snapshot { rows, device: None }));
+            press(&mut app, "MD");
+            let dialog = app.dialog().unwrap();
+            assert_eq!(dialog.title, "Rename 7 games");
+            assert_eq!(dialog.lines.last().unwrap(), "… and 2 more");
+            press(&mut app, "\n");
+            let [Command::RenameGamesInLibrary(games)] = &sent(&rx)[..] else {
+                panic!()
+            };
+            assert_eq!(games.len(), 7);
+        }
+
+        #[test]
+        fn shift_d_sends_nothing_when_cancelled() {
+            let (mut app, rx) = app_with_standard_names();
+            press(&mut app, "D\x1b");
+            assert!(app.dialog().is_none());
+            assert!(sent(&rx).is_empty());
+        }
+
+        #[test]
+        fn shift_d_leaves_out_marked_rows_with_nothing_to_rename() {
+            let (mut app, rx) = app_with_standard_names();
+            press(&mut app, "MD\n");
+            let [Command::RenameGamesInLibrary(games)] = &sent(&rx)[..] else {
+                panic!()
+            };
+            assert_eq!(names_in(games), [("Alpha.gba", "Alpha (USA)")]);
+        }
+
+        #[test]
+        fn shift_d_reports_game_already_called_standard_name() {
+            let (mut app, rx) = app_with_standard_names();
+            press(&mut app, "jD");
+            assert!(app.dialog().is_none());
+            assert_eq!(app.status_message().unwrap().text, "no game to rename");
+            assert!(sent(&rx).is_empty());
+        }
+
+        #[test]
+        fn shift_d_reports_game_unknown_to_dats() {
+            let (mut app, rx) = app();
+            press(&mut app, "D");
+            assert!(app.dialog().is_none());
+            assert_eq!(app.status_message().unwrap().text, "no game to rename");
+            assert!(sent(&rx).is_empty());
+        }
+
+        #[test]
+        fn shift_d_reports_game_only_on_device() {
+            let (mut app, rx) = app_with_standard_names();
+            press(&mut app, "jjD");
+            assert!(app.dialog().is_none());
+            assert_eq!(
+                app.status_message().unwrap().text,
+                "nothing here is in the library"
+            );
+            assert!(sent(&rx).is_empty());
         }
 
         #[test]

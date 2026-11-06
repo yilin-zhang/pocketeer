@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::{
     device::{Device, DeviceEntry},
-    error::BaseError,
+    error::SharedError,
     game::Save,
     library::{AddGameError, Library, LocalEntry},
 };
@@ -34,7 +34,7 @@ pub enum PushGameError {
     #[error("not pushed: another file is where it would go")]
     NameTaken,
     #[error(transparent)]
-    Other(#[from] BaseError),
+    Shared(#[from] SharedError),
 }
 
 /// What pulling a save did.
@@ -55,7 +55,7 @@ pub enum PullSaveError {
     #[error("not in the library; pull the game first")]
     NotInLibrary,
     #[error(transparent)]
-    Other(#[from] BaseError),
+    Shared(#[from] SharedError),
 }
 
 /// What pushing a save did.
@@ -70,6 +70,9 @@ pub enum PushSaveOutcome {
 /// Why pushing a save pushed nothing.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PushSaveError {
+    /// The library doesn't have the game.
+    #[error("not in the library")]
+    NotInLibrary,
     /// The device's save is not in the library; it was left as it is.
     #[error("not pushed: the device's save isn't in the library")]
     NotBackedUp,
@@ -80,7 +83,7 @@ pub enum PushSaveError {
     #[error("more than one version of the save was written at {at}")]
     AmbiguousVersion { at: String },
     #[error(transparent)]
-    Other(#[from] BaseError),
+    Shared(#[from] SharedError),
 }
 
 /// Copies `on_device` into the library as the game called `name`. Its save
@@ -150,7 +153,7 @@ pub(crate) fn push_save(
     version: &Save,
 ) -> Result<PushSaveOutcome, PushSaveError> {
     let Some(entry) = library.entry_for(&on_device.game) else {
-        return Err(BaseError::NotInLibrary.into());
+        return Err(PushSaveError::NotInLibrary);
     };
     let Some(file) = library.file_of_save(entry, version)? else {
         return Err(PushSaveError::NoSuchVersion);
@@ -294,6 +297,16 @@ mod tests {
             let kept = current(&s);
             let pushed = push_save(&s.library, &mut s.device, &s.on_device, &kept).unwrap();
             assert_eq!(pushed, PushSaveOutcome::AlreadyThere);
+        }
+
+        #[test]
+        fn rejects_push_of_game_not_in_library() {
+            let mut s = setup(Some(b"a"), None);
+            let kept = current(&s);
+            fs::remove_file(s.library.root().join("roms/gba/Tetris.gba")).unwrap();
+            s.library.reload().unwrap();
+            let pushed = push_save(&s.library, &mut s.device, &s.on_device, &kept);
+            assert!(matches!(pushed, Err(PushSaveError::NotInLibrary)));
         }
 
         #[test]

@@ -14,7 +14,7 @@ use crate::{
         BiosRow, BiosStatus, CoreFile, CoreZip, InstalledCore, PutBiosError, RemoveCoreError,
         parse_core_files, parse_core_json,
     },
-    error::BaseError,
+    error::SharedError,
     files::{
         Cache, copy_atomically, list_dir, list_files_recursive, safe_rename_all, write_atomically,
     },
@@ -72,7 +72,7 @@ pub enum RenameOnDeviceError {
     #[error("a core on the device loads a file of that name")]
     BiosName,
     #[error(transparent)]
-    Other(#[from] BaseError),
+    Shared(#[from] SharedError),
 }
 
 /// Where everything is on a device: every path pocketeer reads or writes on
@@ -158,7 +158,37 @@ pub enum DeleteSaveError {
     #[error("no save on the device")]
     NoSave,
     #[error(transparent)]
-    Other(#[from] BaseError),
+    Shared(#[from] SharedError),
+}
+
+/// Why no device was opened.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenDeviceError {
+    /// `path` lacks some of the files and folders every Pocket has.
+    #[error("{} is not a Pocket: no {}", .path.display(), .missing.join(", "))]
+    NotADevice {
+        path: PathBuf,
+        missing: Vec<&'static str>,
+    },
+    /// More than one device is mounted, at `found`.
+    #[error("more than one device is mounted: {}", joined_paths(.found))]
+    ManyDevices { found: Vec<PathBuf> },
+}
+
+fn joined_paths(paths: &[PathBuf]) -> String {
+    let paths: Vec<_> = paths.iter().map(|p| p.display().to_string()).collect();
+    paths.join(", ")
+}
+
+/// Why the device wasn't ejected. Clones, as what an operation returns also
+/// goes in the log.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum EjectDeviceError {
+    /// The system didn't eject the device; `message` is what it said.
+    #[error("couldn't eject the device: {message}")]
+    EjectFailed { message: String },
+    #[error(transparent)]
+    Shared(#[from] SharedError),
 }
 
 /// A Pocket, as a mounted drive: the Pocket itself or its SD card in a reader.
@@ -187,10 +217,10 @@ impl Device {
     }
 
     /// The device at `root`, if it looks like one. Reads no games.
-    pub fn open(root: &Path) -> Result<Self, BaseError> {
+    pub fn open(root: &Path) -> Result<Self, OpenDeviceError> {
         let missing = missing_markers(root);
         if !missing.is_empty() {
-            return Err(BaseError::NotADevice {
+            return Err(OpenDeviceError::NotADevice {
                 path: root.to_path_buf(),
                 missing,
             });
@@ -231,7 +261,7 @@ impl Device {
     }
 
     /// Deletes `entry`'s file for good. Its save stays.
-    pub(crate) fn remove_game(&mut self, entry: &DeviceEntry) -> Result<(), BaseError> {
+    pub(crate) fn remove_game(&mut self, entry: &DeviceEntry) -> Result<(), SharedError> {
         let path = self.game_path(&entry.game.platform, &entry.path);
         fs::remove_file(&path)?;
         self.cache.forget(&path);
@@ -247,7 +277,7 @@ impl Device {
         let removed = match fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Err(DeleteSaveError::NoSave),
-            Err(e) => return Err(BaseError::from(e).into()),
+            Err(e) => return Err(SharedError::from(e).into()),
         };
         if let Some(e) = self.entry_mut(entry) {
             e.save = None;
@@ -269,14 +299,14 @@ impl Device {
             .layout
             .saves_common(&orphan.platform)
             .join(&orphan.path);
-        fs::remove_file(&path).map_err(BaseError::from)?;
+        fs::remove_file(&path).map_err(SharedError::from)?;
         Ok(())
     }
 
     /// Finds every game on the device, keeping the first copy of each. A game
     /// whose file is unchanged since the last scan is not read again. A file a
     /// core loads is no game.
-    pub fn scan(&mut self) -> Result<ScanReport, BaseError> {
+    pub fn scan(&mut self) -> Result<ScanReport, SharedError> {
         let declared = self.declared_files()?;
         let layout = &self.layout;
         let mut seen = HashSet::new();
@@ -323,7 +353,7 @@ impl Device {
         game: &Game,
         path: &Path,
         from: &Path,
-    ) -> Result<DeviceEntry, BaseError> {
+    ) -> Result<DeviceEntry, SharedError> {
         let to = self.layout.game(&game.platform, path);
         copy_atomically(from, &to)?;
         self.cache.record_game(&to, game)?;
@@ -437,7 +467,7 @@ impl Device {
 
     /// The saves on the device with no game, as the folders are now: they
     /// are looked for each time, and the device needn't be scanned.
-    pub fn find_orphan_saves(&self) -> Result<Vec<OrphanDeviceSave>, BaseError> {
+    pub fn find_orphan_saves(&self) -> Result<Vec<OrphanDeviceSave>, SharedError> {
         let declared = self.declared_files()?;
         let saves = self.layout.saves();
         let mut orphans = Vec::new();
@@ -468,13 +498,13 @@ impl Device {
 
     /// `entry`'s save as it is now, which may not be what the scan saw;
     /// none if it has none.
-    pub fn read_save(&self, entry: &DeviceEntry) -> Result<Option<Save>, BaseError> {
+    pub fn read_save(&self, entry: &DeviceEntry) -> Result<Option<Save>, SharedError> {
         read_save(&self.save_path(entry))
     }
 
     /// Makes the file at `from` `entry`'s save, last written when `from`
     /// was, so that it is the same version as `from`.
-    pub(crate) fn put_save(&mut self, entry: &DeviceEntry, from: &Path) -> Result<(), BaseError> {
+    pub(crate) fn put_save(&mut self, entry: &DeviceEntry, from: &Path) -> Result<(), SharedError> {
         let modified = fs::metadata(from).and_then(|m| m.modified())?;
         let bytes = fs::read(from)?;
         write_atomically(&self.save_path(entry), &bytes, Some(modified))?;
@@ -492,7 +522,7 @@ impl Device {
 
     /// The cores on the device, as the folders are now. One whose `core.json`
     /// can't be read has no version.
-    pub fn installed_cores(&self) -> Result<Vec<InstalledCore>, BaseError> {
+    pub fn installed_cores(&self) -> Result<Vec<InstalledCore>, SharedError> {
         let dir = self.layout.cores();
         let ids = list_dir(&dir)?.dirs;
         Ok(ids
@@ -516,7 +546,7 @@ impl Device {
     /// full changes nothing; then each file is renamed into place with
     /// `core.json` last, so that a core stopped halfway is still at its old
     /// version and installing it again finishes the job.
-    pub(crate) fn install_core(&self, zip: &mut CoreZip) -> Result<(), BaseError> {
+    pub(crate) fn install_core(&self, zip: &mut CoreZip) -> Result<(), SharedError> {
         let staging = self.layout.staging();
         match fs::remove_dir_all(&staging) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
@@ -527,7 +557,7 @@ impl Device {
         installed
     }
 
-    fn stage_and_place(&self, zip: &mut CoreZip, staging: &Path) -> Result<(), BaseError> {
+    fn stage_and_place(&self, zip: &mut CoreZip, staging: &Path) -> Result<(), SharedError> {
         let files: Vec<_> = zip
             .files()
             .into_iter()
@@ -563,12 +593,12 @@ impl Device {
             return Err(RemoveCoreError::NotInstalled);
         }
         let path = self.layout.core(id);
-        fs::remove_dir_all(&path).map_err(BaseError::from)?;
+        fs::remove_dir_all(&path).map_err(SharedError::from)?;
         Ok(())
     }
 
     /// The files the cores on the device load, and the core that loads each.
-    fn core_files(&self) -> Result<Vec<(String, CoreFile)>, BaseError> {
+    fn core_files(&self) -> Result<Vec<(String, CoreFile)>, SharedError> {
         let mut files = Vec::new();
         for core in self.installed_cores()? {
             let json = fs::read(self.layout.core(&core.id).join("data.json")).unwrap_or_default();
@@ -580,7 +610,7 @@ impl Device {
 
     /// Where the files the cores on the device load are, whether or not they
     /// are there.
-    fn declared_files(&self) -> Result<HashSet<PathBuf>, BaseError> {
+    fn declared_files(&self) -> Result<HashSet<PathBuf>, SharedError> {
         let files = self.core_files()?;
         Ok(files
             .iter()
@@ -590,7 +620,7 @@ impl Device {
 
     /// The files the cores on the device load, by platform and path, as the
     /// folders are now.
-    pub fn read_bios_rows(&self) -> Result<Vec<BiosRow>, BaseError> {
+    pub fn read_bios_rows(&self) -> Result<Vec<BiosRow>, SharedError> {
         let mut rows: Vec<BiosRow> = Vec::new();
         for (core, file) in self.core_files()? {
             let same = |r: &&mut BiosRow| r.platform == file.platform && r.path == file.path;
@@ -638,7 +668,7 @@ impl Device {
         if row.status != BiosStatus::Missing {
             return Err(PutBiosError::AlreadyThere);
         }
-        let actual = fs::metadata(from).map_err(BaseError::from)?.len();
+        let actual = fs::metadata(from).map_err(SharedError::from)?.len();
         match row.size_exact {
             Some(expected) if expected != actual => {
                 Err(PutBiosError::WrongSize { expected, actual })
@@ -648,7 +678,7 @@ impl Device {
     }
 
     /// Has the system eject the device, as its file manager would.
-    pub fn eject(&self) -> Result<(), BaseError> {
+    pub fn eject(&self) -> Result<(), EjectDeviceError> {
         let root = self.root();
         match std::env::consts::OS {
             "macos" => run_command(Command::new("diskutil").arg("eject").arg(root)),
@@ -669,7 +699,7 @@ impl Device {
                 );
                 run_command(Command::new("powershell").args(["-NoProfile", "-Command", &script]))
             }
-            os => Err(BaseError::Eject {
+            os => Err(EjectDeviceError::EjectFailed {
                 message: format!("ejecting a device is not supported on {os}"),
             }),
         }
@@ -725,18 +755,20 @@ fn missing_markers(root: &Path) -> Vec<&'static str> {
 }
 
 /// Runs `command`; what it printed, if it succeeded.
-fn run_command(command: &mut Command) -> Result<String, BaseError> {
-    let eject = |message: String| BaseError::Eject { message };
-    let out = command.output().map_err(|e| eject(e.to_string()))?;
+fn run_command(command: &mut Command) -> Result<String, EjectDeviceError> {
+    let eject_failed = |message: String| EjectDeviceError::EjectFailed { message };
+    let out = command.output().map_err(|e| eject_failed(e.to_string()))?;
     if !out.status.success() {
         let said = [&out.stderr[..], &out.stdout[..]].concat();
-        return Err(eject(String::from_utf8_lossy(&said).trim().to_string()));
+        return Err(eject_failed(
+            String::from_utf8_lossy(&said).trim().to_string(),
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// The save at `path`; none if there is none.
-fn read_save(path: &Path) -> Result<Option<Save>, BaseError> {
+fn read_save(path: &Path) -> Result<Option<Save>, SharedError> {
     match Save::read(path) {
         Ok(save) => Ok(Some(save)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -786,7 +818,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             fs::create_dir(dir.path().join("Assets")).unwrap();
             match Device::open(dir.path()) {
-                Err(BaseError::NotADevice { missing, .. }) => {
+                Err(OpenDeviceError::NotADevice { missing, .. }) => {
                     assert_eq!(missing, ["Analogue_Pocket.json", "Cores"])
                 }
                 other => panic!("{other:?}"),
@@ -1006,8 +1038,8 @@ mod tests {
         use super::*;
         use crate::cores::testing::{core_json, release, zip_of};
 
-        fn install(device: &Device, bytes: Vec<u8>) -> Result<(), BaseError> {
-            let mut zip = CoreZip::parse(bytes, "a.B").map_err(|_| BaseError::NotOnDevice)?;
+        fn install(device: &Device, bytes: Vec<u8>) -> Result<(), SharedError> {
+            let mut zip = CoreZip::parse(bytes, "a.B").unwrap();
             device.install_core(&mut zip)
         }
 
@@ -1299,7 +1331,7 @@ mod tests {
             let new = "x".repeat(253);
             assert!(matches!(
                 device.rename_game(&entry, &new),
-                Err(RenameOnDeviceError::Other(_))
+                Err(RenameOnDeviceError::Shared(_))
             ));
             let mut expected = before;
             expected.push(PathBuf::from("gba/common/RPG/Old.a"));

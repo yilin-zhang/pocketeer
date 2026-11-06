@@ -12,7 +12,7 @@ use fs_err::{self as fs, File};
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
-use crate::{error::BaseError, files::write_atomically, platform::Platform};
+use crate::{error::SharedError, files::write_atomically, platform::Platform};
 
 /// The cores pocketeer installs, for now: each comes alone in its zip, which
 /// holds nothing it needs beyond `Cores/` and `Platforms/`, and neither ROMs,
@@ -154,7 +154,7 @@ pub enum InstallCoreError {
     #[error("not a zip of this core: {0}")]
     NotACoreZip(String),
     #[error(transparent)]
-    Other(#[from] BaseError),
+    Shared(#[from] SharedError),
 }
 
 /// Why a core wasn't removed.
@@ -164,7 +164,7 @@ pub enum RemoveCoreError {
     #[error("not on the device")]
     NotInstalled,
     #[error(transparent)]
-    Other(#[from] BaseError),
+    Shared(#[from] SharedError),
 }
 
 /// A file a core on the device says it loads, which only the user can provide.
@@ -219,15 +219,15 @@ pub enum PutBiosError {
     #[error("the file has {actual} bytes, and the core takes {expected}")]
     WrongSize { expected: u64, actual: u64 },
     #[error(transparent)]
-    Other(#[from] BaseError),
+    Shared(#[from] SharedError),
 }
 
 /// Where cores come from.
 pub trait RemoteCoreSource {
     /// Every core with a release, at its newest.
-    fn inventory(&self) -> Result<Vec<InventoryCore>, BaseError>;
+    fn inventory(&self) -> Result<Vec<InventoryCore>, SharedError>;
 
-    fn download(&self, url: &str) -> Result<Vec<u8>, BaseError>;
+    fn download(&self, url: &str) -> Result<Vec<u8>, SharedError>;
 }
 
 /// The inventory, kept in a file. It only saves time, so a file that can't be
@@ -262,7 +262,7 @@ impl<S: RemoteCoreSource> CoreInventory<S> {
     /// The cores in [`SUPPORTED`] the inventory has, in that order. If it is
     /// old it is asked for again; if that fails what is known is used, and if
     /// nothing is that is the error.
-    pub fn supported_cores(&mut self) -> Result<Vec<InventoryCore>, BaseError> {
+    pub fn supported_cores(&mut self) -> Result<Vec<InventoryCore>, SharedError> {
         let fresh = |asked: SystemTime| asked.elapsed().is_ok_and(|age| age < INVENTORY_AGE);
         if !self.asked.is_some_and(fresh) {
             self.asked = Some(SystemTime::now());
@@ -288,7 +288,7 @@ impl<S: RemoteCoreSource> CoreInventory<S> {
             .collect())
     }
 
-    pub fn download(&self, url: &str) -> Result<Vec<u8>, BaseError> {
+    pub fn download(&self, url: &str) -> Result<Vec<u8>, SharedError> {
         self.source.download(url)
     }
 }
@@ -803,18 +803,18 @@ mod tests {
         }
 
         impl RemoteCoreSource for &Fake {
-            fn inventory(&self) -> Result<Vec<InventoryCore>, BaseError> {
+            fn inventory(&self) -> Result<Vec<InventoryCore>, SharedError> {
                 self.asked.set(self.asked.get() + 1);
                 match self.version {
                     Some(version) => Ok(vec![
                         latest("Spiritualized.GB", version),
                         latest("someone.Else", "1"),
                     ]),
-                    None => Err(BaseError::NoDevice),
+                    None => Err(SharedError::NoDevice),
                 }
             }
 
-            fn download(&self, _: &str) -> Result<Vec<u8>, BaseError> {
+            fn download(&self, _: &str) -> Result<Vec<u8>, SharedError> {
                 unreachable!()
             }
         }

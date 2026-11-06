@@ -13,7 +13,7 @@ use fs_err as fs;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    error::BaseError,
+    error::SharedError,
     game::{Files, Game, Rom},
     platform::Platform,
 };
@@ -27,7 +27,7 @@ pub(crate) struct Listing {
 
 /// What is in `dir`; nothing if it doesn't exist. Hidden entries (macOS
 /// leaves `._` files on devices) and symlinks are left out.
-pub(crate) fn list_dir(dir: &Path) -> Result<Listing, BaseError> {
+pub(crate) fn list_dir(dir: &Path) -> Result<Listing, SharedError> {
     let read = match fs::read_dir(dir) {
         Ok(read) => read,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Listing::default()),
@@ -53,7 +53,7 @@ pub(crate) fn list_dir(dir: &Path) -> Result<Listing, BaseError> {
 }
 
 /// Every visible file under `dir`, at any depth, as a path from `dir`.
-pub(crate) fn list_files_recursive(dir: &Path) -> Result<Vec<PathBuf>, BaseError> {
+pub(crate) fn list_files_recursive(dir: &Path) -> Result<Vec<PathBuf>, SharedError> {
     let Listing { dirs, files } = list_dir(dir)?;
     let mut paths: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
     for sub in dirs {
@@ -71,13 +71,13 @@ pub(crate) fn write_atomically(
     path: &Path,
     bytes: &[u8],
     modified: Option<SystemTime>,
-) -> Result<(), BaseError> {
+) -> Result<(), SharedError> {
     replace_atomically(path, |tmp| fs::write(tmp, bytes), modified)
 }
 
 /// Replaces the file at `to` with a copy of `from`, without holding all of
 /// it in memory.
-pub(crate) fn copy_atomically(from: &Path, to: &Path) -> Result<(), BaseError> {
+pub(crate) fn copy_atomically(from: &Path, to: &Path) -> Result<(), SharedError> {
     replace_atomically(to, |tmp| fs::copy(from, tmp).map(drop), None)
 }
 
@@ -85,7 +85,7 @@ pub(crate) fn copy_atomically(from: &Path, to: &Path) -> Result<(), BaseError> {
 /// can't be, those before it are put back, so that all are renamed or none,
 /// unless the process dies on the way. What is renamed stays in its volume:
 /// nothing is copied.
-pub(crate) fn safe_rename_all(renames: &[(PathBuf, PathBuf)]) -> Result<(), BaseError> {
+pub(crate) fn safe_rename_all(renames: &[(PathBuf, PathBuf)]) -> Result<(), SharedError> {
     for (i, (from, to)) in renames.iter().enumerate() {
         if let Err(e) = fs::rename(from, to) {
             for (from, to) in renames[..i].iter().rev() {
@@ -105,7 +105,7 @@ fn replace_atomically(
     path: &Path,
     fill: impl FnOnce(&Path) -> io::Result<()>,
     modified: Option<SystemTime>,
-) -> Result<(), BaseError> {
+) -> Result<(), SharedError> {
     let dir = path.parent().expect("files are written into a folder");
     fs::create_dir_all(dir)?;
     let mut name = OsString::from(".");
@@ -175,7 +175,7 @@ impl Cache {
         &mut self,
         platform: &Platform,
         path: &Path,
-    ) -> Result<Game, BaseError> {
+    ) -> Result<Game, SharedError> {
         let meta = fs::metadata(path)?;
         let (size, modified) = (meta.len(), meta.modified()?);
         let key = key(&self.root, path);
@@ -195,7 +195,7 @@ impl Cache {
 
     /// Notes that the file at `path` holds `game` as it is now: for a file
     /// just written from a game whose hash is known.
-    pub(crate) fn record_game(&mut self, path: &Path, game: &Game) -> Result<(), BaseError> {
+    pub(crate) fn record_game(&mut self, path: &Path, game: &Game) -> Result<(), SharedError> {
         let meta = fs::metadata(path)?;
         let Files::Single(rom) = game.files;
         self.insert(key(&self.root, path), meta.len(), meta.modified()?, rom);
@@ -306,7 +306,7 @@ mod tests {
             },
             None,
         );
-        assert!(matches!(failed, Err(BaseError::Io(_))));
+        assert!(matches!(failed, Err(SharedError::Io(_))));
         assert_eq!(fs::read(&path).unwrap(), b"old");
         assert_eq!(all_in(dir.path()), ["Foo.gba"]);
     }
