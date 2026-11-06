@@ -312,6 +312,59 @@ mod batches {
     }
 }
 
+mod status {
+    use super::*;
+
+    /// A device with a firmware, a core and a game.
+    fn with_firmware() -> Setup {
+        let setup = Setup::new();
+        setup.on_device(
+            "Analogue_Pocket.json",
+            br#"{"firmware": {"runtime": {"name": "2.6", "build_date": "2026-06-16"}}}"#,
+        );
+        setup.on_device("Cores/a.B/core.json", b"{}");
+        setup.on_device("Assets/gba/common/Mine.gba", b"game");
+        setup
+    }
+
+    #[test]
+    fn prints_status_as_text() {
+        let setup = with_firmware();
+        let ran = setup.run(&["status"]);
+        assert_eq!(ran.code, 0, "{}", ran.stderr);
+        let lines: Vec<&str> = ran.stdout.lines().collect();
+        assert_eq!(lines[0], format!("root      {}", setup.device().display()));
+        assert_eq!(lines[1], "firmware  2.6 (built 2026-06-16)");
+        assert!(lines[2].starts_with("space     "), "{}", lines[2]);
+        assert_eq!(lines[3], "cores     1");
+        assert_eq!(lines[4], "games     1");
+    }
+
+    #[test]
+    fn prints_status_as_json() {
+        let setup = with_firmware();
+        let value = setup.run(&["--json", "status"]).json();
+        assert_eq!(value["ok"], true);
+        let data = &value["data"];
+        assert_eq!(data["root"], setup.device().display().to_string());
+        assert_eq!(
+            data["firmware"],
+            serde_json::json!({ "version": "2.6", "build_date": "2026-06-16" })
+        );
+        assert!(data["total_bytes"].as_u64().unwrap() > 0);
+        assert!(data["available_bytes"].is_u64());
+        assert_eq!(data["cores"], 1);
+        assert_eq!(data["games"], 1);
+    }
+
+    #[test]
+    fn prints_null_firmware_when_unknown() {
+        let setup = Setup::new();
+        let value = setup.run(&["--json", "status"]).json();
+        assert_eq!(value["data"]["firmware"], Value::Null);
+    }
+}
+
 mod could_not_start {
     use super::*;
 

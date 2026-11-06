@@ -9,7 +9,9 @@ authors.workspace = true
 
 [dependencies]
 crc32fast.workspace = true
+bytesize.workspace = true
 fs-err.workspace = true
+fs4.workspace = true
 image.workspace = true
 jiff.workspace = true
 serde.workspace = true

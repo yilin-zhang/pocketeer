@@ -16,7 +16,7 @@ use std::{
 use pocketeer_core::{
     Pocketeer,
     cores::{BiosRow, CoreRow},
-    device::{Device, DeviceEntry, OrphanDeviceSave},
+    device::{Device, DeviceEntry, DiskSpace, Firmware, OrphanDeviceSave},
     game::Save,
     library::{LocalEntry, OrphanLocalSave},
     log::{FrontEnd, OperationReport, device_ref},
@@ -114,6 +114,17 @@ pub struct GamesPageData {
     pub device_root: Option<PathBuf>,
 }
 
+/// What the Device page draws, as the worker last read it. A value that can't
+/// be read is left out, and the page says so.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DevicePageData {
+    pub root: PathBuf,
+    pub firmware: Option<Firmware>,
+    pub disk_space: Option<DiskSpace>,
+    pub core_count: Option<usize>,
+    pub game_count: usize,
+}
+
 /// What the worker has read and how a command is going, sent to the UI.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkerMessage {
@@ -126,6 +137,8 @@ pub enum WorkerMessage {
     },
     /// The files the cores on the device load, or none without a device.
     BiosFilesChanged(Vec<BiosRow>),
+    /// None without a device.
+    DevicePageChanged(Option<DevicePageData>),
     DeviceReadStarted(PathBuf),
     /// The read ended, and if it failed `CommandFinished` says why.
     DeviceReadFinished,
@@ -317,6 +330,17 @@ impl WorkerState<'_> {
         ));
     }
 
+    fn send_device_page(&self, pocketeer: &Pocketeer) {
+        let data = pocketeer.device().map(|device| DevicePageData {
+            root: device.root().to_path_buf(),
+            firmware: device.read_firmware(),
+            disk_space: device.read_disk_space().ok(),
+            core_count: device.installed_cores().ok().map(|cores| cores.len()),
+            game_count: device.entries().len(),
+        });
+        (self.send_message)(WorkerMessage::DevicePageChanged(data));
+    }
+
     /// Opens a device that appeared and closes one that disappeared.
     fn sync_mounted_device(&mut self, pocketeer: &mut Pocketeer) {
         let found = match &self.pinned {
@@ -376,6 +400,7 @@ impl WorkerState<'_> {
         self.send_games_page_data(pocketeer);
         self.send_cores(pocketeer);
         self.send_bios(pocketeer);
+        self.send_device_page(pocketeer);
         (self.send_message)(WorkerMessage::DeviceReadFinished);
         if let Some(summary) = failure {
             (self.send_message)(WorkerMessage::CommandFinished {
@@ -390,6 +415,7 @@ impl WorkerState<'_> {
         self.send_games_page_data(pocketeer);
         self.send_cores(pocketeer);
         self.send_bios(pocketeer);
+        self.send_device_page(pocketeer);
         (self.send_message)(WorkerMessage::CommandFinished { summary, failed });
     }
 
@@ -882,6 +908,39 @@ mod tests {
             rows[0].device_entry().unwrap().path,
             Path::new("RPG/Two.gba")
         );
+    }
+
+    fn device_page_sent(messages: &[WorkerMessage]) -> Option<&DevicePageData> {
+        messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                WorkerMessage::DevicePageChanged(data) => Some(data.as_ref()),
+                _ => None,
+            })
+            .flatten()
+    }
+
+    #[test]
+    fn sends_device_page_after_reading_device() {
+        let (dir, _worker, rx) = started();
+        let messages = until_device_read(&rx);
+        let data = device_page_sent(&messages).unwrap();
+        assert_eq!(data.root, dir.path().join("device"));
+        assert_eq!(data.firmware, None);
+        assert_eq!(data.core_count, Some(0));
+        assert_eq!(data.game_count, 1);
+        assert!(data.disk_space.unwrap().total_bytes > 0);
+    }
+
+    #[test]
+    fn sends_device_page_after_command() {
+        let (dir, mut worker, rx) = started();
+        until_device_read(&rx);
+        put(&dir.path().join("device"), "Assets/gba/common/D.gba", b"d");
+        worker.send(WorkerCommand::Reload);
+        let messages = until_finished(&rx);
+        assert_eq!(device_page_sent(&messages).unwrap().game_count, 2);
     }
 
     #[test]

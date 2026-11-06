@@ -20,13 +20,13 @@ use pocketeer_core::{
     pocketeer::GameRow,
 };
 use ratatui::widgets::TableState;
-use strum::IntoEnumIterator;
+use strum::{EnumIter, IntoEnumIterator};
 use tui_input::Input;
 
 use super::{
     covers::Covers,
     path_input::{self, DirReader, PathInput},
-    worker::{GamesPageData, GamesTableRow, Worker, WorkerCommand, WorkerMessage},
+    worker::{DevicePageData, GamesPageData, GamesTableRow, Worker, WorkerCommand, WorkerMessage},
 };
 
 // ============================================================================
@@ -204,13 +204,54 @@ fn matches_query(row: &GamesTableRow, query: &str) -> bool {
         || path_input::fuzzy_match(query, &on_device).is_some()
 }
 
+/// Which rows the Games page shows, by where they are. A game on both sides
+/// counts for both.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, EnumIter)]
+pub enum GamesFilter {
+    #[default]
+    All,
+    InLibrary,
+    OnDevice,
+}
+
+impl GamesFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            GamesFilter::All => "all",
+            GamesFilter::InLibrary => "in library",
+            GamesFilter::OnDevice => "on device",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            GamesFilter::All => GamesFilter::InLibrary,
+            GamesFilter::InLibrary => GamesFilter::OnDevice,
+            GamesFilter::OnDevice => GamesFilter::All,
+        }
+    }
+
+    fn shows(self, row: &GamesTableRow) -> bool {
+        match self {
+            GamesFilter::All => true,
+            GamesFilter::InLibrary => {
+                row.local_entry().is_some() || matches!(row, GamesTableRow::OrphanInLibrary(_))
+            }
+            GamesFilter::OnDevice => {
+                row.device_entry().is_some() || matches!(row, GamesTableRow::OrphanOnDevice(_))
+            }
+        }
+    }
+}
+
 /// The games and orphan saves, and what the user has done with them.
 #[derive(Default)]
 pub struct GamesPage {
     /// None until the worker has sent them.
     rows: Option<Vec<GamesTableRow>>,
-    /// Indices into `rows` of the rows the search leaves.
+    /// Indices into `rows` of the rows the filter and the search leave.
     visible_row_indices: Vec<usize>,
+    filter: GamesFilter,
     pub table_state: TableState,
     marked_rows: HashSet<RowKey>,
     search_input: Input,
@@ -222,7 +263,11 @@ impl GamesPage {
         self.rows.is_some()
     }
 
-    /// Every row, ignoring the search.
+    pub fn filter(&self) -> GamesFilter {
+        self.filter
+    }
+
+    /// Every row, ignoring the filter and the search.
     pub fn rows(&self) -> &[GamesTableRow] {
         self.rows.as_deref().unwrap_or(&[])
     }
@@ -308,17 +353,21 @@ impl GamesPage {
 
     /// Recomputes the visible rows, keeping the selection on the row `keep`.
     fn refresh_visible_rows(&mut self, keep: Option<RowKey>) {
-        let found = self
-            .rows()
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| matches_query(row, self.search_input.value()));
+        let found = self.rows().iter().enumerate().filter(|(_, row)| {
+            self.filter.shows(row) && matches_query(row, self.search_input.value())
+        });
         let visible: Vec<usize> = found.map(|(i, _)| i).collect();
         let kept =
             keep.and_then(|key| visible.iter().position(|&i| key_of(&self.rows()[i]) == key));
         let selected = kept.or(self.table_state.selected()).unwrap_or(0);
         self.visible_row_indices = visible;
         self.select_row(selected);
+    }
+
+    fn show_next_filter(&mut self) {
+        let keep = self.selected_row().map(key_of);
+        self.filter = self.filter.next();
+        self.refresh_visible_rows(keep);
     }
 
     fn move_selection_by(&mut self, by: isize) {
@@ -508,6 +557,7 @@ pub enum Page {
     Games,
     Cores,
     Bios,
+    Device,
 }
 
 const NOT_ON_BOTH: &str = "nothing here is both in the library and on the device";
@@ -522,6 +572,8 @@ pub struct App {
     pub games: GamesPage,
     pub cores: CoresPage,
     pub bios: BiosPage,
+    /// None without a device.
+    pub device_page: Option<DevicePageData>,
     // Windows over them.
     dialog: Option<Dialog>,
     /// Shown once `dialog` closes, so that it doesn't cover it.
@@ -547,6 +599,7 @@ impl App {
             games: GamesPage::default(),
             cores: CoresPage::default(),
             bios: BiosPage::default(),
+            device_page: None,
             dialog: None,
             next_dialog: None,
             prompt: None,
@@ -623,6 +676,7 @@ impl App {
             }
             WorkerMessage::CoreListChanged { rows, failure } => self.cores.set_rows(rows, failure),
             WorkerMessage::BiosFilesChanged(rows) => self.bios.set_rows(rows),
+            WorkerMessage::DevicePageChanged(data) => self.device_page = data,
             WorkerMessage::DeviceReadStarted(root) => {
                 self.device_status = DeviceStatus::Reading(root)
             }
@@ -698,6 +752,7 @@ impl App {
             Page::Games => {}
             Page::Cores => return self.handle_cores_key(key),
             Page::Bios => return self.handle_bios_key(key),
+            Page::Device => return self.handle_device_page_key(key),
         }
         match self.games.focus {
             GamesPageFocus::List => self.handle_list_key(key),
@@ -759,7 +814,7 @@ impl App {
             KeyCode::Char('n') => self.prompt_for_name_in_library(),
             KeyCode::Char('N') => self.prompt_for_name_on_device(),
             KeyCode::Char('t') => self.confirm_rename_to_standard_names(),
-            KeyCode::Char('f') => self.send_for_library_rows(WorkerCommand::FetchCovers),
+            KeyCode::Char('a') => self.send_for_library_rows(WorkerCommand::FetchCovers),
             KeyCode::Char('c') => self.prompt_for_cover_to_import(),
             KeyCode::Char('x') => self.confirm_trash_games(),
             KeyCode::Char('X') => self.confirm_delete_games(),
@@ -769,7 +824,9 @@ impl App {
             KeyCode::Enter | KeyCode::Right => self.open_panel(),
             KeyCode::Tab | KeyCode::Char('2') => self.show_cores(),
             KeyCode::Char('3') => self.current_page = Page::Bios,
+            KeyCode::Char('4') => self.current_page = Page::Device,
             KeyCode::Char('/') => self.games.focus = GamesPageFocus::Search,
+            KeyCode::Char('f') => self.games.show_next_filter(),
             KeyCode::Char('?') => self.dialog = Some(help_dialog()),
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => self.handle_escape(),
@@ -833,6 +890,7 @@ impl App {
         match key.code {
             KeyCode::Char('1') => self.current_page = Page::Games,
             KeyCode::Tab | KeyCode::Char('3') => self.current_page = Page::Bios,
+            KeyCode::Char('4') => self.current_page = Page::Device,
             KeyCode::Char('U') => self.install_selected_core(),
             KeyCode::Char('A') => self.update_every_core(),
             KeyCode::Char('X') => self.confirm_remove_core(),
@@ -903,12 +961,26 @@ impl App {
 
     // ---- Keys on the BIOS page -------------------------------------------------
 
+    fn handle_device_page_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Tab | KeyCode::Char('1') => self.current_page = Page::Games,
+            KeyCode::Char('2') => self.show_cores(),
+            KeyCode::Char('3') => self.current_page = Page::Bios,
+            KeyCode::Char('r') => self.worker.send(WorkerCommand::Reload),
+            KeyCode::Char('?') => self.dialog = Some(help_dialog()),
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc => self.handle_escape(),
+            _ => {}
+        }
+    }
+
     fn handle_bios_key(&mut self, key: KeyEvent) {
         if let Some(i) = row_after_key(key, self.bios.table_state.selected().unwrap_or(0)) {
             return self.bios.select_row(i);
         }
         match key.code {
-            KeyCode::Tab | KeyCode::Char('1') => self.current_page = Page::Games,
+            KeyCode::Tab | KeyCode::Char('4') => self.current_page = Page::Device,
+            KeyCode::Char('1') => self.current_page = Page::Games,
             KeyCode::Char('2') => self.show_cores(),
             KeyCode::Char('I') => self.prompt_for_bios_file(),
             KeyCode::Char('r') => self.worker.send(WorkerCommand::Reload),
@@ -974,21 +1046,27 @@ impl App {
             return;
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if key.code == KeyCode::Esc || (ctrl && key.code == KeyCode::Char('g')) {
-            self.prompt = None;
-        } else if key.code != KeyCode::Enter {
-            path_input::edit(&mut rename.input, key);
-        } else if let Some(Prompt::Rename(rename)) = self.prompt.take() {
-            let new = rename.input.value().trim().to_string();
-            if new != rename.stem() {
-                self.worker.send(match rename.target {
-                    RenameTarget::InLibrary(local) => {
-                        WorkerCommand::RenameGamesInLibrary(vec![(local, new)])
-                    }
-                    RenameTarget::OnDevice(on_device) => {
-                        WorkerCommand::RenameOnDevice(on_device, new)
-                    }
-                });
+        match key.code {
+            KeyCode::Esc => self.prompt = None,
+            KeyCode::Char('g') if ctrl => self.prompt = None,
+            KeyCode::Enter => {
+                let Some(Prompt::Rename(rename)) = self.prompt.take() else {
+                    return;
+                };
+                let new = rename.input.value().trim().to_string();
+                if new != rename.stem() {
+                    self.worker.send(match rename.target {
+                        RenameTarget::InLibrary(local) => {
+                            WorkerCommand::RenameGamesInLibrary(vec![(local, new)])
+                        }
+                        RenameTarget::OnDevice(on_device) => {
+                            WorkerCommand::RenameOnDevice(on_device, new)
+                        }
+                    });
+                }
+            }
+            _ => {
+                path_input::edit(&mut rename.input, key);
             }
         }
     }
@@ -1567,17 +1645,17 @@ fn help_dialog() -> Dialog {
         "Device    P push the game; S push the newest save; N rename; E eject",
         "          X delete from the device: for good, it asks",
         "          On an orphan save, x and X remove the save.",
-        "Covers    f download; c choose a file; d update the DATs, which name games",
+        "Covers    a download; c choose a file; d update the DATs, which name games",
         "",
         "Saves     Enter opens them; there S pushes the version selected,",
         "          x trashes it, X deletes the device's save,",
         "          i imports one from a file, Esc goes back",
         "",
-        "Pages     Tab the next one; 1 games, 2 cores, 3 BIOS",
+        "Pages     Tab the next one; 1 games, 2 cores, 3 BIOS, 4 device",
         "Cores     U installs or updates, A updates all, X deletes from the device",
         "BIOS      I puts a file of yours where the cores look for it",
         "",
-        "Others    / search; r read everything again; ? this; q quit",
+        "Others    / search; f filter; r read everything again; ? this; q quit",
         "          Esc closes the search, then stops what is running,",
         "          after the game under way.",
     ];
@@ -1597,6 +1675,7 @@ mod tests {
     use pocketeer_core::{
         cores::{BiosRow, BiosStatus, InstalledCore, InventoryCore},
         device::OrphanDeviceSave,
+        device::{DiskSpace, Firmware},
         game::{Files, Game, Rom, SaveHistory},
         platform::Platform,
     };
@@ -1844,14 +1923,25 @@ mod tests {
             app.handle_key(KeyEvent::from(KeyCode::Tab));
             assert_eq!(app.current_page(), Page::Bios);
             app.handle_key(KeyEvent::from(KeyCode::Tab));
+            assert_eq!(app.current_page(), Page::Device);
+            app.handle_key(KeyEvent::from(KeyCode::Tab));
             assert_eq!(app.current_page(), Page::Games);
         }
 
         #[test]
         fn number_keys_jump_to_pages() {
             let (mut app, _rx) = app();
+            press(&mut app, "4");
+            assert_eq!(app.current_page(), Page::Device);
             press(&mut app, "3");
             assert_eq!(app.current_page(), Page::Bios);
+            press(&mut app, "4");
+            assert_eq!(app.current_page(), Page::Device);
+            press(&mut app, "2");
+            assert_eq!(app.current_page(), Page::Cores);
+            press(&mut app, "4");
+            assert_eq!(app.current_page(), Page::Device);
+            press(&mut app, "3");
             press(&mut app, "2");
             assert_eq!(app.current_page(), Page::Cores);
             press(&mut app, "1");
@@ -1915,6 +2005,119 @@ mod tests {
             press(&mut app, "\x1b");
             assert!(app.games.selected_row().is_some());
             assert_eq!(app.games.table_state.selected(), Some(0));
+        }
+    }
+
+    mod filter {
+        use super::*;
+
+        fn visible_names(app: &App) -> Vec<String> {
+            app.games.visible_rows().map(name_of).collect()
+        }
+
+        fn with_orphan_in_library() -> (App, Receiver<QueuedCommand>) {
+            let (mut app, rx) = app();
+            let mut rows = rows();
+            rows.push(GamesTableRow::OrphanInLibrary(OrphanLocalSave {
+                platform: Platform::Gba,
+                stem: "Lost".to_string(),
+                save: SaveHistory::from_saves(vec![Save::from_bytes(b"x", UNIX_EPOCH)]).unwrap(),
+            }));
+            app.handle_worker_message(WorkerMessage::GamesPageChanged(GamesPageData {
+                rows,
+                device_root: Some(PathBuf::from("/Volumes/POCKET")),
+            }));
+            (app, rx)
+        }
+
+        #[test]
+        fn shows_every_row_by_default() {
+            let (app, _rx) = with_orphan_in_library();
+            assert_eq!(app.games.filter(), GamesFilter::All);
+            assert_eq!(
+                visible_names(&app),
+                ["Alpha.gba", "Both.gba", "Hack.gba", "Gone.sav", "Lost"]
+            );
+        }
+
+        #[test]
+        fn shows_library_rows_and_orphans_in_library() {
+            let (mut app, _rx) = with_orphan_in_library();
+            press(&mut app, "f");
+            assert_eq!(app.games.filter(), GamesFilter::InLibrary);
+            assert_eq!(visible_names(&app), ["Alpha.gba", "Both.gba", "Lost"]);
+        }
+
+        #[test]
+        fn shows_device_rows_and_orphans_on_device() {
+            let (mut app, _rx) = with_orphan_in_library();
+            press(&mut app, "ff");
+            assert_eq!(app.games.filter(), GamesFilter::OnDevice);
+            assert_eq!(visible_names(&app), ["Both.gba", "Hack.gba", "Gone.sav"]);
+        }
+
+        #[test]
+        fn f_returns_to_all_after_last_filter() {
+            let (mut app, _rx) = app();
+            press(&mut app, "fff");
+            assert_eq!(app.games.filter(), GamesFilter::All);
+            assert_eq!(app.games.visible_len(), 4);
+        }
+
+        #[test]
+        fn applies_filter_and_search_together() {
+            let (mut app, _rx) = app();
+            press(&mut app, "/h\nf");
+            assert_eq!(visible_names(&app), ["Alpha.gba", "Both.gba"]);
+        }
+
+        #[test]
+        fn keeps_selection_on_row_still_shown() {
+            let (mut app, _rx) = app();
+            press(&mut app, "jf");
+            assert_eq!(name_of(app.games.selected_row().unwrap()), "Both.gba");
+        }
+
+        #[test]
+        fn keeps_filter_when_rows_change() {
+            let (mut app, _rx) = app();
+            press(&mut app, "f");
+            app.handle_worker_message(WorkerMessage::GamesPageChanged(GamesPageData {
+                rows: rows(),
+                device_root: None,
+            }));
+            assert_eq!(visible_names(&app), ["Alpha.gba", "Both.gba"]);
+        }
+
+        #[test]
+        fn acts_on_marked_rows_that_filter_hides() {
+            let (mut app, rx) = app();
+            press(&mut app, "mff");
+            assert_eq!(visible_names(&app), ["Both.gba", "Hack.gba", "Gone.sav"]);
+            assert_eq!(app.games.marked_count(), 1);
+            press(&mut app, "x\n");
+            let [WorkerCommand::TrashGames(games)] = &sent(&rx)[..] else {
+                panic!("expected the marked game to be trashed");
+            };
+            assert_eq!(games[0].name, "Alpha.gba");
+        }
+
+        #[test]
+        fn esc_clears_search_and_keeps_filter() {
+            let (mut app, _rx) = app();
+            press(&mut app, "f/al\n\x1b");
+            assert_eq!(app.games.filter(), GamesFilter::InLibrary);
+            assert_eq!(app.games.search_text(), "");
+        }
+
+        #[test]
+        fn a_downloads_cover_of_selected_game() {
+            let (mut app, rx) = app();
+            press(&mut app, "a");
+            let [WorkerCommand::FetchCovers(games)] = &sent(&rx)[..] else {
+                panic!("expected a cover download");
+            };
+            assert_eq!(games[0].name, "Alpha.gba");
         }
     }
 
@@ -2806,8 +3009,81 @@ mod tests {
             terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
             let screen = last_lines(&terminal, 24).join("\n");
             assert!(screen.contains("no cover yet"), "{screen}");
-            assert!(screen.contains(" f  download it"), "{screen}");
+            assert!(screen.contains(" a  download it"), "{screen}");
             assert!(screen.contains(" c  use an image file"), "{screen}");
+        }
+
+        fn screen_text(app: &mut App) -> String {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| ui::draw(frame, app)).unwrap();
+            last_lines(&terminal, 24).join("\n")
+        }
+
+        #[test]
+        fn shows_device_page_data() {
+            let (mut app, _rx) = app();
+            press(&mut app, "4");
+            app.handle_worker_message(WorkerMessage::DevicePageChanged(Some(DevicePageData {
+                root: PathBuf::from("/Volumes/POCKET"),
+                firmware: Some(Firmware {
+                    version: Some("2.6".to_string()),
+                    build_date: Some("2026-06-16".to_string()),
+                }),
+                disk_space: Some(DiskSpace {
+                    total_bytes: 128_000_000_000,
+                    available_bytes: 12_300_000_000,
+                }),
+                core_count: Some(16),
+                game_count: 342,
+            })));
+            let screen = screen_text(&mut app);
+            assert!(screen.contains("Root      /Volumes/POCKET"), "{screen}");
+            assert!(
+                screen.contains("Firmware  2.6 (built 2026-06-16)"),
+                "{screen}"
+            );
+            assert!(
+                screen.contains("Space     12.3 GB free of 128.0 GB"),
+                "{screen}"
+            );
+            assert!(screen.contains("Cores     16"), "{screen}");
+            assert!(screen.contains("Games     342"), "{screen}");
+        }
+
+        #[test]
+        fn shows_unknown_for_values_that_cant_be_read() {
+            let (mut app, _rx) = app();
+            press(&mut app, "4");
+            app.handle_worker_message(WorkerMessage::DevicePageChanged(Some(DevicePageData {
+                root: PathBuf::from("/Volumes/POCKET"),
+                firmware: None,
+                disk_space: None,
+                core_count: None,
+                game_count: 0,
+            })));
+            let screen = screen_text(&mut app);
+            assert!(screen.contains("Firmware  unknown"), "{screen}");
+            assert!(screen.contains("Space     unknown"), "{screen}");
+            assert!(screen.contains("Cores     unknown"), "{screen}");
+        }
+
+        #[test]
+        fn shows_no_device_on_device_page() {
+            let (mut app, _rx) = app();
+            press(&mut app, "4");
+            app.handle_worker_message(WorkerMessage::DevicePageChanged(None));
+            assert!(screen_text(&mut app).contains("no device"));
+        }
+
+        #[test]
+        fn shows_search_at_left_and_filters_at_right() {
+            let (mut app, _rx) = app();
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+            assert_eq!(
+                last_lines(&terminal, 23)[0],
+                " / search   4                                  f   all   in library   on device"
+            );
         }
 
         /// Every screen draws, at sizes down to a tiny terminal.
@@ -2829,6 +3105,17 @@ mod tests {
                 draw(&mut app);
                 press(&mut app, "\n");
                 draw(&mut app);
+                press(&mut app, "\x1b4");
+                draw(&mut app);
+                app.handle_worker_message(WorkerMessage::DevicePageChanged(Some(DevicePageData {
+                    root: PathBuf::from("/Volumes/POCKET"),
+                    firmware: None,
+                    disk_space: None,
+                    core_count: None,
+                    game_count: 0,
+                })));
+                draw(&mut app);
+                press(&mut app, "1");
                 press(&mut app, "\x1b?");
                 draw(&mut app);
                 press(&mut app, "\x1bX");

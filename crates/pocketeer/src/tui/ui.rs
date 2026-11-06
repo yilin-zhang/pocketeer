@@ -26,8 +26,8 @@ use strum::IntoEnumIterator;
 
 use super::{
     app::{
-        App, DeviceStatus, ImportPrompt, ImportTarget, Page, PlatformPrompt, Prompt, RenamePrompt,
-        RenameTarget, StatusMessage, name_of,
+        App, DeviceStatus, GamesFilter, ImportPrompt, ImportTarget, Page, PlatformPrompt, Prompt,
+        RenamePrompt, RenameTarget, StatusMessage, name_of,
     },
     covers::{self, Cover},
     path_input::{PathEntry, PathInput},
@@ -172,23 +172,29 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(frame.area());
     draw_header(frame, app, header);
-    if app.current_page() == Page::Cores {
-        draw_cores_status(frame, app, search);
-        draw_cores(frame, app, body);
-    } else if app.current_page() == Page::Bios {
-        draw_bios_status(frame, app, search);
-        draw_bios(frame, app, body);
-    } else if !app.games.is_loaded() {
-        draw_search(frame, app, search);
-        frame.render_widget(
-            Paragraph::new(
-                Palette::Muted.span(format!(" {} reading the library…", spinner_frame())),
-            ),
-            body,
-        );
-    } else {
-        draw_search(frame, app, search);
-        draw_body(frame, app, body);
+    match app.current_page() {
+        Page::Games if !app.games.is_loaded() => {
+            draw_search(frame, app, search);
+            frame.render_widget(
+                Paragraph::new(
+                    Palette::Muted.span(format!(" {} reading the library…", spinner_frame())),
+                ),
+                body,
+            );
+        }
+        Page::Games => {
+            draw_search(frame, app, search);
+            draw_body(frame, app, body);
+        }
+        Page::Cores => {
+            draw_cores_status(frame, app, search);
+            draw_cores(frame, app, body);
+        }
+        Page::Bios => {
+            draw_bios_status(frame, app, search);
+            draw_bios(frame, app, body);
+        }
+        Page::Device => draw_device(frame, app, body),
     }
     draw_footer(frame, app, footer);
     match app.prompt() {
@@ -220,6 +226,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         tab("1", "Games", Page::Games),
         tab("2", "Cores", Page::Cores),
         tab("3", "BIOS", Page::Bios),
+        tab("4", "Device", Page::Device),
     ]);
     frame.render_widget(Paragraph::new(brand), area);
     let name_of = |root: &Path| {
@@ -262,7 +269,20 @@ fn typed_spans(before: String, after: &str) -> [Span<'static>; 3] {
 }
 
 fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
-    let mut line = if app.games.is_searching() {
+    let mut filters = Line::from(keycap("f", Palette::Keycap));
+    for filter in GamesFilter::iter() {
+        let palette = match filter == app.games.filter() {
+            true => Palette::Ink,
+            false => Palette::Faint,
+        };
+        filters.push_span(palette.span(format!("  {} ", filter.label())));
+    }
+    let [search_area, filter_area] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(filters.width() as u16),
+    ])
+    .areas(area);
+    let mut search = if app.games.is_searching() {
         let (before, after) = app.games.search_text_around_cursor();
         let mut line = Line::from(Palette::Ink.span(" / "));
         line.extend(typed_spans(before, &after));
@@ -272,8 +292,9 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         Line::from(Palette::Ink.span(format!(" / {}", app.games.search_text())))
     };
-    line.push_span(Palette::Faint.span(format!("   {}", app.games.visible_len())));
-    frame.render_widget(Paragraph::new(line), area);
+    search.push_span(Palette::Faint.span(format!("   {}", app.games.visible_len())));
+    frame.render_widget(Paragraph::new(search), search_area);
+    frame.render_widget(Paragraph::new(filters), filter_area);
 }
 
 /// The width of the column naming what is in the rows. It is as wide as the
@@ -386,6 +407,29 @@ fn draw_bios_status(frame: &mut Frame, app: &App, area: Rect) {
         palette.span(format!(" {missing} missing, {wrong} of the wrong size"))
     };
     frame.render_widget(Paragraph::new(line), area);
+}
+
+fn draw_device(frame: &mut Frame, app: &App, area: Rect) {
+    let known = |value: Option<String>| value.unwrap_or_else(|| "unknown".to_string());
+    let lines = match (app.device_status(), &app.device_page) {
+        (DeviceStatus::Reading(_), _) => vec![Line::from(
+            Palette::Muted.span(format!("{} reading the device…", spinner_frame())),
+        )],
+        (_, None) => vec![Line::from(Palette::Faint.span("no device"))],
+        (_, Some(data)) => {
+            let firmware = data.firmware.as_ref().map(ToString::to_string);
+            let space = data.disk_space.as_ref().map(ToString::to_string);
+            let cores = data.core_count.as_ref().map(ToString::to_string);
+            vec![
+                labeled_text("Root", data.root.display().to_string()),
+                labeled_text("Firmware", known(firmware)),
+                labeled_text("Space", known(space)),
+                labeled_text("Cores", known(cores)),
+                labeled_text("Games", data.game_count.to_string()),
+            ]
+        }
+    };
+    frame.render_widget(Paragraph::new(lines).block(panel_block("DEVICE")), area);
 }
 
 fn draw_bios(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -566,7 +610,7 @@ fn draw_cover(frame: &mut Frame, app: &mut App, area: Rect) {
             }) => ("on the device only", &[]),
             Some(GamesTableRow::Game { .. }) => (
                 "no cover yet",
-                &[("f", "download it"), ("c", "use an image file")],
+                &[("a", "download it"), ("c", "use an image file")],
             ),
             Some(_) => ("", &[]),
             None => ("no games", &[]),
@@ -869,8 +913,39 @@ fn legend(app: &App) -> Legend {
         None => {}
     }
     let page_keys = vec![("r", "reload"), ("?", "help"), ("q", "quit")];
-    if app.current_page() == Page::Cores {
-        return Legend {
+    match app.current_page() {
+        Page::Games if app.games.selected_version().is_some() => Legend {
+            library: vec![("i", "import"), ("s", "save"), ("x", "trash")],
+            device: vec![NO_KEY, ("S", "push"), ("X", "delete")],
+            general: vec![("Esc", "back"), ("?", "help"), ("q", "quit")],
+        },
+        Page::Games => Legend {
+            library: vec![
+                ("i", "import"),
+                ("p", "pull"),
+                ("s", "save"),
+                ("n", "rename"),
+                ("t", "standard"),
+                ("x", "trash"),
+            ],
+            device: vec![
+                NO_KEY,
+                ("P", "push"),
+                ("S", "save"),
+                ("N", "rename"),
+                ("E", "eject"),
+                ("X", "delete"),
+            ],
+            general: vec![
+                ("↵", "saves"),
+                ("m", "mark"),
+                ("d", "DATs"),
+                ("r", "reload"),
+                ("?", "help"),
+                ("q", "quit"),
+            ],
+        },
+        Page::Cores => Legend {
             device: vec![
                 ("U", "install or update"),
                 ("A", "update all"),
@@ -878,47 +953,16 @@ fn legend(app: &App) -> Legend {
             ],
             general: page_keys,
             ..Legend::default()
-        };
-    }
-    if app.current_page() == Page::Bios {
-        return Legend {
+        },
+        Page::Bios => Legend {
             device: vec![("I", "put a file")],
             general: page_keys,
             ..Legend::default()
-        };
-    }
-    if app.games.selected_version().is_some() {
-        return Legend {
-            library: vec![("i", "import"), ("s", "save"), ("x", "trash")],
-            device: vec![NO_KEY, ("S", "push"), ("X", "delete")],
-            general: vec![("Esc", "back"), ("?", "help"), ("q", "quit")],
-        };
-    }
-    Legend {
-        library: vec![
-            ("i", "import"),
-            ("p", "pull"),
-            ("s", "save"),
-            ("n", "rename"),
-            ("t", "standard"),
-            ("x", "trash"),
-        ],
-        device: vec![
-            NO_KEY,
-            ("P", "push"),
-            ("S", "save"),
-            ("N", "rename"),
-            ("E", "eject"),
-            ("X", "delete"),
-        ],
-        general: vec![
-            ("↵", "saves"),
-            ("m", "mark"),
-            ("d", "DATs"),
-            ("r", "reload"),
-            ("?", "help"),
-            ("q", "quit"),
-        ],
+        },
+        Page::Device => Legend {
+            general: page_keys,
+            ..Legend::default()
+        },
     }
 }
 

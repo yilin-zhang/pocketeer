@@ -88,6 +88,8 @@ enum Command {
     },
     /// List the devices mounted
     Device,
+    /// Show the device's firmware, free space, cores and games
+    Status,
     /// Eject the device
     Eject,
     /// Update the DATs, which name games
@@ -417,6 +419,7 @@ fn run_command(cli: &Cli, command: &Command, format: PrintFormat) -> CliResult<(
     let open = |device_use| CliSession::open(cli, device_use, format);
     match command {
         Command::Device => print_devices(format),
+        Command::Status => open(DeviceUse::Scanned)?.print_status(),
         Command::Games => open(DeviceUse::IfMounted)?.print_games(),
         Command::Saves { game } => open(DeviceUse::None)?.print_saves(game),
         Command::OrphanSaves { place } => match place {
@@ -1050,6 +1053,41 @@ impl CliSession {
         let on_device = self.entries_on_device(&[game.to_string()])?.remove(0);
         let games = [(on_device, name.to_string())];
         self.run_batch(|pocketeer, on_logged| pocketeer.rename_games_on_device(&games, on_logged))
+    }
+
+    fn print_status(&self) -> CliResult<()> {
+        let device = self.pocketeer.device().expect("the device is open");
+        let firmware = device.read_firmware();
+        let space = device.read_disk_space()?;
+        let core_count = device.installed_cores()?.len();
+        let game_count = device.entries().len();
+        let root = device.root().display().to_string();
+        match self.format {
+            PrintFormat::Json => print_json(
+                true,
+                json!({
+                    "root": root,
+                    "firmware": firmware.as_ref().map(|firmware| json!({
+                        "version": firmware.version,
+                        "build_date": firmware.build_date,
+                    })),
+                    "total_bytes": space.total_bytes,
+                    "available_bytes": space.available_bytes,
+                    "cores": core_count,
+                    "games": game_count,
+                }),
+            ),
+            PrintFormat::Text => {
+                let firmware =
+                    firmware.map_or("unknown".to_string(), |firmware| firmware.to_string());
+                println!("root      {root}");
+                println!("firmware  {firmware}");
+                println!("space     {space}");
+                println!("cores     {core_count}");
+                println!("games     {game_count}");
+            }
+        }
+        Ok(())
     }
 
     fn print_bios(&self) -> CliResult<()> {

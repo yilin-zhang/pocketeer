@@ -2,12 +2,14 @@
 
 use std::{
     collections::HashSet,
-    io,
+    fmt, io,
     path::{Path, PathBuf},
     process::Command,
 };
 
+use bytesize::ByteSize;
 use fs_err as fs;
+use serde::Deserialize;
 
 use crate::{
     cores::{
@@ -81,6 +83,10 @@ struct DeviceLayout {
 }
 
 impl DeviceLayout {
+    fn pocket_json(&self) -> PathBuf {
+        self.root.join("Analogue_Pocket.json")
+    }
+
     fn assets(&self) -> PathBuf {
         self.root.join("Assets")
     }
@@ -187,6 +193,56 @@ pub enum EjectDeviceError {
     EjectFailed { message: String },
     #[error(transparent)]
     Shared(#[from] SharedError),
+}
+
+/// The firmware the Pocket reports in `Analogue_Pocket.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Firmware {
+    #[serde(rename = "name")]
+    pub version: Option<String>,
+    pub build_date: Option<String>,
+}
+
+impl fmt::Display for Firmware {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.version.as_deref().unwrap_or("unknown"))?;
+        match &self.build_date {
+            Some(build_date) => write!(f, " (built {build_date})"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The layout of `Analogue_Pocket.json`, down to the firmware.
+#[derive(Deserialize)]
+struct PocketJson {
+    firmware: PocketJsonFirmware,
+}
+
+#[derive(Deserialize)]
+struct PocketJsonFirmware {
+    runtime: Firmware,
+}
+
+/// The space on the whole drive, which also counts files that aren't the
+/// Pocket's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskSpace {
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+}
+
+impl fmt::Display for DiskSpace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let available = ByteSize::b(self.available_bytes);
+        let total = ByteSize::b(self.total_bytes);
+        write!(
+            f,
+            "{} free of {}",
+            available.display().si(),
+            total.display().si()
+        )
+    }
 }
 
 /// A Pocket as a mounted drive, either the Pocket itself or its SD card in a
@@ -680,6 +736,21 @@ impl Device {
             }
             _ => Ok(copy_atomically(from, &self.layout.game(platform, path))?),
         }
+    }
+
+    /// None if `Analogue_Pocket.json` can't be read or doesn't have the firmware.
+    pub fn read_firmware(&self) -> Option<Firmware> {
+        let bytes = fs::read(self.layout.pocket_json()).ok()?;
+        let json: PocketJson = serde_json::from_slice(&bytes).ok()?;
+        Some(json.firmware.runtime)
+    }
+
+    pub fn read_disk_space(&self) -> Result<DiskSpace, SharedError> {
+        let root = &self.layout.root;
+        Ok(DiskSpace {
+            total_bytes: fs4::total_space(root)?,
+            available_bytes: fs4::available_space(root)?,
+        })
     }
 
     /// Has the system eject the device, as its file manager would.
@@ -1568,6 +1639,88 @@ mod tests {
                 let found: Vec<_> = orphans.iter().map(|orphan| orphan.path.clone()).collect();
                 assert_eq!(found, [PathBuf::from("gba_bios.sav")]);
             }
+        }
+    }
+
+    mod firmware {
+        use super::*;
+
+        fn firmware_in(json: &[u8]) -> Option<Firmware> {
+            let (dir, device) = empty_device();
+            put(dir.path(), "Analogue_Pocket.json", json);
+            device.read_firmware()
+        }
+
+        #[test]
+        fn reads_version_and_build_date() {
+            let firmware = firmware_in(
+                br#"{"product": "Analogue Pocket", "firmware": {"runtime":
+                    {"name": "2.6", "byte": 38, "build_date": "2026-06-16"}}}"#,
+            );
+            assert_eq!(
+                firmware,
+                Some(Firmware {
+                    version: Some("2.6".to_string()),
+                    build_date: Some("2026-06-16".to_string()),
+                })
+            );
+        }
+
+        #[test]
+        fn reads_firmware_without_build_date() {
+            let firmware = firmware_in(br#"{"firmware": {"runtime": {"name": "2.6"}}}"#);
+            assert_eq!(firmware.unwrap().to_string(), "2.6");
+        }
+
+        #[test]
+        fn reads_new_firmware_without_reopening() {
+            let (dir, device) = empty_device();
+            put(
+                dir.path(),
+                "Analogue_Pocket.json",
+                br#"{"firmware": {"runtime": {"name": "2.7"}}}"#,
+            );
+            assert_eq!(device.read_firmware().unwrap().to_string(), "2.7");
+        }
+
+        #[test]
+        fn returns_none_without_firmware_section() {
+            assert_eq!(firmware_in(b"{}"), None);
+        }
+
+        #[test]
+        fn returns_none_for_malformed_json() {
+            assert_eq!(firmware_in(b"{ not json"), None);
+        }
+
+        #[test]
+        fn shows_version_and_build_date() {
+            let firmware = Firmware {
+                version: Some("2.6".to_string()),
+                build_date: Some("2026-06-16".to_string()),
+            };
+            assert_eq!(firmware.to_string(), "2.6 (built 2026-06-16)");
+        }
+    }
+
+    mod disk_space {
+        use super::*;
+
+        #[test]
+        fn reads_space_of_drive() {
+            let (_dir, device) = empty_device();
+            let space = device.read_disk_space().unwrap();
+            assert!(space.total_bytes > 0);
+            assert!(space.available_bytes <= space.total_bytes);
+        }
+
+        #[test]
+        fn shows_space_in_decimal_units() {
+            let space = DiskSpace {
+                total_bytes: 128_000_000_000,
+                available_bytes: 12_300_000_000,
+            };
+            assert_eq!(space.to_string(), "12.3 GB free of 128.0 GB");
         }
     }
 

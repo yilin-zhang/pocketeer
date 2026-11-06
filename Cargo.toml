@@ -28,6 +28,8 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 nucleo-matcher = { version = "0.3", default-features = false, features = ["unicode-casefold", "unicode-normalization"] }
 tui-input = { version = "0.15", default-features = false, features = ["crossterm"] }
 trash = "5"
+fs4 = "1"
+bytesize = "2"
 
 # dev
 tempfile = "3"
