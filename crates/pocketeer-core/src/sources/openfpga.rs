@@ -32,7 +32,7 @@ struct Release {
 #[derive(Deserialize)]
 struct Entry {
     id: String,
-    /// Newest first; a core may have none.
+    /// Newest first. A core may have none.
     #[serde(default)]
     releases: Vec<Release>,
 }

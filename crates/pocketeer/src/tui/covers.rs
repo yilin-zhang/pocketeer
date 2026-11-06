@@ -1,15 +1,5 @@
-//! Covers are decoded, scaled and encoded for the terminal on their own
-//! thread: that takes far longer than a frame (about 100 ms per cover in a
-//! debug build), and the UI thread only ever draws what is ready. The
-//! covers next to the selected game are prepared ahead, so moving through
-//! the list usually finds them done. Each frame tells the thread which
-//! covers it wants, in order; work for rows already scrolled past is
-//! dropped instead of making the selected one wait behind it.
-//!
-//! Terminals that can show images get the picture itself. The others get
-//! a dot-matrix picture: braille characters give 2×4 dots per cell, eight
-//! times what half blocks give, and one tone of dots dithered on the dark
-//! background reads like the Pocket's own screen instead of a mosaic.
+//! Prepares covers for the panel on a background thread, as images or as
+//! dot-matrix pictures.
 
 use std::{
     collections::HashMap,
@@ -35,24 +25,25 @@ use ratatui_image::{
     protocol::StatefulProtocol,
 };
 
-/// How the cover panel fits an image; the widget must be drawn with the same.
+/// How the cover panel fits an image. The widget must be drawn with the same
+/// value.
 pub const RESIZE: Resize = Resize::Fit(None);
 
 /// How many decoded covers to keep. One is a few hundred KB to a few MB.
 const KEEP: usize = 24;
 
-/// When a cover file was last written, and its size. A cover fetched or
-/// imported again replaces the file in place, so the path alone can't tell.
+/// A cover file's last write time and size. A cover fetched or imported again
+/// replaces the file in place, so the path alone can't identify it.
 type Stamp = (Option<SystemTime>, u64);
 
 enum Work {
-    /// Read the file and encode it for `size` cells.
+    /// Reads the file and encodes it for `size` cells.
     Decode {
         path: PathBuf,
         stamp: Stamp,
         size: Size,
     },
-    /// The panel changed size: encode an already decoded cover again.
+    /// The panel changed size, so an already decoded cover is encoded again.
     Resize {
         path: PathBuf,
         stamp: Stamp,
@@ -79,7 +70,7 @@ struct Done {
 enum Art {
     /// For terminals that show images (kitty, iTerm2, sixel).
     Image(Box<StatefulProtocol>),
-    /// For the others.
+    /// For terminals that can't show images, drawn in braille dots.
     Dots(Dots),
 }
 
@@ -93,19 +84,19 @@ impl Art {
 
     fn needs_resize(&self, size: Size) -> bool {
         match self {
-            Art::Image(p) => p.needs_resize(&RESIZE, size).is_some(),
-            Art::Dots(d) => d.size != size,
+            Art::Image(protocol) => protocol.needs_resize(&RESIZE, size).is_some(),
+            Art::Dots(dots) => dots.size != size,
         }
     }
 
     fn resize(&mut self, size: Size) {
         match self {
-            Art::Image(p) => {
-                if let Some(target) = p.needs_resize(&RESIZE, size) {
-                    p.resize_encode(&RESIZE, target);
+            Art::Image(protocol) => {
+                if let Some(target) = protocol.needs_resize(&RESIZE, size) {
+                    protocol.resize_encode(&RESIZE, target);
                 }
             }
-            Art::Dots(d) => d.resize(size),
+            Art::Dots(dots) => dots.resize(size),
         }
     }
 }
@@ -113,7 +104,7 @@ impl Art {
 enum Outcome {
     Ready(Art),
     Unreadable,
-    /// Nobody wanted it any more by the time the thread got to it.
+    /// Nobody wanted it by the time the thread got to it.
     Dropped,
 }
 
@@ -135,12 +126,13 @@ pub struct Covers {
     tx: Sender<Work>,
     rx: Receiver<Done>,
     cache: HashMap<PathBuf, (Stamp, State)>,
-    /// What the panel needs now, most wanted first; shared with the thread.
+    /// What the panel needs now, most wanted first, shared with the thread.
     wanted: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 impl Covers {
-    /// Starts the thread; `wake` is called when a cover is ready.
+    /// Starts the thread that decodes, scales and encodes covers, which takes
+    /// far longer than a frame. `wake` is called when a cover is ready.
     pub fn spawn(picker: Picker, wake: impl Fn() + Send + 'static) -> Self {
         let (tx, work) = mpsc::channel::<Work>();
         let (done, rx) = mpsc::channel();
@@ -156,10 +148,13 @@ impl Covers {
                     queue.push(job);
                 }
                 queue.extend(work.try_iter());
-                let wanted = shared.lock().map(|w| w.clone()).unwrap_or_default();
+                let wanted = shared
+                    .lock()
+                    .map(|wanted| wanted.clone())
+                    .unwrap_or_default();
                 let next = wanted
                     .iter()
-                    .find_map(|p| queue.iter().position(|job| job.path() == p));
+                    .find_map(|path| queue.iter().position(|job| job.path() == path));
                 let results: Vec<Done> = match next {
                     Some(i) => vec![do_work(&picker, queue.swap_remove(i))],
                     // Everything queued is for rows the user has left.
@@ -181,8 +176,8 @@ impl Covers {
         }
     }
 
-    /// The cover at `path` for a panel of `size` cells, if it is ready; the
-    /// ones in `next` (the rows around it) are started ahead.
+    /// The cover at `path` for a panel of `size` cells, if it is ready. The
+    /// covers in `next`, for the rows around it, are started ahead.
     pub fn show(&mut self, path: &Path, next: &[PathBuf], size: Size) -> Cover<'_> {
         if let Ok(mut wanted) = self.wanted.lock()
             && (wanted.first().map(PathBuf::as_path) != Some(path) || wanted[1..] != *next)
@@ -193,15 +188,14 @@ impl Covers {
         }
         // The selected cover goes to the thread first, so it never waits
         // behind the ones around it.
-        for p in std::iter::once(path).chain(next.iter().map(PathBuf::as_path)) {
-            if let Some(stamp) = file_stamp(p) {
-                self.request_unless_cached(p, stamp, size);
+        for path_to_load in std::iter::once(path).chain(next.iter().map(PathBuf::as_path)) {
+            if let Some(stamp) = file_stamp(path_to_load) {
+                self.request_unless_cached(path_to_load, stamp, size);
             }
         }
         self.cover_at(path, size)
     }
 
-    /// Takes in whatever the thread finished.
     pub fn collect_finished(&mut self) {
         for Done {
             path,
@@ -209,18 +203,18 @@ impl Covers {
             outcome,
         } in self.rx.try_iter()
         {
-            // A cover rewritten meanwhile has been asked for again; this
-            // result is for the old file.
-            let Some((s, state @ State::Working)) = self.cache.get_mut(&path) else {
+            // A cover rewritten in the meantime has been requested again, and
+            // this result is for the old file.
+            let Some((cached_stamp, state @ State::Working)) = self.cache.get_mut(&path) else {
                 continue;
             };
-            if *s != stamp {
+            if *cached_stamp != stamp {
                 continue;
             }
             match outcome {
                 Outcome::Ready(cover) => *state = State::Ready(cover),
                 Outcome::Unreadable => *state = State::Unreadable,
-                // Asked for again if the user comes back to it.
+                // It is requested again if the user comes back to it.
                 Outcome::Dropped => {
                     self.cache.remove(&path);
                 }
@@ -228,8 +222,8 @@ impl Covers {
         }
     }
 
-    /// The cover at `path`, encoded for `size` cells, if it is ready. When it
-    /// isn't, the thread is asked for it and the panel says it's loading.
+    /// The cover at `path` encoded for `size` cells, if it is ready. Otherwise
+    /// it is requested from the thread and the panel shows that it is loading.
     fn cover_at(&mut self, path: &Path, size: Size) -> Cover<'_> {
         let Some(stamp) = file_stamp(path) else {
             return Cover::Unreadable;
@@ -257,15 +251,19 @@ impl Covers {
         match state {
             State::Working => Cover::Loading,
             State::Unreadable => Cover::Unreadable,
-            State::Ready(Art::Image(p)) => Cover::Image(p),
-            State::Ready(Art::Dots(d)) => Cover::Dots(&d.lines),
+            State::Ready(Art::Image(protocol)) => Cover::Image(protocol),
+            State::Ready(Art::Dots(dots)) => Cover::Dots(&dots.lines),
         }
     }
 
-    /// Sends the cover to the thread unless the cached copy is for this
-    /// version of the file. `false` when it was sent.
+    /// Sends the cover to the thread unless the cached copy is for this version
+    /// of the file. Returns `false` when it was sent.
     fn request_unless_cached(&mut self, path: &Path, stamp: Stamp, size: Size) -> bool {
-        if self.cache.get(path).is_some_and(|(s, _)| *s == stamp) {
+        if self
+            .cache
+            .get(path)
+            .is_some_and(|(cached_stamp, _)| *cached_stamp == stamp)
+        {
             return true;
         }
         if self.cache.len() >= KEEP {
@@ -289,8 +287,8 @@ fn file_stamp(path: &Path) -> Option<Stamp> {
     Some((meta.modified().ok(), meta.len()))
 }
 
-/// Gives back unwanted work without doing it. A cover that only needed a
-/// new size is still decoded, so it is kept as it is.
+/// Returns unwanted work without doing it. A cover that only needed a new size
+/// is already decoded, so it is kept.
 fn drop_work(work: Work) -> Done {
     match work {
         Work::Decode { path, stamp, .. } => Done {
@@ -313,8 +311,8 @@ fn do_work(picker: &Picker, work: Work) -> Done {
         Work::Decode { path, stamp, size } => {
             let cover = image::ImageReader::open(&path)
                 .ok()
-                .and_then(|r| r.with_guessed_format().ok())
-                .and_then(|r| r.decode().ok())
+                .and_then(|reader| reader.with_guessed_format().ok())
+                .and_then(|reader| reader.decode().ok())
                 .map(|img| Art::new(picker, img, size));
             (path, stamp, cover, size)
         }
@@ -372,10 +370,13 @@ const DOTS_Y: u32 = 4;
 /// The braille bit for the dot at (x, y) in a cell.
 const BITS: [[u8; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
 
-/// Fits `source` into `size` cells (dots are about square, since a cell is
-/// twice as tall as it is wide), dithers its brightness and encodes it as
-/// braille. Which dots are lit carries the brightness; each cell is drawn
-/// in the average color of its lit dots, so the color carries the hue.
+/// Fits `source` into `size` cells, dithers its brightness and encodes it as
+/// braille.
+///
+/// Braille gives 2×4 dots per cell, eight times what half blocks give, and the
+/// dots are about square because a cell is twice as tall as it is wide. Which
+/// dots are lit carries the brightness, and each cell is drawn in the average
+/// color of its lit dots, so the color carries the hue.
 fn render_dots(source: &DynamicImage, size: Size) -> Vec<Line<'static>> {
     let (cols, rows) = (u32::from(size.width), u32::from(size.height));
     if cols == 0 || rows == 0 || source.width() == 0 || source.height() == 0 {
@@ -384,11 +385,11 @@ fn render_dots(source: &DynamicImage, size: Size) -> Vec<Line<'static>> {
     let small = source.resize(cols * DOTS_X, rows * DOTS_Y, FilterType::Triangle);
     let on = dither(&small.to_luma8());
     let small = small.to_rgb8();
-    let (w, h) = small.dimensions();
+    let (width, height) = small.dimensions();
 
     // Center the picture in whole cells.
-    let used_cols = w.div_ceil(DOTS_X);
-    let used_rows = h.div_ceil(DOTS_Y);
+    let used_cols = width.div_ceil(DOTS_X);
+    let used_rows = height.div_ceil(DOTS_Y);
     let left = ((cols - used_cols) / 2) as usize;
     let top = (rows - used_rows) / 2;
     let mut lines = vec![Line::default(); top as usize];
@@ -401,23 +402,24 @@ fn render_dots(source: &DynamicImage, size: Size) -> Vec<Line<'static>> {
             for (dx, column) in BITS.iter().enumerate() {
                 for (dy, bit) in column.iter().enumerate() {
                     let (x, y) = (col * DOTS_X + dx as u32, row * DOTS_Y + dy as u32);
-                    if x < w && y < h && on[(y * w + x) as usize] {
+                    if x < width && y < height && on[(y * width + x) as usize] {
                         bits |= bit;
-                        let p = small.get_pixel(x, y).0;
-                        for (s, c) in sum.iter_mut().zip(p) {
-                            *s += u32::from(c);
+                        let pixel = small.get_pixel(x, y).0;
+                        for (channel_sum, channel) in sum.iter_mut().zip(pixel) {
+                            *channel_sum += u32::from(channel);
                         }
                         lit += 1;
                     }
                 }
             }
-            // An empty cell is a space: some fonts draw U+2800 as a box.
+            // An empty cell is a space, because some fonts draw U+2800 as a
+            // box.
             if bits == 0 {
                 spans.push(Span::raw(" "));
                 continue;
             }
             let dot = char::from_u32(0x2800 + u32::from(bits)).unwrap_or(' ');
-            let [r, g, b] = sum.map(|s| s / lit);
+            let [r, g, b] = sum.map(|channel_sum| channel_sum / lit);
             spans.push(Span::styled(
                 dot.to_string(),
                 Style::new().fg(lifted_color(r, g, b)),
@@ -428,46 +430,45 @@ fn render_dots(source: &DynamicImage, size: Size) -> Vec<Line<'static>> {
     lines
 }
 
-/// A dot's color, lifted so a dark color still shows on the dark
-/// background: a lit dot means "light here", and density already says how
+/// A dot's color, lifted so that a dark color still shows on the dark
+/// background. A lit dot means "light here", and the density already says how
 /// light.
 fn lifted_color(r: u32, g: u32, b: u32) -> Color {
     const FLOOR: u32 = 130;
     let max = r.max(g).max(b).max(1);
-    let lift = |c: u32| (c * max.max(FLOOR) / max).min(255) as u8;
+    let lift = |channel: u32| (channel * max.max(FLOOR) / max).min(255) as u8;
     Color::Rgb(lift(r), lift(g), lift(b))
 }
 
-/// Which dots are lit: the contrast is stretched to the picture's own
-/// range, then Atkinson dithering (the classic Mac look) spreads three
-/// quarters of each error to six neighbors, which keeps highlights and
-/// shadows clean instead of speckled.
+/// Which dots are lit. The contrast is stretched to the picture's own range,
+/// then Atkinson dithering spreads three quarters of each error to six
+/// neighbors, which keeps highlights and shadows clean instead of speckled.
 fn dither(image: &GrayImage) -> Vec<bool> {
-    let (w, h) = (image.width() as usize, image.height() as usize);
-    let mut px: Vec<f32> = image.pixels().map(|p| f32::from(p.0[0])).collect();
-    // Stretch between the 2nd and 98th percentile, so one stray pixel
-    // doesn't flatten the rest. A nearly flat picture is left as it is:
-    // stretching nothing would turn it all black or all white.
+    let (width, height) = (image.width() as usize, image.height() as usize);
+    let mut px: Vec<f32> = image.pixels().map(|pixel| f32::from(pixel.0[0])).collect();
+    // Stretch between the 2nd and 98th percentile, so one stray pixel doesn't
+    // flatten the rest. A nearly flat picture is left alone, because stretching
+    // it would turn it all black or all white.
     let mut sorted = px.clone();
     sorted.sort_by(f32::total_cmp);
     let low = sorted[sorted.len() / 50];
     let high = sorted[sorted.len() - 1 - sorted.len() / 50];
     if high - low >= 32.0 {
-        for p in &mut px {
-            *p = ((*p - low) / (high - low) * 255.0).clamp(0.0, 255.0);
+        for pixel in &mut px {
+            *pixel = ((*pixel - low) / (high - low) * 255.0).clamp(0.0, 255.0);
         }
     }
-    let mut on = vec![false; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let i = y * w + x;
+    let mut on = vec![false; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            let i = y * width + x;
             let lit = px[i] >= 128.0;
             on[i] = lit;
             let error = (px[i] - if lit { 255.0 } else { 0.0 }) / 8.0;
             for (dx, dy) in [(1, 0), (2, 0), (-1, 1), (0, 1), (1, 1), (0, 2)] {
                 let (nx, ny) = (x as isize + dx, y as isize + dy);
-                if nx >= 0 && (nx as usize) < w && (ny as usize) < h {
-                    px[ny as usize * w + nx as usize] += error;
+                if nx >= 0 && (nx as usize) < width && (ny as usize) < height {
+                    px[ny as usize * width + nx as usize] += error;
                 }
             }
         }
@@ -501,7 +502,7 @@ mod tests {
         image::RgbImage::new(8, 8).save(&path).unwrap();
         let mut covers = Covers::spawn(Picker::halfblocks(), || {});
         let size = Size::new(10, 5);
-        // The first look only asks for it.
+        // The first call only requests it.
         assert!(matches!(covers.show(&path, &[], size), Cover::Loading));
         assert!(wait_ready(&mut covers, &path, size));
     }
@@ -535,16 +536,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths: Vec<PathBuf> = (0..6)
             .map(|i| {
-                let p = tmp.path().join(format!("{i}.png"));
-                image::RgbImage::new(64, 64).save(&p).unwrap();
-                p
+                let path = tmp.path().join(format!("{i}.png"));
+                image::RgbImage::new(64, 64).save(&path).unwrap();
+                path
             })
             .collect();
         let mut covers = Covers::spawn(Picker::halfblocks(), || {});
         let size = Size::new(10, 5);
-        // Scroll through all of them without waiting; most get dropped.
-        for p in &paths {
-            covers.show(p, &[], size);
+        // Scroll through all of them without waiting, so most get dropped.
+        for path in &paths {
+            covers.show(path, &[], size);
         }
         assert!(wait_ready(&mut covers, &paths[5], size));
         assert!(wait_ready(&mut covers, &paths[0], size));
@@ -552,18 +553,23 @@ mod tests {
 
     // -- the dot-matrix picture --
 
-    fn picture(w: u32, h: u32, f: impl Fn(u32, u32) -> u8) -> DynamicImage {
-        DynamicImage::ImageLuma8(GrayImage::from_fn(w, h, |x, y| Luma([f(x, y)])))
+    fn picture(width: u32, height: u32, shade_at: impl Fn(u32, u32) -> u8) -> DynamicImage {
+        DynamicImage::ImageLuma8(GrayImage::from_fn(width, height, |x, y| {
+            Luma([shade_at(x, y)])
+        }))
     }
 
     fn text(line: &Line) -> String {
-        line.spans.iter().map(|s| s.content.as_ref()).collect()
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
     }
 
     #[test]
     fn fits_tall_cover_centered_in_whole_cells() {
-        // White left half, black right half; 1:2, so 10×5 cells take the
-        // full height (20 dots) and 10 dots (5 cells) across.
+        // White left half, black right half. At 1:2, 10×5 cells take the full
+        // height of 20 dots and 10 dots (5 cells) across.
         let dots = Dots::new(
             &picture(50, 100, |x, _| if x < 25 { 255 } else { 0 }),
             Size::new(10, 5),
@@ -581,13 +587,13 @@ mod tests {
 
     #[test]
     fn dithers_mid_gray_to_about_half_the_dots() {
-        // A gray ramp: after stretching, the middle is mid-gray.
+        // A gray ramp. After stretching, the middle is mid-gray.
         let on = dither(&picture(64, 64, |x, _| (x * 4) as u8).to_luma8());
         let middle: Vec<bool> = (0..64)
             .flat_map(|y| (28..36).map(move |x| (x, y)))
             .map(|(x, y)| on[y * 64 + x])
             .collect();
-        let lit = middle.iter().filter(|b| **b).count() as f32 / middle.len() as f32;
+        let lit = middle.iter().filter(|bit| **bit).count() as f32 / middle.len() as f32;
         assert!((0.35..0.65).contains(&lit), "{lit}");
     }
 

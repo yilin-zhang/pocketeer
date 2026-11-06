@@ -19,7 +19,6 @@ use crate::{
     platform::Platform,
 };
 
-/// One game in a DAT.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatEntry {
     /// The standard name, e.g. `Pokemon - Emerald Version (USA, Europe)`.
@@ -27,21 +26,19 @@ pub struct DatEntry {
     pub roms: Vec<Rom>,
 }
 
-/// One DAT file: every known game of one system.
+/// One DAT file, listing every known game of one system.
 #[derive(Debug, Clone)]
 pub struct Dat {
     pub entries: Vec<DatEntry>,
 }
 
 impl Dat {
-    /// The entry with this file; the first, if a file is listed under several
-    /// games.
+    /// The entry with this file, or the first one if several games list it.
     pub fn lookup(&self, rom: &Rom) -> Option<&DatEntry> {
         self.entries.iter().find(|entry| entry.roms.contains(rom))
     }
 
-    /// The DAT in `text`, in the clrmamepro format, which libretro and
-    /// No-Intro write.
+    /// Parses a DAT in the clrmamepro format, which libretro and No-Intro use.
     pub fn parse_clrmamepro(text: &str) -> Result<Self, ParseError> {
         let mut tokens = tokenize(text)?.into_iter().peekable();
         let blocks = parse_block(&mut tokens, 0)?;
@@ -65,59 +62,53 @@ impl Dat {
 #[error("not a DAT: {0}")]
 pub struct ParseError(String);
 
-/// A DAT a source has.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteDat {
     pub name: String,
-    /// Whatever the source uses to tell versions apart; a different string
+    /// Whatever the source uses to tell versions apart. A different string
     /// means different contents.
     pub version: String,
 }
 
-/// Where DATs come from.
 pub trait RemoteDatSource {
-    /// The source's DATs that can hold games of `platform`; none if it has
-    /// no DAT for it. Platforms whose cores run the same games can share
-    /// one.
+    /// The source's DATs that can hold games of `platform`, or none if it has
+    /// no DAT for it. Platforms whose cores run the same games can share one.
     fn systems(&self, platform: &Platform) -> &'static [&'static str];
 
-    /// Every DAT the source has now.
     fn list(&self) -> Result<Vec<RemoteDat>, SharedError>;
 
-    /// The text of the DAT called `name`.
     fn fetch(&self, name: &str) -> Result<String, SharedError>;
 
     fn parse(&self, text: &str) -> Result<Dat, ParseError>;
 }
 
-/// What a sync changed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncReport {
     /// Platforms with a DAT downloaded because it was missing or had changed.
     pub updated: Vec<Platform>,
-    /// Platforms with a DAT the source doesn't have (any more).
+    /// Platforms with a DAT the source doesn't have.
     pub missing: Vec<Platform>,
 }
 
-/// The local copy of one source's DATs, on disk and parsed in memory:
+/// The local copy of one source's DATs, on disk and parsed in memory.
 ///
 /// ```text
 /// <dir>/<DAT name>.dat
 /// <dir>/versions.json   DAT name → the version it was synced at
 /// ```
 ///
-/// Only the DATs some known platform needs are kept. The files are a cache:
-/// deleting them loses nothing a sync can't bring back.
+/// Only the DATs a known platform needs are kept. The files are a cache, so
+/// deleting them loses nothing a sync can't restore.
 pub struct DatMirror<S> {
     dir: PathBuf,
     source: S,
-    /// DAT name → DAT.
+    /// By DAT name.
     dats: HashMap<&'static str, Dat>,
 }
 
 impl<S: RemoteDatSource> DatMirror<S> {
-    /// The DATs already in `dir`, without going online; none if it is empty
-    /// or doesn't exist. A file that doesn't parse is left out, and the next
+    /// The DATs already in `dir`, read without going online. A missing or empty
+    /// folder gives none. A file that doesn't parse is left out, and the next
     /// sync replaces it.
     pub fn open(dir: &Path, source: S) -> Result<Self, SharedError> {
         let mut mirror = Self {
@@ -133,8 +124,8 @@ impl<S: RemoteDatSource> DatMirror<S> {
                 let path = mirror.dat_path(name);
                 let text = match fs::read_to_string(&path) {
                     Ok(text) => text,
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                    Err(e) => return Err(e.into()),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
                 };
                 if let Ok(dat) = mirror.source.parse(&text) {
                     mirror.dats.insert(name, dat);
@@ -144,14 +135,14 @@ impl<S: RemoteDatSource> DatMirror<S> {
         Ok(mirror)
     }
 
-    /// Brings the DATs up to date, on disk and in memory: downloads those
-    /// that are missing, didn't parse, or have a new version.
+    /// Updates the DATs on disk and in memory, downloading those that are
+    /// missing, didn't parse, or have a new version.
     pub fn sync(&mut self) -> Result<SyncReport, SharedError> {
         let listed: HashMap<String, String> = self
             .source
             .list()?
             .into_iter()
-            .map(|r| (r.name, r.version))
+            .map(|listed_dat| (listed_dat.name, listed_dat.version))
             .collect();
         let mut versions = self.versions()?;
         let mut updated = HashSet::new();
@@ -172,12 +163,12 @@ impl<S: RemoteDatSource> DatMirror<S> {
                 let dat = self
                     .source
                     .parse(&text)
-                    .map_err(|e| SharedError::BadResponse {
+                    .map_err(|error| SharedError::BadResponse {
                         from: name.into(),
-                        message: e.to_string(),
+                        message: error.to_string(),
                     })?;
-                // The DAT first, then its version: stopped in between, the
-                // next sync downloads it again.
+                // Write the DAT before its version, so that if this stops in
+                // between the next sync downloads it again.
                 write_atomically(&self.dat_path(name), text.as_bytes(), None)?;
                 versions.insert(name.to_string(), version.clone());
                 self.write_versions(&versions)?;
@@ -201,10 +192,14 @@ impl<S: RemoteDatSource> DatMirror<S> {
             .find_map(|dat| dat.lookup(rom))
     }
 
-    /// The platforms with any of these DATs.
     fn platforms_using(&self, names: &HashSet<&str>) -> Vec<Platform> {
         Platform::iter()
-            .filter(|p| self.source.systems(p).iter().any(|n| names.contains(n)))
+            .filter(|platform| {
+                self.source
+                    .systems(platform)
+                    .iter()
+                    .any(|name| names.contains(name))
+            })
             .collect()
     }
 
@@ -221,8 +216,8 @@ impl<S: RemoteDatSource> DatMirror<S> {
         let path = self.versions_path();
         match fs::read_to_string(&path) {
             Ok(text) => Ok(serde_json::from_str(&text).unwrap_or_default()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(BTreeMap::new()),
-            Err(e) => Err(e.into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -249,12 +244,12 @@ enum Value {
 fn tokenize(text: &str) -> Result<Vec<Token>, ParseError> {
     let mut tokens = Vec::new();
     let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            c if c.is_whitespace() => {}
+    while let Some(character) = chars.next() {
+        match character {
+            character if character.is_whitespace() => {}
             '(' => tokens.push(Token::Open),
             ')' => tokens.push(Token::Close),
-            // Quoted: may hold spaces, parentheses and `\"`.
+            // A quoted word may hold spaces, parentheses and `\"`.
             '"' => {
                 let mut word = String::new();
                 loop {
@@ -263,19 +258,19 @@ fn tokenize(text: &str) -> Result<Vec<Token>, ParseError> {
                         Some('\\') if matches!(chars.peek(), Some('"' | '\\')) => {
                             word.extend(chars.next());
                         }
-                        Some(c) => word.push(c),
+                        Some(character) => word.push(character),
                         None => return Err(ParseError("unterminated quote".into())),
                     }
                 }
                 tokens.push(Token::Word(word));
             }
-            c => {
-                let mut word = String::from(c);
-                while let Some(&c) = chars.peek() {
-                    if c.is_whitespace() || c == '(' || c == ')' {
+            character => {
+                let mut word = String::from(character);
+                while let Some(&character) = chars.peek() {
+                    if character.is_whitespace() || character == '(' || character == ')' {
                         break;
                     }
-                    word.push(c);
+                    word.push(character);
                     chars.next();
                 }
                 tokens.push(Token::Word(word));
@@ -285,8 +280,8 @@ fn tokenize(text: &str) -> Result<Vec<Token>, ParseError> {
     Ok(tokens)
 }
 
-/// `key value` and `key ( ... )` pairs up to the `)` that closes this block
-/// (or the end, at the top).
+/// Reads `key value` and `key ( ... )` pairs up to the `)` closing this block,
+/// or to the end at the top level.
 fn parse_block(
     tokens: &mut Peekable<vec::IntoIter<Token>>,
     depth: usize,
@@ -316,8 +311,8 @@ fn parse_block(
 }
 
 fn word_value<'a>(pairs: &'a [(String, Value)], key: &str) -> Option<&'a str> {
-    pairs.iter().find_map(|(k, v)| match v {
-        Value::Word(w) if k == key => Some(w.as_str()),
+    pairs.iter().find_map(|(pair_key, value)| match value {
+        Value::Word(word) if pair_key == key => Some(word.as_str()),
         _ => None,
     })
 }
@@ -327,8 +322,8 @@ fn parse_entry(pairs: &[(String, Value)]) -> Result<DatEntry, ParseError> {
     let name = name.to_string();
     let roms = pairs
         .iter()
-        .filter_map(|(k, v)| match v {
-            Value::Block(rom) if k == "rom" => Some(rom),
+        .filter_map(|(key, value)| match value {
+            Value::Block(rom) if key == "rom" => Some(rom),
             _ => None,
         })
         // A ROM without a size or crc (one nobody has dumped) can't be
@@ -356,11 +351,11 @@ mod tests {
     const GB: &str = r#"clrmamepro ( name "GB" ) game ( name "Tetris (World)" rom ( name "Tetris (World).gb" size 2 crc 0000000C ) )"#;
     const SGX_NEW: &str = r#"clrmamepro ( name "SGX" ) game ( name "Daimakaimura (Japan) (Rev 1)" rom ( name "x.sgx" size 8 crc 0000000B ) )"#;
 
-    /// A source held in memory, with two DATs for the PC Engine and one the
-    /// Game Boy and Game Boy Color share; it records what was fetched.
+    /// An in-memory source with two DATs for the PC Engine and one shared by
+    /// the Game Boy and Game Boy Color. It records what was fetched.
     #[derive(Clone, Default)]
     struct Fake {
-        /// DAT name → (version, text).
+        /// DAT name to version and text.
         dats: Rc<RefCell<HashMap<String, (String, String)>>>,
         fetched: Rc<RefCell<Vec<String>>>,
     }

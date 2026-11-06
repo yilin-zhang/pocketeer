@@ -9,7 +9,8 @@ use serde::de::DeserializeOwned;
 
 use crate::error::SharedError;
 
-/// How long a server gets to answer at all: what else is to be done waits.
+/// How long a server gets to accept a connection, because everything else waits
+/// for it.
 const CONNECT: Duration = Duration::from_secs(15);
 
 pub(crate) fn get(url: &str) -> Result<Vec<u8>, SharedError> {
@@ -32,8 +33,8 @@ pub(crate) fn get(url: &str) -> Result<Vec<u8>, SharedError> {
 }
 
 pub(crate) fn get_json<T: DeserializeOwned>(url: &str) -> Result<T, SharedError> {
-    serde_json::from_slice(&get(url)?).map_err(|e| SharedError::BadResponse {
+    serde_json::from_slice(&get(url)?).map_err(|error| SharedError::BadResponse {
         from: url.into(),
-        message: e.to_string(),
+        message: error.to_string(),
     })
 }

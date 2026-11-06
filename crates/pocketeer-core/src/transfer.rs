@@ -9,77 +9,65 @@ use crate::{
     library::{AddGameError, Library, LocalEntry},
 };
 
-/// What pulling a game did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PullGameOutcome {
     /// The game as it is in the library now.
     Pulled(LocalEntry),
-    /// The library has the game already, under whatever name.
+    /// The library already has the game, under whatever name.
     AlreadyHad,
 }
 
-/// What pushing a game did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PushGameOutcome {
     /// The game as it is on the device now.
     Pushed(DeviceEntry),
-    /// The device has the game already, here.
+    /// The device already has the game, at this entry.
     AlreadyThere(DeviceEntry),
 }
 
-/// Why pushing a game pushed nothing.
 #[derive(Debug, thiserror::Error)]
 pub enum PushGameError {
-    /// Another file is where the game would go on the device.
     #[error("not pushed: another file is where it would go")]
     NameTaken,
     #[error(transparent)]
     Shared(#[from] SharedError),
 }
 
-/// What pulling a save did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PullSaveOutcome {
     Pulled,
-    /// The library has a version with the same contents already.
+    /// The library already has a version with the same contents.
     AlreadyHad,
 }
 
-/// Why pulling a save pulled nothing.
 #[derive(Debug, thiserror::Error)]
 pub enum PullSaveError {
-    /// The game has no save on the device.
     #[error("no save on the device")]
     NoSave,
-    /// The library doesn't have the game.
     #[error("not in the library; pull the game first")]
     NotInLibrary,
     #[error(transparent)]
     Shared(#[from] SharedError),
 }
 
-/// What pushing a save did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PushSaveOutcome {
     /// The version pushed.
     Pushed(Save),
-    /// The device's save has the same contents already.
+    /// The device's save already has the same contents.
     AlreadyThere,
 }
 
-/// Why pushing a save pushed nothing.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PushSaveError {
-    /// The library doesn't have the game.
     #[error("not in the library")]
     NotInLibrary,
-    /// The device's save is not in the library; it was left as it is.
+    /// The device's save isn't in the library, so it was left alone.
     #[error("not pushed: the device's save isn't in the library")]
     NotBackedUp,
-    /// The library doesn't have this version of its save.
     #[error("the library has no such save")]
     NoSuchVersion,
-    /// Several versions of its save were written in the second asked for.
+    /// Several versions of the save were written in the requested second.
     #[error("more than one version of the save was written at {at}")]
     AmbiguousVersion { at: String },
     #[error(transparent)]
@@ -87,7 +75,7 @@ pub enum PushSaveError {
 }
 
 /// Copies `on_device` into the library as the game called `name`. Its save
-/// stays on the device; [`pull_save`] brings it.
+/// stays on the device until [`pull_save`] brings it.
 pub(crate) fn pull_game(
     library: &mut Library,
     device: &Device,
@@ -105,9 +93,9 @@ pub(crate) fn pull_game(
     )?))
 }
 
-/// Copies `entry` onto the device, under its name in `common/`, unless the
-/// device has it already, as its last scan found it. Its save stays in the
-/// library; [`push_save`] takes it.
+/// Copies `entry` onto the device under its name in `common/`, unless the last
+/// scan found it there already. Its save stays in the library until
+/// [`push_save`] takes it.
 pub(crate) fn push_game(
     library: &Library,
     device: &mut Device,
@@ -124,7 +112,7 @@ pub(crate) fn push_game(
     Ok(PushGameOutcome::Pushed(pushed))
 }
 
-/// Keeps `on_device`'s save in the library as a new version of its save.
+/// Keeps `on_device`'s save in the library as a new version.
 pub(crate) fn pull_save(
     library: &mut Library,
     device: &Device,
@@ -144,8 +132,8 @@ pub(crate) fn pull_save(
     })
 }
 
-/// Makes `version`, a version of the library's save for the game, the save
-/// of `on_device`.
+/// Makes `version`, a version of the game's save in the library, the save of
+/// `on_device`.
 pub(crate) fn push_save(
     library: &Library,
     device: &mut Device,
@@ -162,7 +150,11 @@ pub(crate) fn push_save(
         if there.has_same_contents_as(version) {
             return Ok(PushSaveOutcome::AlreadyThere);
         }
-        if !entry.save.as_ref().is_some_and(|h| h.contains(&there)) {
+        if !entry
+            .save
+            .as_ref()
+            .is_some_and(|history| history.contains(&there))
+        {
             return Err(PushSaveError::NotBackedUp);
         }
     }
@@ -177,8 +169,8 @@ mod tests {
     use super::*;
     use crate::files::testing::{at, put_at};
 
-    /// Tetris on a device and in a library, which has its save as `kept` if
-    /// given; the device has `save_there` as its save if given.
+    /// Tetris on a device and in a library. The library has `kept` as its save
+    /// and the device has `save_there`, each if given.
     struct Setup {
         _dirs: (tempfile::TempDir, tempfile::TempDir),
         library: Library,
@@ -217,8 +209,8 @@ mod tests {
     }
 
     /// The library's newest version of Tetris's save.
-    fn current(s: &Setup) -> Save {
-        s.library.entries()[0]
+    fn current(setup: &Setup) -> Save {
+        setup.library.entries()[0]
             .save
             .as_ref()
             .unwrap()
@@ -226,12 +218,12 @@ mod tests {
             .clone()
     }
 
-    fn kept(s: &Setup) -> Vec<u64> {
-        let entry = &s.library.entries()[0];
+    fn kept(setup: &Setup) -> Vec<u64> {
+        let entry = &setup.library.entries()[0];
         entry
             .save
             .iter()
-            .flat_map(|h| h.iter().map(|v| v.size))
+            .flat_map(|history| history.iter().map(|version| version.size))
             .collect()
     }
 
@@ -240,80 +232,99 @@ mod tests {
 
         #[test]
         fn pulls_new_save() {
-            let mut s = setup(Some(b"a"), Some(b"bb"));
-            let pulled = pull_save(&mut s.library, &s.device, &s.on_device).unwrap();
+            let mut setup = setup(Some(b"a"), Some(b"bb"));
+            let pulled = pull_save(&mut setup.library, &setup.device, &setup.on_device).unwrap();
             assert_eq!(pulled, PullSaveOutcome::Pulled);
-            assert_eq!(kept(&s), [2, 1]);
+            assert_eq!(kept(&setup), [2, 1]);
         }
 
         #[test]
         fn rejects_pull_without_save_or_game() {
-            let mut s = setup(None, None);
-            let pulled = pull_save(&mut s.library, &s.device, &s.on_device);
+            let mut without_save = setup(None, None);
+            let pulled = pull_save(
+                &mut without_save.library,
+                &without_save.device,
+                &without_save.on_device,
+            );
             assert!(matches!(pulled, Err(PullSaveError::NoSave)));
-            let mut s = setup(None, Some(b"a"));
-            fs::remove_file(s.library.root().join("roms/gba/Tetris.gba")).unwrap();
-            s.library.reload().unwrap();
-            let pulled = pull_save(&mut s.library, &s.device, &s.on_device);
+            let mut without_game = setup(None, Some(b"a"));
+            fs::remove_file(without_game.library.root().join("roms/gba/Tetris.gba")).unwrap();
+            without_game.library.reload().unwrap();
+            let pulled = pull_save(
+                &mut without_game.library,
+                &without_game.device,
+                &without_game.on_device,
+            );
             assert!(matches!(pulled, Err(PullSaveError::NotInLibrary)));
         }
 
         #[test]
         fn pushes_kept_version_over_backed_up_save() {
-            let mut s = setup(Some(b"a"), Some(b"bb"));
-            pull_save(&mut s.library, &s.device, &s.on_device).unwrap();
-            let old = s.library.entries()[0].save.as_ref().unwrap().versions[0].clone();
-            let pushed = push_save(&s.library, &mut s.device, &s.on_device, &old).unwrap();
+            let mut setup = setup(Some(b"a"), Some(b"bb"));
+            pull_save(&mut setup.library, &setup.device, &setup.on_device).unwrap();
+            let old = setup.library.entries()[0].save.as_ref().unwrap().versions[0].clone();
+            let pushed =
+                push_save(&setup.library, &mut setup.device, &setup.on_device, &old).unwrap();
             assert_eq!(pushed, PushSaveOutcome::Pushed(old.clone()));
-            let now = s.device.read_save(&s.on_device).unwrap().unwrap();
+            let now = setup.device.read_save(&setup.on_device).unwrap().unwrap();
             assert_eq!(now, old);
             // The device now holds a version the library has.
-            let pulled = pull_save(&mut s.library, &s.device, &s.on_device).unwrap();
+            let pulled = pull_save(&mut setup.library, &setup.device, &setup.on_device).unwrap();
             assert_eq!(pulled, PullSaveOutcome::AlreadyHad);
         }
 
         #[test]
         fn rejects_push_over_save_not_backed_up() {
-            let mut s = setup(Some(b"a"), Some(b"bb"));
-            let kept = current(&s);
-            let pushed = push_save(&s.library, &mut s.device, &s.on_device, &kept);
+            let mut setup = setup(Some(b"a"), Some(b"bb"));
+            let kept = current(&setup);
+            let pushed = push_save(&setup.library, &mut setup.device, &setup.on_device, &kept);
             assert!(matches!(pushed, Err(PushSaveError::NotBackedUp)));
-            let now = s.device.read_save(&s.on_device).unwrap().unwrap();
+            let now = setup.device.read_save(&setup.on_device).unwrap().unwrap();
             assert_eq!(now.size, 2);
         }
 
         #[test]
         fn pushes_onto_device_without_save() {
-            let mut s = setup(Some(b"a"), None);
-            let kept = current(&s);
-            let pushed = push_save(&s.library, &mut s.device, &s.on_device, &kept).unwrap();
+            let mut setup = setup(Some(b"a"), None);
+            let kept = current(&setup);
+            let pushed =
+                push_save(&setup.library, &mut setup.device, &setup.on_device, &kept).unwrap();
             assert_eq!(pushed, PushSaveOutcome::Pushed(kept.clone()));
-            assert_eq!(s.device.read_save(&s.on_device).unwrap(), Some(kept));
+            assert_eq!(
+                setup.device.read_save(&setup.on_device).unwrap(),
+                Some(kept)
+            );
         }
 
         #[test]
         fn reports_already_there_when_device_has_same_save() {
-            let mut s = setup(Some(b"a"), Some(b"a"));
-            let kept = current(&s);
-            let pushed = push_save(&s.library, &mut s.device, &s.on_device, &kept).unwrap();
+            let mut setup = setup(Some(b"a"), Some(b"a"));
+            let kept = current(&setup);
+            let pushed =
+                push_save(&setup.library, &mut setup.device, &setup.on_device, &kept).unwrap();
             assert_eq!(pushed, PushSaveOutcome::AlreadyThere);
         }
 
         #[test]
         fn rejects_push_of_game_not_in_library() {
-            let mut s = setup(Some(b"a"), None);
-            let kept = current(&s);
-            fs::remove_file(s.library.root().join("roms/gba/Tetris.gba")).unwrap();
-            s.library.reload().unwrap();
-            let pushed = push_save(&s.library, &mut s.device, &s.on_device, &kept);
+            let mut setup = setup(Some(b"a"), None);
+            let kept = current(&setup);
+            fs::remove_file(setup.library.root().join("roms/gba/Tetris.gba")).unwrap();
+            setup.library.reload().unwrap();
+            let pushed = push_save(&setup.library, &mut setup.device, &setup.on_device, &kept);
             assert!(matches!(pushed, Err(PushSaveError::NotInLibrary)));
         }
 
         #[test]
         fn rejects_version_not_in_library() {
-            let mut s = setup(Some(b"a"), None);
+            let mut setup = setup(Some(b"a"), None);
             let unknown = Save::from_bytes(b"zzz", at(5));
-            let pushed = push_save(&s.library, &mut s.device, &s.on_device, &unknown);
+            let pushed = push_save(
+                &setup.library,
+                &mut setup.device,
+                &setup.on_device,
+                &unknown,
+            );
             assert!(matches!(pushed, Err(PushSaveError::NoSuchVersion)));
         }
     }
@@ -323,70 +334,79 @@ mod tests {
 
         #[test]
         fn pulls_under_given_name() {
-            let mut s = setup(None, Some(b"a"));
-            fs::remove_file(s.library.root().join("roms/gba/Tetris.gba")).unwrap();
-            s.library.reload().unwrap();
+            let mut setup = setup(None, Some(b"a"));
+            fs::remove_file(setup.library.root().join("roms/gba/Tetris.gba")).unwrap();
+            setup.library.reload().unwrap();
             let pulled = pull_game(
-                &mut s.library,
-                &s.device,
-                &s.on_device,
+                &mut setup.library,
+                &setup.device,
+                &setup.on_device,
                 "Tetris (World).gba",
             );
             assert!(matches!(pulled.unwrap(), PullGameOutcome::Pulled(_)));
-            let entry = &s.library.entries()[0];
+            let entry = &setup.library.entries()[0];
             assert_eq!(entry.name, "Tetris (World).gba");
-            assert_eq!(entry.game, s.on_device.game);
+            assert_eq!(entry.game, setup.on_device.game);
             assert_eq!(entry.save, None);
         }
 
         #[test]
         fn skips_pull_of_game_in_library() {
-            let mut s = setup(None, None);
-            let pulled = pull_game(&mut s.library, &s.device, &s.on_device, "Other.gba");
+            let mut setup = setup(None, None);
+            let pulled = pull_game(
+                &mut setup.library,
+                &setup.device,
+                &setup.on_device,
+                "Other.gba",
+            );
             assert_eq!(pulled.unwrap(), PullGameOutcome::AlreadyHad);
-            assert_eq!(s.library.entries().len(), 1);
+            assert_eq!(setup.library.entries().len(), 1);
         }
 
         #[test]
         fn pushes_game_device_lacks() {
-            let mut s = setup(None, None);
-            fs::remove_file(s.device.root().join("Assets/gba/common/Tetris.gba")).unwrap();
-            s.device.scan().unwrap();
-            let entry = &s.library.entries()[0];
-            let pushed = push_game(&s.library, &mut s.device, entry).unwrap();
+            let mut setup = setup(None, None);
+            fs::remove_file(setup.device.root().join("Assets/gba/common/Tetris.gba")).unwrap();
+            setup.device.scan().unwrap();
+            let entry = &setup.library.entries()[0];
+            let pushed = push_game(&setup.library, &mut setup.device, entry).unwrap();
             assert!(matches!(pushed, PushGameOutcome::Pushed(_)));
         }
 
         #[test]
         fn reports_game_device_has_in_any_folder() {
-            let mut s = setup(None, None);
-            fs::create_dir_all(s.device.root().join("Assets/gba/common/Puzzle")).unwrap();
+            let mut setup = setup(None, None);
+            fs::create_dir_all(setup.device.root().join("Assets/gba/common/Puzzle")).unwrap();
             fs::rename(
-                s.device.root().join("Assets/gba/common/Tetris.gba"),
-                s.device.root().join("Assets/gba/common/Puzzle/Tetris.gba"),
+                setup.device.root().join("Assets/gba/common/Tetris.gba"),
+                setup
+                    .device
+                    .root()
+                    .join("Assets/gba/common/Puzzle/Tetris.gba"),
             )
             .unwrap();
-            s.device.scan().unwrap();
-            let entries = s.device.entries().to_vec();
-            let entry = &s.library.entries()[0];
-            let pushed = push_game(&s.library, &mut s.device, entry).unwrap();
+            setup.device.scan().unwrap();
+            let entries = setup.device.entries().to_vec();
+            let entry = &setup.library.entries()[0];
+            let pushed = push_game(&setup.library, &mut setup.device, entry).unwrap();
             assert_eq!(pushed, PushGameOutcome::AlreadyThere(entries[0].clone()));
         }
 
         #[test]
         fn rejects_push_over_other_file() {
-            let mut s = setup(None, None);
+            let mut setup = setup(None, None);
             put_at(
-                s.device.root(),
+                setup.device.root(),
                 "Assets/gba/common/Tetris.gba",
                 b"another",
                 1,
             );
-            s.device.scan().unwrap();
-            let entry = &s.library.entries()[0];
-            let pushed = push_game(&s.library, &mut s.device, entry);
+            setup.device.scan().unwrap();
+            let entry = &setup.library.entries()[0];
+            let pushed = push_game(&setup.library, &mut setup.device, entry);
             assert!(matches!(pushed, Err(PushGameError::NameTaken)));
-            let on_disk = fs::read(s.device.root().join("Assets/gba/common/Tetris.gba")).unwrap();
+            let on_disk =
+                fs::read(setup.device.root().join("Assets/gba/common/Tetris.gba")).unwrap();
             assert_eq!(on_disk, b"another");
         }
     }

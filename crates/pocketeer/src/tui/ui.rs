@@ -1,4 +1,4 @@
-//! Drawing: a function of the `App`, and the palette it draws in.
+//! Draws the `App`, and defines the palette.
 
 use std::{
     path::Path,
@@ -31,15 +31,15 @@ use super::{
     },
     covers::{self, Cover},
     path_input::{PathEntry, PathInput},
-    worker::Row,
+    worker::GamesTableRow,
 };
 
 /// Width of the label column in the details.
 const LABEL: usize = 10;
 
-/// The palette. Analogue OS is black and white, so the UI is grays; color
-/// is kept for state, so that it means something when it shows up. Indexed
-/// colors render the same in every 256-color terminal.
+/// The palette. Analogue OS is black and white, so the UI is gray, and color is
+/// kept for state so that it means something when it appears. Indexed colors
+/// render the same in every 256-color terminal.
 #[derive(Debug, Clone, Copy)]
 enum Palette {
     // Grays, from text to background.
@@ -53,7 +53,7 @@ enum Palette {
     Good,
     Warn,
     Bad,
-    // Keycap tints by what a key does: muted, at one lightness, so that a
+    // Keycap tints by what a key changes, muted and at one lightness, so a
     // legend reads as one bar with a few soft blocks.
     KeyLibrary,
     KeyDevice,
@@ -87,8 +87,8 @@ impl Palette {
     }
 }
 
-/// A platform as the table shows it: its id in capitals, in a color of its
-/// own. The colors are soft, so they don't read as a state.
+/// A platform as the table shows it, with its id in capitals in a color of its
+/// own. The colors are soft so that they don't read as a state.
 fn platform_cell(platform: &Platform) -> Cell<'static> {
     const OTHERS: [u8; 6] = [110, 146, 182, 144, 116, 181];
     let id = platform.id();
@@ -109,8 +109,8 @@ fn platform_cell(platform: &Platform) -> Cell<'static> {
     Cell::from(id.to_uppercase()).style(Style::new().fg(Color::Indexed(color)))
 }
 
-/// The selected row and the focused button: one solid white bar, like a
-/// hardware menu.
+/// The style of the selected row and the focused button, a solid white bar like
+/// a hardware menu.
 fn selected_style() -> Style {
     Style::new()
         .bg(Palette::Ink.color())
@@ -118,13 +118,13 @@ fn selected_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-/// The selected row when it is marked too: a dimmer bar, to tell it from one
-/// that isn't.
+/// The selected row when it is also marked, a dimmer bar to tell it from an
+/// unmarked one.
 fn selected_and_marked_style() -> Style {
     selected_style().bg(Palette::Muted.color())
 }
 
-/// A panel: rounded hairline border, small muted title.
+/// A panel with a rounded hairline border and a small muted title.
 fn panel_block(title: impl Into<String>) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
@@ -146,12 +146,12 @@ fn keycap(key: &str, tint: Palette) -> Span<'static> {
     )
 }
 
-/// One of four frames, by the clock, for "something is running".
+/// One of four frames, by the clock, showing that something is running.
 fn spinner_frame() -> &'static str {
     const FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis());
+        .map_or(0, |elapsed| elapsed.as_millis());
     FRAMES[((ms / 150) % 4) as usize]
 }
 
@@ -276,17 +276,17 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// The width of the column naming what is in the rows: as wide as the longest
-/// name, and the first to give way in a narrow terminal. The other columns follow
-/// right after it.
+/// The width of the column naming what is in the rows. It is as wide as the
+/// longest name and gives way first in a narrow terminal, and the other columns
+/// follow right after it.
 fn names_column_width(header: &str, names: impl Iterator<Item = String>) -> Constraint {
     let longest = names.map(|name| Span::raw(name).width()).max();
     let width = longest.unwrap_or(0).max(header.len());
     Constraint::Max(width as u16)
 }
 
-/// The table of a page, so that every page's columns start at the same place:
-/// the room for the selection stays when nothing is selected.
+/// The table of a page. The room for the selection stays when nothing is
+/// selected, so every page's columns start at the same place.
 fn page_table<'a>(
     title: &'static str,
     header: impl IntoIterator<Item = &'a str>,
@@ -301,19 +301,19 @@ fn page_table<'a>(
         .block(panel_block(title))
 }
 
-/// How many updates there are, or why the inventory can't be had.
+/// Shows how many updates there are, or why the inventory can't be fetched.
 fn draw_cores_status(frame: &mut Frame, app: &App, area: Rect) {
     let Some(cores) = app.cores.core_list() else {
         return;
     };
-    let updates = cores.rows.iter().filter(|r| r.has_update()).count();
+    let updates = cores.rows.iter().filter(|row| row.has_update()).count();
     let line = match (&cores.inventory_failure, updates) {
         (Some(failure), _) => {
             Palette::Warn.span(format!(" couldn't get the cores to install: {failure}"))
         }
         (None, 0) => Palette::Faint.span(" every core is up to date"),
         (None, 1) => Palette::Muted.span(" 1 update"),
-        (None, n) => Palette::Muted.span(format!(" {n} updates")),
+        (None, update_count) => Palette::Muted.span(format!(" {update_count} updates")),
     };
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -331,7 +331,7 @@ fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
         rows,
         [
             Constraint::Length(9),
-            names_column_width("CORE", cores.rows.iter().map(|r| r.id().to_string())),
+            names_column_width("CORE", cores.rows.iter().map(|row| row.id().to_string())),
             Constraint::Length(14),
             Constraint::Length(10),
         ],
@@ -352,7 +352,9 @@ fn core_table_row(row: &CoreRow) -> TableRow<'static> {
         Some(Some(version)) if row.has_update() => Cell::from(version).style(Palette::Warn.style()),
         Some(Some(version)) => Cell::from(version).style(Palette::Good.style()),
     };
-    let latest = row.latest().map_or(String::new(), |l| l.version.clone());
+    let latest = row
+        .latest()
+        .map_or(String::new(), |latest| latest.version.clone());
     TableRow::new([
         platform,
         Cell::from(row.id().to_string()),
@@ -361,20 +363,21 @@ fn core_table_row(row: &CoreRow) -> TableRow<'static> {
     ])
 }
 
-/// How many files aren't right: in red if a core can't run because of them.
+/// Shows how many files aren't right, in red if a core can't run because of
+/// them.
 fn draw_bios_status(frame: &mut Frame, app: &App, area: Rect) {
     let rows = app.bios.rows();
-    let missing = |r: &&BiosRow| r.status == BiosStatus::Missing;
-    let is_wrong = |r: &&BiosRow| matches!(r.status, BiosStatus::WrongSize { .. });
+    let missing = |row: &&BiosRow| row.status == BiosStatus::Missing;
+    let is_wrong = |row: &&BiosRow| matches!(row.status, BiosStatus::WrongSize { .. });
     let wrong = rows.iter().filter(is_wrong).count();
     let line = if app.device_root().is_none() {
         Palette::Faint.span(" no device")
     } else if rows.is_empty() {
         Palette::Faint.span(" no core on the device needs a file")
-    } else if rows.iter().all(|r| r.status == BiosStatus::Present) {
+    } else if rows.iter().all(|row| row.status == BiosStatus::Present) {
         Palette::Faint.span(" every file is there")
     } else {
-        let palette = if wrong > 0 || rows.iter().filter(missing).any(|r| r.is_required()) {
+        let palette = if wrong > 0 || rows.iter().filter(missing).any(|row| row.is_required()) {
             Palette::Bad
         } else {
             Palette::Warn
@@ -387,7 +390,11 @@ fn draw_bios_status(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_bios(frame: &mut Frame, app: &mut App, area: Rect) {
     let rows: Vec<TableRow> = app.bios.rows().iter().map(bios_table_row).collect();
-    let files = app.bios.rows().iter().map(|r| r.path.display().to_string());
+    let files = app
+        .bios
+        .rows()
+        .iter()
+        .map(|row| row.path.display().to_string());
     let table = page_table(
         "BIOS",
         ["PLATFORM", "FILE", "STATUS", "NEEDED BY"],
@@ -443,7 +450,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let rows: Vec<TableRow> = app
         .games
         .visible_rows()
-        .map(|r| game_table_row(app, r, compact))
+        .map(|row| game_table_row(app, row, compact))
         .collect();
     let table = if compact {
         page_table(
@@ -480,23 +487,25 @@ fn centered_cell(text: &'static str) -> Cell<'static> {
     Cell::from(Text::from(text).centered())
 }
 
-fn game_table_row(app: &App, row: &Row, compact: bool) -> TableRow<'static> {
+fn game_table_row(app: &App, row: &GamesTableRow, compact: bool) -> TableRow<'static> {
     let name = Cell::from(name_of(row));
     let mut cells = match row {
-        Row::Game { row, .. } => {
+        GamesTableRow::Game { row, .. } => {
             let place = match row {
                 GameRow::Both { .. } => Cell::from("lib + device").style(Palette::Good.style()),
                 GameRow::InLibrary(_) => Cell::from("lib"),
                 GameRow::OnDevice(_) => Cell::from("device"),
             };
             let art = match row.local_entry() {
-                Some(l) if l.cover_path.is_some() => {
+                Some(local) if local.cover_path.is_some() => {
                     centered_cell("▣").style(Palette::Good.style())
                 }
                 Some(_) => centered_cell("–").style(Palette::Muted.style()),
                 None => Cell::from(""),
             };
-            let has_device_save = row.device_entry().is_some_and(|d| d.save.is_some());
+            let has_device_save = row
+                .device_entry()
+                .is_some_and(|on_device| on_device.save.is_some());
             let save = if row.has_new_save_on_device() {
                 centered_cell("←").style(Palette::Warn.style())
             } else if has_device_save {
@@ -509,15 +518,15 @@ fn game_table_row(app: &App, row: &Row, compact: bool) -> TableRow<'static> {
             let platform = platform_cell(&row.game().platform);
             vec![platform, name, place, art, save]
         }
-        Row::OrphanInLibrary(o) => vec![
-            platform_cell(&o.platform),
+        GamesTableRow::OrphanInLibrary(orphan) => vec![
+            platform_cell(&orphan.platform),
             name,
             Cell::from("lib save"),
             Cell::from(""),
             centered_cell("?"),
         ],
-        Row::OrphanOnDevice(o) => vec![
-            platform_cell(&o.platform),
+        GamesTableRow::OrphanOnDevice(orphan) => vec![
+            platform_cell(&orphan.platform),
             name,
             Cell::from("device save"),
             Cell::from(""),
@@ -529,9 +538,9 @@ fn game_table_row(app: &App, row: &Row, compact: bool) -> TableRow<'static> {
     }
     let marked = Style::new().bg(Palette::Rule.color());
     let style = match (row, app.games.is_marked(row)) {
-        (Row::Game { .. }, false) => Style::new(),
-        (Row::Game { .. }, true) => marked,
-        // Gray all over: they are saves with no game.
+        (GamesTableRow::Game { .. }, false) => Style::new(),
+        (GamesTableRow::Game { .. }, true) => marked,
+        // Gray all over, because they are saves with no game.
         (_, false) => Palette::Faint.style(),
         // Lighter than that, to show on the mark's gray.
         (_, true) => marked.fg(Palette::Muted.color()),
@@ -540,19 +549,22 @@ fn game_table_row(app: &App, row: &Row, compact: bool) -> TableRow<'static> {
 }
 
 fn draw_cover(frame: &mut Frame, app: &mut App, area: Rect) {
-    let local = app.games.selected_row().and_then(Row::local_entry);
-    let path = local.and_then(|l| l.cover_path.clone());
+    let local = app
+        .games
+        .selected_row()
+        .and_then(GamesTableRow::local_entry);
+    let path = local.and_then(|local| local.cover_path.clone());
     let around = app.games.covers_around();
     let block = panel_block("COVER");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(path) = path else {
         let (what, keys): (_, &[KeyHint]) = match app.games.selected_row() {
-            Some(Row::Game {
+            Some(GamesTableRow::Game {
                 row: GameRow::OnDevice(_),
                 ..
             }) => ("on the device only", &[]),
-            Some(Row::Game { .. }) => (
+            Some(GamesTableRow::Game { .. }) => (
                 "no cover yet",
                 &[("f", "download it"), ("c", "use an image file")],
             ),
@@ -580,8 +592,8 @@ fn draw_cover(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// Where a cover would be: a dot-matrix field, the Pocket's screen, with a
-/// short line and the keys that give it a cover in the middle.
+/// Where a cover would be, drawn as a dot-matrix field like the Pocket's
+/// screen, with a short line and the keys that add a cover in the middle.
 fn draw_cover_placeholder(frame: &mut Frame, area: Rect, what: &str, keys: &[KeyHint]) {
     let dots: Vec<Line> = (0..area.height)
         .map(|y| {
@@ -602,7 +614,11 @@ fn draw_cover_placeholder(frame: &mut Frame, area: Rect, what: &str, keys: &[Key
             Palette::Muted.span(format!(" {what}")),
         ]));
     }
-    let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0);
+    let width = lines
+        .iter()
+        .map(|line| line.width() as u16)
+        .max()
+        .unwrap_or(0);
     let width = width.min(area.width);
     let height = lines.len() as u16;
     let text = Rect {
@@ -618,7 +634,7 @@ fn draw_cover_placeholder(frame: &mut Frame, area: Rect, what: &str, keys: &[Key
 fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines = Vec::new();
     match app.games.selected_row() {
-        Some(Row::Game {
+        Some(GamesTableRow::Game {
             row, standard_name, ..
         }) => {
             if let Some(local) = row.local_entry() {
@@ -641,24 +657,24 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
                 match (row.saves_kept(), row.has_new_save_on_device()) {
                     (0, false) => "none".to_string(),
                     (0, true) => "on the device, not backed up".to_string(),
-                    (n, false) => format!("{n} kept"),
-                    (n, true) => format!("{n} kept; a newer one on the device"),
+                    (saves_kept, false) => format!("{saves_kept} kept"),
+                    (saves_kept, true) => format!("{saves_kept} kept; a newer one on the device"),
                 },
             ));
         }
-        Some(Row::OrphanInLibrary(o)) => {
-            lines.push(labeled_text("Saves of", o.stem.clone()));
-            lines.push(labeled_text("Kept", o.save.iter().count().to_string()));
-            lines.push(labeled_text("Newest", o.save.current.timestamp()));
+        Some(GamesTableRow::OrphanInLibrary(orphan)) => {
+            lines.push(labeled_text("Saves of", orphan.stem.clone()));
+            lines.push(labeled_text("Kept", orphan.save.iter().count().to_string()));
+            lines.push(labeled_text("Newest", orphan.save.current.timestamp()));
             lines.push(Line::default());
             lines.push(Line::from(Palette::Muted.span(
                 "The library has no game of this name. A game put there under it has them again.",
             )));
         }
-        Some(Row::OrphanOnDevice(o)) => {
-            lines.push(labeled_text("Save", o.path.display().to_string()));
-            lines.push(labeled_text("Size", format!("{} bytes", o.save.size)));
-            lines.push(labeled_text("Written", o.save.timestamp()));
+        Some(GamesTableRow::OrphanOnDevice(orphan)) => {
+            lines.push(labeled_text("Save", orphan.path.display().to_string()));
+            lines.push(labeled_text("Size", format!("{} bytes", orphan.save.size)));
+            lines.push(labeled_text("Written", orphan.save.timestamp()));
             lines.push(Line::default());
             lines.push(Line::from(Palette::Muted.span(
                 "The device has no game at this path. The Pocket gives it to any game put there.",
@@ -676,8 +692,11 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize) {
     let versions = app.games.selected_save_versions();
-    let on_device = app.games.selected_row().and_then(Row::device_entry);
-    let on_device = on_device.and_then(|d| d.save.clone());
+    let on_device = app
+        .games
+        .selected_row()
+        .and_then(GamesTableRow::device_entry);
+    let on_device = on_device.and_then(|on_device| on_device.save.clone());
     let block = panel_block(match app.games.selected_row() {
         Some(row) => format!("SAVES OF {}", name_of(row)),
         None => "SAVES".to_string(),
@@ -687,7 +706,9 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize)
     let [top, list] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
     let device_line = match &on_device {
         Some(save) => {
-            let kept = versions.iter().any(|v| v.has_same_contents_as(save));
+            let kept = versions
+                .iter()
+                .any(|version| version.has_same_contents_as(save));
             let state = if kept {
                 Palette::Good.span("  backed up")
             } else {
@@ -712,10 +733,10 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize)
     let rows: Vec<TableRow> = versions
         .iter()
         .enumerate()
-        .map(|(i, v)| {
+        .map(|(i, version)| {
             let on_it = on_device
                 .as_ref()
-                .is_some_and(|d| d.has_same_contents_as(v));
+                .is_some_and(|device_save| device_save.has_same_contents_as(version));
             let note = match (i, on_it) {
                 (0, true) => "newest, on the device",
                 (0, false) => "newest",
@@ -723,8 +744,8 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize)
                 _ => "",
             };
             TableRow::new(vec![
-                Cell::from(v.timestamp()),
-                Cell::from(Text::from(format!("{} bytes", v.size)).right_aligned()),
+                Cell::from(version.timestamp()),
+                Cell::from(Text::from(format!("{} bytes", version.size)).right_aligned()),
                 Cell::from(note).style(Palette::Muted.style()),
             ])
         })
@@ -807,14 +828,14 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(general_line), general_keys);
 }
 
-/// A key and what it does; [`NO_KEY`] leaves its place in the grid empty.
+/// A key and what it does. [`NO_KEY`] leaves its place in the grid empty.
 type KeyHint = (&'static str, &'static str);
 
 const NO_KEY: KeyHint = ("", "");
 
-/// The keys to show, by what they change. They are drawn as a grid, so a key
-/// sits above the same key with Shift. Each row stays as it is, whatever is
-/// selected: a key that doesn't apply says why when pressed.
+/// The keys to show, by what they change. They are drawn as a grid so that a
+/// key sits above the same key with Shift. Rows don't change with the
+/// selection, and a key that doesn't apply says why when pressed.
 #[derive(Default)]
 struct Legend {
     library: Vec<KeyHint>,
@@ -822,7 +843,6 @@ struct Legend {
     general: Vec<KeyHint>,
 }
 
-/// What the keys do here.
 fn legend(app: &App) -> Legend {
     if app.games.is_searching() {
         return only_general(vec![("↵", "done"), ("Esc", "clear")]);
@@ -909,9 +929,9 @@ fn only_general(general: Vec<KeyHint>) -> Legend {
     }
 }
 
-/// The legend's rows, with a tag each and the keys in columns as wide as the
-/// widest key in them. Columns that don't fit in `width` are left out from the
-/// end, rather than cut mid-word; a row with no keys is empty.
+/// The legend's rows, each with a tag and its keys in columns as wide as their
+/// widest key. Columns that don't fit in `width` are left out from the end
+/// rather than cut mid-word, and a row with no keys is empty.
 fn legend_lines(legend: &Legend, width: usize) -> [Line<'static>; 3] {
     const COLUMN_GAP: usize = 2;
     fn cell_width((key, what): &KeyHint) -> usize {
@@ -978,8 +998,8 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-/// A window of at most this size in the middle of the screen; what goes inside
-/// it.
+/// Draws a window of at most this size in the middle of the screen and returns
+/// the area inside it.
 fn draw_window(frame: &mut Frame, width: u16, height: u16, title: &str, border: Palette) -> Rect {
     let rect = centered_rect(frame.area(), width, height);
     frame.render_widget(Clear, rect);
@@ -995,7 +1015,6 @@ fn draw_window(frame: &mut Frame, width: u16, height: u16, title: &str, border: 
     inner
 }
 
-/// What a window that takes a file ends with.
 fn import_buttons(action: &str) -> Paragraph<'static> {
     Paragraph::new(Line::from(vec![
         Span::styled(format!(" {action} "), selected_style()),
@@ -1082,15 +1101,15 @@ fn draw_platform_prompt(frame: &mut Frame, choice: &PlatformPrompt) {
     frame.render_widget(import_buttons("Import"), buttons);
 }
 
-/// ` > path`, with the cursor showing, and the text before it cut from the
-/// left when it doesn't fit.
+/// ` > path` with the cursor showing. The text before the cursor is cut from
+/// the left when it doesn't fit.
 fn path_line(input: &PathInput, width: usize) -> Line<'static> {
     let (before, after) = input.text_around_cursor();
     typed_line(before, &after, width)
 }
 
-/// ` > text`, with the cursor showing, and what is before it cut from the left
-/// when it doesn't fit.
+/// ` > text` with the cursor showing. The text before the cursor is cut from
+/// the left when it doesn't fit.
 fn typed_line(before: String, after: &str, width: usize) -> Line<'static> {
     let room = width.saturating_sub(4);
     let shown = before.chars().count().saturating_sub(room);
@@ -1131,7 +1150,7 @@ fn match_lines(input: &PathInput, area: Rect) -> Vec<Line<'static>> {
     lines
 }
 
-/// A match: what is typed stands out in it, and the one picked is the
+/// A match with the typed characters highlighted. The picked one is the
 /// selection bar, all the way across `width`.
 fn match_line(entry: &PathEntry, typed: &str, picked: bool, width: usize) -> Line<'static> {
     let (base, hit) = if picked {
@@ -1148,9 +1167,9 @@ fn match_line(entry: &PathEntry, typed: &str, picked: bool, width: usize) -> Lin
     let name = &entry.name;
     let mut spans = vec![Span::styled(if picked { " ▸ " } else { "   " }, base)];
     let hits = entry.matched_positions(typed);
-    for (i, c) in name.chars().enumerate() {
+    for (i, character) in name.chars().enumerate() {
         let style = if hits.contains(&i) { hit } else { base };
-        spans.push(Span::styled(c.to_string(), style));
+        spans.push(Span::styled(character.to_string(), style));
     }
     if entry.is_dir {
         spans.push(Span::styled("/", base));
@@ -1164,7 +1183,7 @@ fn draw_dialog(frame: &mut Frame, app: &App) {
     let Some(dialog) = app.dialog() else {
         return;
     };
-    let longest = dialog.lines.iter().map(|l| l.chars().count()).max();
+    let longest = dialog.lines.iter().map(|line| line.chars().count()).max();
     let width = longest.unwrap_or(0).max(40) as u16 + 6;
     let height = dialog.lines.len() as u16 + 5;
     let border = if dialog.is_irreversible {
@@ -1178,7 +1197,7 @@ fn draw_dialog(frame: &mut Frame, app: &App) {
     let lines: Vec<Line> = dialog
         .lines
         .iter()
-        .map(|l| Line::from(Span::raw(format!(" {l}"))))
+        .map(|line| Line::from(Span::raw(format!(" {line}"))))
         .collect();
     frame.render_widget(Paragraph::new(lines), text);
     let mut spans = Vec::new();

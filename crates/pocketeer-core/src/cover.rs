@@ -15,8 +15,8 @@ use crate::{error::SharedError, files::write_atomically, platform::Platform};
 pub const COVER_FORMATS: [ImageFormat; 3] =
     [ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::WebP];
 
-/// A game's cover image, kept as the file it came in. Drawing it is the
-/// front end's job; this only knows what format it is.
+/// A game's cover image, kept as the file it came in. Drawing it is up to the
+/// front end.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cover {
     bytes: Vec<u8>,
@@ -36,23 +36,20 @@ impl Cover {
         self.format
     }
 
-    /// The file as it came.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 }
 
-/// Where covers come from.
 pub trait RemoteCoverSource {
-    /// The source's systems that can have covers of `platform`'s games;
+    /// The source's systems that may have covers for `platform`'s games, or
     /// none if it has no covers for it.
     fn systems(&self, platform: &Platform) -> &'static [&'static str];
 
-    /// Which version of `system`'s covers the source has now; a different
-    /// string means different covers.
+    /// The current version of `system`'s covers. A different string means
+    /// different covers.
     fn version(&self, system: &str) -> Result<String, SharedError>;
 
-    /// The name of every cover of `system` at `version`.
     fn names(&self, system: &str, version: &str) -> Result<Vec<String>, SharedError>;
 
     /// What the cover of the game with the standard name `game_name` is
@@ -68,15 +65,15 @@ struct Listed {
     names: HashSet<String>,
 }
 
-/// Which covers a source has, kept in a file so that a system's list is
-/// downloaded again only when it has changed. It only saves time, so a file
-/// that can't be read is empty and one that can't be written is not written.
+/// Which covers a source has, cached in a file so a system's list is only
+/// downloaded again when it changes. The file only saves time, so one that
+/// can't be read counts as empty and a failed write is ignored.
 pub struct CoverIndex<S> {
     path: PathBuf,
     source: S,
-    /// System → its covers, as last listed.
+    /// The covers of each system, as last listed.
     systems: HashMap<String, Listed>,
-    /// The systems whose version was asked for since this was opened.
+    /// The systems whose version was checked since this was opened.
     checked: HashSet<&'static str>,
 }
 
@@ -95,10 +92,11 @@ impl<S: RemoteCoverSource> CoverIndex<S> {
         }
     }
 
-    /// The cover of the game of `platform` with the standard name
-    /// `game_name`; none if the source has none. Each system's version is
-    /// asked for once while this is open, so the lists may be as old as
-    /// that.
+    /// The cover of `platform`'s game with the standard name `game_name`, or
+    /// none if the source doesn't have one.
+    ///
+    /// Each system's version is checked once while this is open, so the lists
+    /// may be that old.
     pub fn fetch(
         &mut self,
         platform: &Platform,
@@ -114,7 +112,8 @@ impl<S: RemoteCoverSource> CoverIndex<S> {
         Ok(None)
     }
 
-    /// Brings `system`'s list up to date, if it wasn't since this was opened.
+    /// Updates `system`'s list, unless that has already happened since this was
+    /// opened.
     fn update_list_of(&mut self, system: &'static str) -> Result<(), SharedError> {
         if self.checked.contains(system) {
             return Ok(());
@@ -123,7 +122,7 @@ impl<S: RemoteCoverSource> CoverIndex<S> {
         if self
             .systems
             .get(system)
-            .is_none_or(|l| l.version != version)
+            .is_none_or(|listing| listing.version != version)
         {
             let names = self.source.names(system, &version)?;
             let listed = Listed {
@@ -168,8 +167,8 @@ mod tests {
         assert_eq!(Cover::from_bytes(b"hello".to_vec()), None);
     }
 
-    /// A source held in memory, with two systems for the PC Engine; it
-    /// records what it was asked.
+    /// An in-memory source with two systems for the PC Engine. It records the
+    /// requests it receives.
     #[derive(Clone, Default)]
     struct Fake {
         systems: Rc<RefCell<HashMap<String, Listed>>>,
@@ -180,12 +179,12 @@ mod tests {
         fn set(&self, system: &str, version: &str, names: &[&str]) {
             let listed = Listed {
                 version: version.into(),
-                names: names.iter().map(|n| n.to_string()).collect(),
+                names: names.iter().map(|name| name.to_string()).collect(),
             };
             self.systems.borrow_mut().insert(system.into(), listed);
         }
 
-        /// What it was asked since the last time this was called.
+        /// The requests received since the last time this was called.
         fn asked(&self) -> Vec<String> {
             self.asked.borrow_mut().drain(..).collect()
         }

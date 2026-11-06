@@ -1,8 +1,8 @@
-//! The screen's state, and what each key does to it. Nothing here touches a
-//! disk or the network: that is asked of the worker.
+//! The screen's state and what each key does to it. Anything that touches a
+//! disk or the network is left to the worker.
 //!
-//! `confirm_*` opens a window that asks yes or no; `prompt_for_*` opens one to
-//! type in. Both only open it: what is asked is done once the user answers.
+//! `confirm_*` functions open a yes-or-no window and `prompt_for_*` functions
+//! open one to type in. The work happens once the user answers.
 
 use std::{
     collections::HashSet,
@@ -26,11 +26,11 @@ use tui_input::Input;
 use super::{
     covers::Covers,
     path_input::{self, DirReader, PathInput},
-    worker::{Command, Row, Snapshot, Update, Worker},
+    worker::{GamesPageData, GamesTableRow, Worker, WorkerCommand, WorkerMessage},
 };
 
 // ============================================================================
-// Status: what the screen says is going on
+// Status
 // ============================================================================
 
 /// What the screen shows of a command under way.
@@ -43,14 +43,11 @@ pub struct JobStatus {
     pub is_canceling: bool,
 }
 
-/// What last happened.
 pub struct StatusMessage {
     pub text: String,
-    /// Whether it went wrong.
     pub is_failure: bool,
 }
 
-/// Where the device is at.
 pub enum DeviceStatus {
     NoDevice,
     /// Being opened and read.
@@ -59,54 +56,52 @@ pub enum DeviceStatus {
 }
 
 // ============================================================================
-// Dialogs: the windows that ask yes or no, or only tell
+// Dialogs
 // ============================================================================
 
-/// What a button in a dialog says and does.
 pub struct DialogButton {
     pub label: &'static str,
-    pub command: Option<Command>,
+    pub command: Option<WorkerCommand>,
 }
 
 impl DialogButton {
-    fn new(label: &'static str, command: Option<Command>) -> Self {
+    fn new(label: &'static str, command: Option<WorkerCommand>) -> Self {
         Self { label, command }
     }
 }
 
-/// A question or a text over the screen.
+/// A question or message shown over the screen.
 pub struct Dialog {
     pub title: String,
     pub lines: Vec<String>,
-    /// The last has no command and cancels.
+    /// The last button has no command and cancels.
     pub buttons: Vec<DialogButton>,
     pub focused_button: usize,
-    /// Whether what it asks can't be undone.
+    /// Whether the action can't be undone.
     pub is_irreversible: bool,
 }
 
 // ============================================================================
-// Prompts: the windows that ask for a path, a platform or a name
+// Prompts
 // ============================================================================
 
-/// What a path being typed is to be imported as.
+/// What the path being typed will be imported as.
 pub enum ImportTarget {
     Game,
     /// A version of this game's save.
     Save(LocalEntry),
     /// This game's cover.
     Cover(LocalEntry),
-    /// The file this row asks for.
+    /// The file this row needs.
     Bios(BiosRow),
 }
 
-/// A path being typed, to import what it leads to.
+/// A path being typed, whose target will be imported.
 pub struct ImportPrompt {
     pub target: ImportTarget,
     pub input: PathInput,
 }
 
-/// Which copy of a game is being renamed.
 pub enum RenameTarget {
     InLibrary(LocalEntry),
     OnDevice(DeviceEntry),
@@ -119,12 +114,10 @@ pub struct RenamePrompt {
 }
 
 impl RenamePrompt {
-    /// What is typed before and after the cursor.
     pub fn text_around_cursor(&self) -> (String, String) {
         path_input::text_around_cursor(&self.input)
     }
 
-    /// The name it has, without the extension.
     fn stem(&self) -> String {
         match &self.target {
             RenameTarget::InLibrary(local) => local.stem().to_string(),
@@ -133,21 +126,19 @@ impl RenamePrompt {
     }
 }
 
-/// The name of the file at `path`, without the extension.
 fn file_stem(path: &Path) -> String {
     let stem = path.file_stem().unwrap_or_default();
     stem.to_string_lossy().into_owned()
 }
 
-/// A file to import as a game, while the user says which platform it is for.
+/// A file being imported as a game, while the user picks its platform.
 pub struct PlatformPrompt {
     pub file_to_import: PathBuf,
-    /// In `Platform::iter()`.
+    /// An index into `Platform::iter()`.
     pub selected_platform_index: usize,
 }
 
-/// What the user is typing or choosing in a window of its own. A dialog can
-/// still open over it.
+/// A window the user types or chooses in. A dialog can still open over it.
 pub enum Prompt {
     Import(ImportPrompt),
     Platform(PlatformPrompt),
@@ -169,8 +160,9 @@ enum GamesPageFocus {
     SavesPanel(usize),
 }
 
-/// A row, whatever else changes: marks and the selection stay with it. A game
-/// is its contents, whatever it is called and wherever it is.
+/// Identifies a row across updates, so marks and the selection stay with it. A
+/// game is identified by its contents, whatever it is called and wherever it
+/// is.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum RowKey {
     Game(Game),
@@ -178,36 +170,36 @@ enum RowKey {
     OrphanOnDevice { platform: Platform, path: PathBuf },
 }
 
-fn key_of(row: &Row) -> RowKey {
+fn key_of(row: &GamesTableRow) -> RowKey {
     match row {
-        Row::Game { row, .. } => RowKey::Game(row.game().clone()),
-        Row::OrphanInLibrary(o) => RowKey::OrphanInLibrary {
-            platform: o.platform.clone(),
-            stem: o.stem.clone(),
+        GamesTableRow::Game { row, .. } => RowKey::Game(row.game().clone()),
+        GamesTableRow::OrphanInLibrary(orphan) => RowKey::OrphanInLibrary {
+            platform: orphan.platform.clone(),
+            stem: orphan.stem.clone(),
         },
-        Row::OrphanOnDevice(o) => RowKey::OrphanOnDevice {
-            platform: o.platform.clone(),
-            path: o.path.clone(),
+        GamesTableRow::OrphanOnDevice(orphan) => RowKey::OrphanOnDevice {
+            platform: orphan.platform.clone(),
+            path: orphan.path.clone(),
         },
     }
 }
 
-/// What the table calls a row, which is also what a search looks in.
-pub fn name_of(row: &Row) -> String {
+/// A row's name in the table, which is also what a search matches.
+pub fn name_of(row: &GamesTableRow) -> String {
     match row {
-        Row::Game { row, .. } => match row {
+        GamesTableRow::Game { row, .. } => match row {
             GameRow::InLibrary(local) | GameRow::Both { local, .. } => local.name.clone(),
             GameRow::OnDevice(on_device) => on_device.path.display().to_string(),
         },
-        Row::OrphanInLibrary(o) => o.stem.clone(),
-        Row::OrphanOnDevice(o) => o.path.display().to_string(),
+        GamesTableRow::OrphanInLibrary(orphan) => orphan.stem.clone(),
+        GamesTableRow::OrphanOnDevice(orphan) => orphan.path.display().to_string(),
     }
 }
 
-fn matches_query(row: &Row, query: &str) -> bool {
-    let on_device = row
-        .device_entry()
-        .map_or(String::new(), |d| d.path.display().to_string());
+fn matches_query(row: &GamesTableRow, query: &str) -> bool {
+    let on_device = row.device_entry().map_or(String::new(), |on_device| {
+        on_device.path.display().to_string()
+    });
     path_input::fuzzy_match(query, &name_of(row)).is_some()
         || path_input::fuzzy_match(query, &on_device).is_some()
 }
@@ -215,9 +207,9 @@ fn matches_query(row: &Row, query: &str) -> bool {
 /// The games and orphan saves, and what the user has done with them.
 #[derive(Default)]
 pub struct GamesPage {
-    /// None until the worker has told of them.
-    rows: Option<Vec<Row>>,
-    /// Indexes into `rows` of those the search leaves.
+    /// None until the worker has sent them.
+    rows: Option<Vec<GamesTableRow>>,
+    /// Indices into `rows` of the rows the search leaves.
     visible_row_indices: Vec<usize>,
     pub table_state: TableState,
     marked_rows: HashSet<RowKey>,
@@ -230,12 +222,12 @@ impl GamesPage {
         self.rows.is_some()
     }
 
-    /// Every row, whatever the search leaves.
-    pub fn rows(&self) -> &[Row] {
+    /// Every row, ignoring the search.
+    pub fn rows(&self) -> &[GamesTableRow] {
         self.rows.as_deref().unwrap_or(&[])
     }
 
-    pub fn visible_rows(&self) -> impl Iterator<Item = &Row> {
+    pub fn visible_rows(&self) -> impl Iterator<Item = &GamesTableRow> {
         self.visible_row_indices.iter().map(|&i| &self.rows()[i])
     }
 
@@ -243,7 +235,7 @@ impl GamesPage {
         self.visible_row_indices.len()
     }
 
-    pub fn selected_row(&self) -> Option<&Row> {
+    pub fn selected_row(&self) -> Option<&GamesTableRow> {
         let &row = self.visible_row_indices.get(self.table_state.selected()?)?;
         Some(&self.rows()[row])
     }
@@ -258,13 +250,16 @@ impl GamesPage {
 
     /// The versions of the selected game's save in the library, newest first.
     pub fn selected_save_versions(&self) -> Vec<Save> {
-        let local = self.selected_row().and_then(Row::local_entry);
-        let history = local.and_then(|l| l.save.as_ref());
-        history.iter().flat_map(|h| h.iter().cloned()).collect()
+        let local = self.selected_row().and_then(GamesTableRow::local_entry);
+        let history = local.and_then(|local| local.save.as_ref());
+        history
+            .iter()
+            .flat_map(|history| history.iter().cloned())
+            .collect()
     }
 
-    /// Where the covers of the rows around the selected one are, to prepare
-    /// them ahead.
+    /// Where the covers of the rows around the selected one are, so they can be
+    /// prepared ahead.
     pub fn covers_around(&self) -> Vec<PathBuf> {
         let Some(selected) = self.table_state.selected() else {
             return Vec::new();
@@ -277,18 +272,17 @@ impl GamesPage {
         [at(selected + 1), before].into_iter().flatten().collect()
     }
 
-    /// How many rows are marked, seen or not.
+    /// How many rows are marked, visible or not.
     pub fn marked_count(&self) -> usize {
-        self.rows().iter().filter(|r| self.is_marked(r)).count()
+        self.rows().iter().filter(|row| self.is_marked(row)).count()
     }
 
-    pub fn is_marked(&self, row: &Row) -> bool {
+    pub fn is_marked(&self, row: &GamesTableRow) -> bool {
         self.marked_rows.contains(&key_of(row))
     }
 
-    /// How many games there are, and how many orphan saves.
     pub fn game_and_orphan_counts(&self) -> (usize, usize) {
-        let is_game = |row: &&Row| matches!(row, Row::Game { .. });
+        let is_game = |row: &&GamesTableRow| matches!(row, GamesTableRow::Game { .. });
         let games = self.rows().iter().filter(is_game).count();
         (games, self.rows().len() - games)
     }
@@ -297,7 +291,6 @@ impl GamesPage {
         self.search_input.value()
     }
 
-    /// What is typed in the search box before and after the cursor.
     pub fn search_text_around_cursor(&self) -> (String, String) {
         path_input::text_around_cursor(&self.search_input)
     }
@@ -306,22 +299,23 @@ impl GamesPage {
         matches!(self.focus, GamesPageFocus::Search)
     }
 
-    /// Takes the rows the worker told of, keeping the selection on its row.
-    fn set_rows(&mut self, rows: Vec<Row>) {
+    /// Stores the rows the worker sent, keeping the selection on its row.
+    fn set_rows(&mut self, rows: Vec<GamesTableRow>) {
         let keep = self.selected_row().map(key_of);
         self.rows = Some(rows);
         self.refresh_visible_rows(keep);
     }
 
-    /// Works out the visible rows, keeping the selection on the row `keep`.
+    /// Recomputes the visible rows, keeping the selection on the row `keep`.
     fn refresh_visible_rows(&mut self, keep: Option<RowKey>) {
         let found = self
             .rows()
             .iter()
             .enumerate()
-            .filter(|(_, r)| matches_query(r, self.search_input.value()));
+            .filter(|(_, row)| matches_query(row, self.search_input.value()));
         let visible: Vec<usize> = found.map(|(i, _)| i).collect();
-        let kept = keep.and_then(|k| visible.iter().position(|&i| key_of(&self.rows()[i]) == k));
+        let kept =
+            keep.and_then(|key| visible.iter().position(|&i| key_of(&self.rows()[i]) == key));
         let selected = kept.or(self.table_state.selected()).unwrap_or(0);
         self.visible_row_indices = visible;
         self.select_row(selected);
@@ -338,7 +332,6 @@ impl GamesPage {
         self.table_state.select(row);
     }
 
-    /// Marks the row, or not, and moves on to the next.
     fn toggle_mark_and_move_on(&mut self) {
         let Some(key) = self.selected_row().map(key_of) else {
             return;
@@ -349,8 +342,8 @@ impl GamesPage {
         self.move_selection_by(1);
     }
 
-    /// Marks the rows shown; if they all are already, clears every mark, also
-    /// those of rows a search hides.
+    /// Marks the rows shown. If they are all marked already, clears every mark,
+    /// including those on rows a search hides.
     fn mark_all_shown_or_clear_marks(&mut self) {
         let shown: Vec<RowKey> = self.visible_rows().map(key_of).collect();
         if shown.iter().all(|key| self.marked_rows.contains(key)) {
@@ -360,10 +353,15 @@ impl GamesPage {
         }
     }
 
-    /// What a key acts on: the rows marked, seen or not, or else the one
-    /// selected. In the saves panel, always the one selected.
-    fn rows_to_act_on(&self) -> Vec<&Row> {
-        let marked: Vec<&Row> = self.rows().iter().filter(|r| self.is_marked(r)).collect();
+    /// The rows a key acts on, which are the marked rows, visible or not, or
+    /// otherwise the selected row. In the saves panel it is always the selected
+    /// row.
+    fn rows_to_act_on(&self) -> Vec<&GamesTableRow> {
+        let marked: Vec<&GamesTableRow> = self
+            .rows()
+            .iter()
+            .filter(|row| self.is_marked(row))
+            .collect();
         if marked.is_empty() || self.selected_version().is_some() {
             self.selected_row().into_iter().collect()
         } else {
@@ -377,19 +375,19 @@ impl GamesPage {
         let rows = self.rows_to_act_on();
         let entries: Vec<DeviceEntry> = rows
             .iter()
-            .filter_map(|r| r.device_entry().cloned())
+            .filter_map(|row| row.device_entry().cloned())
             .collect();
         let inapplicable = rows.len() - entries.len();
         (entries, inapplicable)
     }
 
-    /// The games in the library among the rows to act on that aren't called
-    /// what the DATs call them, with that name.
+    /// The library games among the rows to act on whose name differs from their
+    /// DAT name, each paired with that name.
     fn renames_to_standard_names(&self) -> Vec<(LocalEntry, String)> {
         self.rows_to_act_on()
             .iter()
             .filter_map(|row| {
-                let Row::Game {
+                let GamesTableRow::Game {
                     row,
                     standard_name: Some(standard_name),
                     ..
@@ -409,7 +407,7 @@ impl GamesPage {
         let rows = self.rows_to_act_on();
         let entries: Vec<LocalEntry> = rows
             .iter()
-            .filter_map(|r| r.local_entry().cloned())
+            .filter_map(|row| row.local_entry().cloned())
             .collect();
         let inapplicable = rows.len() - entries.len();
         (entries, inapplicable)
@@ -420,16 +418,16 @@ impl GamesPage {
 // Cores page
 // ============================================================================
 
-/// The cores as the worker last told of them.
+/// The cores as the worker last sent them.
 pub struct CoreList {
     pub rows: Vec<CoreRow>,
-    /// Why the inventory couldn't be had, if it couldn't.
+    /// Why the inventory couldn't be fetched, if it couldn't.
     pub inventory_failure: Option<String>,
 }
 
 #[derive(Default)]
 pub struct CoresPage {
-    /// None until the worker has told of them.
+    /// None until the worker has sent them.
     core_list: Option<CoreList>,
     pub table_state: TableState,
 }
@@ -444,10 +442,10 @@ impl CoresPage {
         self.core_list.as_ref()?.rows.get(selected)
     }
 
-    /// Takes the cores the worker told of, keeping the selection on its core.
+    /// Stores the cores the worker sent, keeping the selection on its core.
     fn set_rows(&mut self, rows: Vec<CoreRow>, inventory_failure: Option<String>) {
-        let keep = self.selected_row().map(|r| r.id().to_string());
-        let kept = keep.and_then(|id| rows.iter().position(|r| r.id() == id));
+        let keep = self.selected_row().map(|row| row.id().to_string());
+        let kept = keep.and_then(|id| rows.iter().position(|row| row.id() == id));
         let selected = kept.or(self.table_state.selected()).unwrap_or(0);
         self.core_list = Some(CoreList {
             rows,
@@ -458,7 +456,10 @@ impl CoresPage {
 
     /// Selects core `i`, or the last if there are fewer.
     fn select_row(&mut self, i: usize) {
-        let len = self.core_list.as_ref().map_or(0, |c| c.rows.len());
+        let len = self
+            .core_list
+            .as_ref()
+            .map_or(0, |core_list| core_list.rows.len());
         self.table_state.select(clamped_row(i, len));
     }
 }
@@ -482,11 +483,11 @@ impl BiosPage {
         self.rows.get(self.table_state.selected()?)
     }
 
-    /// Takes the files the worker told of, keeping the selection on its file.
+    /// Stores the files the worker sent, keeping the selection on its file.
     fn set_rows(&mut self, rows: Vec<BiosRow>) {
         let same = |a: &BiosRow, b: &BiosRow| a.platform == b.platform && a.path == b.path;
         let keep = self.selected_row().cloned();
-        let kept = keep.and_then(|k| rows.iter().position(|r| same(r, &k)));
+        let kept = keep.and_then(|key| rows.iter().position(|row| same(row, &key)));
         let selected = kept.or(self.table_state.selected()).unwrap_or(0);
         self.rows = rows;
         self.select_row(selected);
@@ -502,7 +503,6 @@ impl BiosPage {
 // The app
 // ============================================================================
 
-/// Which page is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Games,
@@ -524,14 +524,14 @@ pub struct App {
     pub bios: BiosPage,
     // Windows over them.
     dialog: Option<Dialog>,
-    /// Shown once `dialog` is closed, so as not to cover it.
+    /// Shown once `dialog` closes, so that it doesn't cover it.
     next_dialog: Option<Dialog>,
     prompt: Option<Prompt>,
-    // What is going on.
+    // Status.
     device_status: DeviceStatus,
     job_status: Option<JobStatus>,
     status_message: Option<StatusMessage>,
-    /// How many rows the command just sent doesn't apply to, said with its
+    /// How many rows the command just sent doesn't apply to, reported with its
     /// summary.
     inapplicable_row_count: usize,
     should_quit: bool,
@@ -612,24 +612,26 @@ impl App {
         }
     }
 
-    pub fn update(&mut self, update: Update) {
-        match update {
-            Update::Snapshot(Snapshot { rows, device }) => {
+    pub fn handle_worker_message(&mut self, message: WorkerMessage) {
+        match message {
+            WorkerMessage::GamesPageChanged(GamesPageData { rows, device_root }) => {
                 self.games.set_rows(rows);
-                self.device_status = match device {
+                self.device_status = match device_root {
                     Some(root) => DeviceStatus::Open(root),
                     None => DeviceStatus::NoDevice,
                 };
             }
-            Update::Cores { rows, failure } => self.cores.set_rows(rows, failure),
-            Update::Bios(rows) => self.bios.set_rows(rows),
-            Update::ReadingDevice(root) => self.device_status = DeviceStatus::Reading(root),
-            Update::DeviceRead => {
+            WorkerMessage::CoreListChanged { rows, failure } => self.cores.set_rows(rows, failure),
+            WorkerMessage::BiosFilesChanged(rows) => self.bios.set_rows(rows),
+            WorkerMessage::DeviceReadStarted(root) => {
+                self.device_status = DeviceStatus::Reading(root)
+            }
+            WorkerMessage::DeviceReadFinished => {
                 if matches!(self.device_status, DeviceStatus::Reading(_)) {
                     self.device_status = DeviceStatus::NoDevice;
                 }
             }
-            Update::Started { label, total } => {
+            WorkerMessage::CommandStarted { label, total } => {
                 self.job_status = Some(JobStatus {
                     description: label,
                     done_count: 0,
@@ -638,25 +640,25 @@ impl App {
                     is_canceling: false,
                 });
             }
-            Update::Progress { done, total, game } => {
+            WorkerMessage::CommandProgressed { done, total, game } => {
                 if let Some(job) = &mut self.job_status {
                     (job.done_count, job.total_count, job.last_game) = (done, total, Some(game));
                 }
             }
-            Update::Finished { summary, failed } => {
+            WorkerMessage::CommandFinished { summary, failed } => {
                 self.job_status = None;
                 let summary = match std::mem::take(&mut self.inapplicable_row_count) {
                     0 => summary,
-                    n => format!("{summary} ({n} left out)"),
+                    left_out_count => format!("{summary} ({left_out_count} left out)"),
                 };
                 self.status_message = Some(StatusMessage {
                     text: summary,
                     is_failure: failed,
                 });
             }
-            // The event loop ends on this, before it gets here.
-            Update::LibraryFailed(_) => {}
-            Update::Duplicates(lines) => {
+            // The event loop ends before this message gets here.
+            WorkerMessage::LibraryOpenFailed(_) => {}
+            WorkerMessage::DuplicateGamesSkipped(lines) => {
                 let dialog = duplicates_dialog(lines);
                 if self.dialog.is_some() {
                     self.next_dialog = Some(dialog);
@@ -675,8 +677,8 @@ impl App {
             self.should_quit = true;
             return;
         }
-        // The keys that edit text go on as they are; for the others, Emacs keys
-        // stand for the keys they mean.
+        // Keys that edit text stay as they are. For the others, Emacs keys
+        // become the keys they stand for.
         let raw_key = key;
         let key = translate_emacs_key(key);
         if self.dialog.is_some() {
@@ -750,20 +752,20 @@ impl App {
             KeyCode::Char('M') => self.games.mark_all_shown_or_clear_marks(),
             // Lowercase changes the library, Shift changes the device.
             KeyCode::Char('i') => self.prompt_for_import_path(ImportTarget::Game),
-            KeyCode::Char('p') => self.send_for_device_rows(Command::PullGames),
-            KeyCode::Char('P') => self.send_for_library_rows(Command::PushGames),
-            KeyCode::Char('s') => self.send_for_device_rows(Command::PullSaves),
+            KeyCode::Char('p') => self.send_for_device_rows(WorkerCommand::PullGames),
+            KeyCode::Char('P') => self.send_for_library_rows(WorkerCommand::PushGames),
+            KeyCode::Char('s') => self.send_for_device_rows(WorkerCommand::PullSaves),
             KeyCode::Char('S') => self.push_saves(),
             KeyCode::Char('n') => self.prompt_for_name_in_library(),
             KeyCode::Char('N') => self.prompt_for_name_on_device(),
             KeyCode::Char('t') => self.confirm_rename_to_standard_names(),
-            KeyCode::Char('f') => self.send_for_library_rows(Command::FetchCovers),
+            KeyCode::Char('f') => self.send_for_library_rows(WorkerCommand::FetchCovers),
             KeyCode::Char('c') => self.prompt_for_cover_to_import(),
             KeyCode::Char('x') => self.confirm_trash_games(),
             KeyCode::Char('X') => self.confirm_delete_games(),
-            KeyCode::Char('d') => self.worker.send(Command::SyncDats),
+            KeyCode::Char('d') => self.worker.send(WorkerCommand::SyncDats),
             KeyCode::Char('E') => self.eject(),
-            KeyCode::Char('r') => self.worker.send(Command::Reload),
+            KeyCode::Char('r') => self.worker.send(WorkerCommand::Reload),
             KeyCode::Enter | KeyCode::Right => self.open_panel(),
             KeyCode::Tab | KeyCode::Char('2') => self.show_cores(),
             KeyCode::Char('3') => self.current_page = Page::Bios,
@@ -790,7 +792,7 @@ impl App {
                 self.games.focus = GamesPageFocus::SavesPanel(selected.saturating_sub(1))
             }
             KeyCode::Char('i') => self.prompt_for_save_to_import(),
-            KeyCode::Char('s') => self.send_for_device_rows(Command::PullSaves),
+            KeyCode::Char('s') => self.send_for_device_rows(WorkerCommand::PullSaves),
             KeyCode::Char('S') => self.push_save_version(selected),
             KeyCode::Char('x') => self.confirm_trash_version(selected),
             KeyCode::Char('X') => self.confirm_delete_save(),
@@ -801,25 +803,26 @@ impl App {
     }
 
     fn open_panel(&mut self) {
-        if let Some(Row::Game { .. }) = self.games.selected_row() {
+        if let Some(GamesTableRow::Game { .. }) = self.games.selected_row() {
             self.games.focus = GamesPageFocus::SavesPanel(0);
         }
     }
 
     fn eject(&mut self) {
         match self.device_root() {
-            Some(_) => self.worker.send(Command::Eject),
+            Some(_) => self.worker.send(WorkerCommand::Eject),
             None => self.show_status_message("no device is open"),
         }
     }
 
     // ---- Keys on the Cores page ------------------------------------------------
 
-    /// Opens the Cores page, asking for them unless they have been told of.
+    /// Opens the Cores page, requesting the cores unless the worker has already
+    /// sent them.
     fn show_cores(&mut self) {
         self.current_page = Page::Cores;
         if self.cores.core_list.is_none() {
-            self.worker.send(Command::ShowCores);
+            self.worker.send(WorkerCommand::ShowCores);
         }
     }
 
@@ -833,7 +836,7 @@ impl App {
             KeyCode::Char('U') => self.install_selected_core(),
             KeyCode::Char('A') => self.update_every_core(),
             KeyCode::Char('X') => self.confirm_remove_core(),
-            KeyCode::Char('r') => self.worker.send(Command::Reload),
+            KeyCode::Char('r') => self.worker.send(WorkerCommand::Reload),
             KeyCode::Char('?') => self.dialog = Some(help_dialog()),
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => self.handle_escape(),
@@ -854,18 +857,22 @@ impl App {
         };
         match why_not {
             Some(why) => self.show_status_message(why),
-            None => self.worker.send(Command::InstallCores(vec![id])),
+            None => self.worker.send(WorkerCommand::InstallCores(vec![id])),
         }
     }
 
     fn update_every_core(&mut self) {
-        let rows = self.cores.core_list.as_ref().map_or(&[][..], |c| &c.rows);
-        let with_updates = rows.iter().filter(|r| r.has_update());
-        let ids: Vec<String> = with_updates.map(|r| r.id().to_string()).collect();
+        let rows = self
+            .cores
+            .core_list
+            .as_ref()
+            .map_or(&[][..], |core_list| &core_list.rows);
+        let with_updates = rows.iter().filter(|row| row.has_update());
+        let ids: Vec<String> = with_updates.map(|row| row.id().to_string()).collect();
         if ids.is_empty() {
             self.show_status_message("every core is up to date");
         } else {
-            self.worker.send(Command::InstallCores(ids));
+            self.worker.send(WorkerCommand::InstallCores(ids));
         }
     }
 
@@ -873,7 +880,7 @@ impl App {
         let Some(row) = self
             .cores
             .selected_row()
-            .filter(|r| r.installed().is_some())
+            .filter(|row| row.installed().is_some())
         else {
             self.show_status_message("this core isn't on the device");
             return;
@@ -886,7 +893,7 @@ impl App {
                 "Its settings and saves stay on the device.".to_string(),
             ],
             buttons: vec![
-                DialogButton::new("Delete", Some(Command::RemoveCores(vec![id]))),
+                DialogButton::new("Delete", Some(WorkerCommand::RemoveCores(vec![id]))),
                 DialogButton::new("Cancel", None),
             ],
             focused_button: 1,
@@ -904,7 +911,7 @@ impl App {
             KeyCode::Tab | KeyCode::Char('1') => self.current_page = Page::Games,
             KeyCode::Char('2') => self.show_cores(),
             KeyCode::Char('I') => self.prompt_for_bios_file(),
-            KeyCode::Char('r') => self.worker.send(Command::Reload),
+            KeyCode::Char('r') => self.worker.send(WorkerCommand::Reload),
             KeyCode::Char('?') => self.dialog = Some(help_dialog()),
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => self.handle_escape(),
@@ -936,22 +943,22 @@ impl App {
         self.request_input_dir();
     }
 
-    /// Imports what the path typed leads to, or else, for a game whose
-    /// extension doesn't tell its platform, asks which it is for.
+    /// Imports what the typed path points to. If a game's extension doesn't
+    /// indicate its platform, the user picks one first.
     fn import_input_path(&mut self) {
         let Some(Prompt::Import(import)) = self.prompt.take() else {
             return;
         };
         let path = import.input.path();
         match import.target {
-            ImportTarget::Save(local) => self.worker.send(Command::ImportSave(local, path)),
-            ImportTarget::Cover(local) => self.worker.send(Command::ImportCover(local, path)),
-            ImportTarget::Bios(row) => self.worker.send(Command::PutBios(row, path)),
+            ImportTarget::Save(local) => self.worker.send(WorkerCommand::ImportSave(local, path)),
+            ImportTarget::Cover(local) => self.worker.send(WorkerCommand::ImportCover(local, path)),
+            ImportTarget::Bios(row) => self.worker.send(WorkerCommand::PutBios(row, path)),
             ImportTarget::Game => {
-                let extension = path.extension().and_then(|e| e.to_str());
+                let extension = path.extension().and_then(|extension| extension.to_str());
                 let tells_platform = extension.and_then(Platform::from_extension).is_some();
                 if tells_platform || import.input.names_dir() {
-                    self.worker.send(Command::ImportGame(path, None));
+                    self.worker.send(WorkerCommand::ImportGame(path, None));
                 } else {
                     self.prompt = Some(Prompt::Platform(PlatformPrompt {
                         file_to_import: path,
@@ -976,20 +983,21 @@ impl App {
             if new != rename.stem() {
                 self.worker.send(match rename.target {
                     RenameTarget::InLibrary(local) => {
-                        Command::RenameGamesInLibrary(vec![(local, new)])
+                        WorkerCommand::RenameGamesInLibrary(vec![(local, new)])
                     }
-                    RenameTarget::OnDevice(on_device) => Command::RenameOnDevice(on_device, new),
+                    RenameTarget::OnDevice(on_device) => {
+                        WorkerCommand::RenameOnDevice(on_device, new)
+                    }
                 });
             }
         }
     }
 
-    /// Asks what to call the selected row's copy in the library.
     fn prompt_for_name_in_library(&mut self) {
         let Some(local) = self
             .games
             .selected_row()
-            .and_then(Row::local_entry)
+            .and_then(GamesTableRow::local_entry)
             .cloned()
         else {
             self.show_status_message("nothing here is in the library");
@@ -998,12 +1006,11 @@ impl App {
         self.open_rename_prompt(RenameTarget::InLibrary(local));
     }
 
-    /// Asks what to call the selected row's copy on the device.
     fn prompt_for_name_on_device(&mut self) {
         let Some(on_device) = self
             .games
             .selected_row()
-            .and_then(Row::device_entry)
+            .and_then(GamesTableRow::device_entry)
             .cloned()
         else {
             self.show_status_message("this game isn't on the device");
@@ -1037,14 +1044,14 @@ impl App {
                 let platform = Platform::iter().nth(choice.selected_platform_index);
                 let file = choice.file_to_import.clone();
                 self.prompt = None;
-                self.worker.send(Command::ImportGame(file, platform));
+                self.worker.send(WorkerCommand::ImportGame(file, platform));
             }
             KeyCode::Esc => self.prompt = None,
             _ => {}
         }
     }
 
-    /// Asks for the folder of the path being typed, if it has changed.
+    /// Requests the folder of the path being typed, if it has changed.
     fn request_input_dir(&mut self) {
         if let Some(Prompt::Import(import)) = &mut self.prompt
             && let Some(dir) = import.input.dir_to_read()
@@ -1065,9 +1072,13 @@ impl App {
         }
     }
 
-    /// The selected game in the library; if there is none, the status says so.
+    /// The selected game in the library. If there is none, the status line says
+    /// so.
     fn selected_local_entry_or_say_none(&mut self) -> Option<LocalEntry> {
-        let selected = self.games.selected_row().and_then(Row::local_entry);
+        let selected = self
+            .games
+            .selected_row()
+            .and_then(GamesTableRow::local_entry);
         let local = selected.cloned();
         if local.is_none() {
             self.show_status_message("nothing here is in the library");
@@ -1112,7 +1123,7 @@ impl App {
                 let command = dialog
                     .buttons
                     .get_mut(dialog.focused_button)
-                    .and_then(|b| b.command.take());
+                    .and_then(|button| button.command.take());
                 self.dialog = None;
                 match command {
                     Some(command) => {
@@ -1139,8 +1150,11 @@ impl App {
         let rows = self.games.rows_to_act_on();
         let mut files = Vec::new();
         for row in rows {
-            if let Row::Game { files: f, .. } = row {
-                for file in f {
+            if let GamesTableRow::Game {
+                files: game_files, ..
+            } = row
+            {
+                for file in game_files {
                     if !files.contains(file) {
                         files.push(file.clone());
                     }
@@ -1152,14 +1166,17 @@ impl App {
             String::new(),
         ];
         lines.extend(cut_short_for_dialog(
-            files.iter().map(|f| f.display().to_string()).collect(),
+            files
+                .iter()
+                .map(|file| file.display().to_string())
+                .collect(),
         ));
         self.inapplicable_row_count += inapplicable;
         self.dialog = Some(Dialog {
             title: format!("Trash {}", pluralized(entries.len(), "game")),
             lines,
             buttons: vec![
-                DialogButton::new("Trash", Some(Command::TrashGames(entries))),
+                DialogButton::new("Trash", Some(WorkerCommand::TrashGames(entries))),
                 DialogButton::new("Cancel", None),
             ],
             focused_button: 0,
@@ -1167,8 +1184,8 @@ impl App {
         });
     }
 
-    /// Asks whether to call the games among the targets what the DATs call
-    /// them, showing the names first.
+    /// Asks whether to rename the target games to their DAT names, showing the
+    /// new names first.
     fn confirm_rename_to_standard_names(&mut self) {
         let (entries, inapplicable) = self.games.library_entries_to_act_on();
         if entries.is_empty() {
@@ -1185,7 +1202,8 @@ impl App {
             "The device isn't touched.".to_string(),
             String::new(),
         ];
-        // Two lines each, as names are long: half as many as other dialogs show.
+        // Each game takes two lines because names are long, so this shows half
+        // as many as other dialogs.
         const SHOWN: usize = 5;
         for (local, new) in renames.iter().take(SHOWN) {
             lines.push(local.stem().to_string());
@@ -1199,7 +1217,7 @@ impl App {
             title: format!("Rename {}", pluralized(renames.len(), "game")),
             lines,
             buttons: vec![
-                DialogButton::new("Rename", Some(Command::RenameGamesInLibrary(renames))),
+                DialogButton::new("Rename", Some(WorkerCommand::RenameGamesInLibrary(renames))),
                 DialogButton::new("Cancel", None),
             ],
             focused_button: 0,
@@ -1209,7 +1227,7 @@ impl App {
 
     fn confirm_trash_orphans(&mut self) {
         let targets = self.games.rows_to_act_on();
-        let orphans = targets.iter().filter_map(|r| r.orphan_in_library());
+        let orphans = targets.iter().filter_map(|row| row.orphan_in_library());
         let orphans: Vec<OrphanLocalSave> = orphans.cloned().collect();
         if orphans.is_empty() {
             self.show_status_message("nothing here is in the library");
@@ -1226,7 +1244,7 @@ impl App {
             title: format!("Trash {}", pluralized(orphans.len(), "orphan save")),
             lines,
             buttons: vec![
-                DialogButton::new("Trash", Some(Command::TrashOrphanSaves(orphans))),
+                DialogButton::new("Trash", Some(WorkerCommand::TrashOrphanSaves(orphans))),
                 DialogButton::new("Cancel", None),
             ],
             focused_button: 1,
@@ -1238,7 +1256,7 @@ impl App {
         let Some(local) = self
             .games
             .selected_row()
-            .and_then(Row::local_entry)
+            .and_then(GamesTableRow::local_entry)
             .cloned()
         else {
             return;
@@ -1253,7 +1271,10 @@ impl App {
                 version.timestamp()
             )],
             buttons: vec![
-                DialogButton::new("Trash", Some(Command::TrashSaveVersion(local, version))),
+                DialogButton::new(
+                    "Trash",
+                    Some(WorkerCommand::TrashSaveVersion(local, version)),
+                ),
                 DialogButton::new("Cancel", None),
             ],
             focused_button: 0,
@@ -1269,7 +1290,7 @@ impl App {
         }
         let names: Vec<String> = entries
             .iter()
-            .map(|e| e.path.display().to_string())
+            .map(|entry| entry.path.display().to_string())
             .collect();
         let one = entries.len() == 1;
         let (it, them) = if one {
@@ -1280,10 +1301,10 @@ impl App {
         let mut lines = vec![format!(
             "This deletes {it} from the device for good: there is no trash there."
         )];
-        let only_here = self.games.rows_to_act_on().iter().any(|r| {
+        let only_here = self.games.rows_to_act_on().iter().any(|row| {
             matches!(
-                r,
-                Row::Game {
+                row,
+                GamesTableRow::Game {
                     row: GameRow::OnDevice(_),
                     ..
                 }
@@ -1307,7 +1328,7 @@ impl App {
             ),
             lines,
             buttons: vec![
-                DialogButton::new("Delete", Some(Command::DeleteGames(entries))),
+                DialogButton::new("Delete", Some(WorkerCommand::DeleteGames(entries))),
                 DialogButton::new("Cancel", None),
             ],
             focused_button: 0,
@@ -1317,7 +1338,7 @@ impl App {
 
     fn confirm_delete_orphans(&mut self) {
         let targets = self.games.rows_to_act_on();
-        let orphans = targets.iter().filter_map(|r| r.orphan_on_device());
+        let orphans = targets.iter().filter_map(|row| row.orphan_on_device());
         let orphans: Vec<OrphanDeviceSave> = orphans.cloned().collect();
         if orphans.is_empty() {
             self.show_status_message("nothing here is on the device");
@@ -1337,7 +1358,7 @@ impl App {
             ),
             lines,
             buttons: vec![
-                DialogButton::new("Delete", Some(Command::DeleteOrphanSaves(orphans))),
+                DialogButton::new("Delete", Some(WorkerCommand::DeleteOrphanSaves(orphans))),
                 DialogButton::new("Cancel", None),
             ],
             focused_button: 1,
@@ -1354,11 +1375,10 @@ impl App {
         let mut lines = vec![
             "This deletes the save from the device for good: there is no trash there.".to_string(),
         ];
-        let unsaved = self
-            .games
-            .rows_to_act_on()
-            .iter()
-            .any(|r| matches!(r, Row::Game { row, .. } if row.has_new_save_on_device()));
+        let unsaved =
+            self.games.rows_to_act_on().iter().any(
+                |table_row| matches!(table_row, GamesTableRow::Game { row, .. } if row.has_new_save_on_device()),
+            );
         if unsaved {
             lines.push("The library doesn't have this save.".to_string());
         }
@@ -1366,7 +1386,7 @@ impl App {
             title: "Delete a save from the device".to_string(),
             lines,
             buttons: vec![
-                DialogButton::new("Delete", Some(Command::DeleteSaves(entries))),
+                DialogButton::new("Delete", Some(WorkerCommand::DeleteSaves(entries))),
                 DialogButton::new("Cancel", None),
             ],
             focused_button: 1,
@@ -1376,7 +1396,7 @@ impl App {
 
     // ---- Commands for the worker -----------------------------------------------
 
-    fn send_for_device_rows(&mut self, command: fn(Vec<DeviceEntry>) -> Command) {
+    fn send_for_device_rows(&mut self, command: fn(Vec<DeviceEntry>) -> WorkerCommand) {
         let (entries, inapplicable) = self.games.device_entries_to_act_on();
         self.send_for_entries(
             entries,
@@ -1386,7 +1406,7 @@ impl App {
         );
     }
 
-    fn send_for_library_rows(&mut self, command: fn(Vec<LocalEntry>) -> Command) {
+    fn send_for_library_rows(&mut self, command: fn(Vec<LocalEntry>) -> WorkerCommand) {
         let (entries, inapplicable) = self.games.library_entries_to_act_on();
         self.send_for_entries(
             entries,
@@ -1400,7 +1420,7 @@ impl App {
         &mut self,
         entries: Vec<T>,
         inapplicable: usize,
-        command: impl FnOnce(Vec<T>) -> Command,
+        command: impl FnOnce(Vec<T>) -> WorkerCommand,
         message_if_none: &str,
     ) {
         if entries.is_empty() {
@@ -1412,14 +1432,14 @@ impl App {
         self.worker.send(command(entries));
     }
 
-    /// The newest versions, onto the copies among the targets with their
-    /// game in the library.
+    /// Pushes the newest versions onto the target copies whose game is in the
+    /// library.
     fn push_saves(&mut self) {
         let targets = self.games.rows_to_act_on();
         let entries: Vec<DeviceEntry> = targets
             .iter()
-            .filter_map(|r| match r {
-                Row::Game {
+            .filter_map(|row| match row {
+                GamesTableRow::Game {
                     row: GameRow::Both { on_device, .. },
                     ..
                 } => Some(on_device.clone()),
@@ -1427,27 +1447,28 @@ impl App {
             })
             .collect();
         let inapplicable = targets.len() - entries.len();
-        self.send_for_entries(entries, inapplicable, Command::PushSaves, NOT_ON_BOTH);
+        self.send_for_entries(entries, inapplicable, WorkerCommand::PushSaves, NOT_ON_BOTH);
     }
 
-    /// The version selected in the saves panel, onto the selected row's copy.
+    /// Pushes the version selected in the saves panel onto the selected row's
+    /// copy.
     fn push_save_version(&mut self, selected: usize) {
         let version = self.games.selected_save_versions().get(selected).cloned();
         let on_device = self
             .games
             .selected_row()
-            .and_then(Row::device_entry)
+            .and_then(GamesTableRow::device_entry)
             .cloned();
         match (on_device, version) {
             (Some(on_device), Some(version)) => {
                 self.worker
-                    .send(Command::PushSaveVersion(on_device, version));
+                    .send(WorkerCommand::PushSaveVersion(on_device, version));
             }
             _ => self.show_status_message(NOT_ON_BOTH),
         }
     }
 
-    /// Tells why a key did nothing.
+    /// Explains why a key did nothing.
     fn show_status_message(&mut self, text: &str) {
         self.status_message = Some(StatusMessage {
             text: text.to_string(),
@@ -1463,14 +1484,14 @@ impl App {
 /// How far a page key moves.
 const PAGE: isize = 20;
 
-fn pluralized(n: usize, what: &str) -> String {
-    match n {
+fn pluralized(count: usize, what: &str) -> String {
+    match count {
         1 => format!("1 {what}"),
-        n => format!("{n} {what}s"),
+        count => format!("{count} {what}s"),
     }
 }
 
-/// `lines`, cut short for a dialog.
+/// Keeps the first 10 lines, and says how many more there are.
 fn cut_short_for_dialog(mut lines: Vec<String>) -> Vec<String> {
     const SHOWN: usize = 10;
     if lines.len() > SHOWN {
@@ -1481,7 +1502,6 @@ fn cut_short_for_dialog(mut lines: Vec<String>) -> Vec<String> {
     lines
 }
 
-/// Emacs keys, as the keys they stand for.
 fn translate_emacs_key(key: KeyEvent) -> KeyEvent {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -1514,13 +1534,14 @@ fn duplicates_dialog(duplicates: Vec<String>) -> Dialog {
     }
 }
 
-/// Row `i` of `len`, or the last if there are fewer; none if there are none.
+/// Row `i` of `len`, the last row if there are fewer, or none if there are
+/// none.
 fn clamped_row(i: usize, len: usize) -> Option<usize> {
     (len > 0).then(|| i.min(len - 1))
 }
 
-/// The row a key moves the selection to, from row `at`, if it is such a key.
-/// It may be past the last.
+/// The row a key moves the selection to from row `at`, if it is a movement key.
+/// It may be past the last row.
 fn row_after_key(key: KeyEvent, at: usize) -> Option<usize> {
     Some(match key.code {
         KeyCode::Down | KeyCode::Char('j') => at + 1,
@@ -1572,7 +1593,7 @@ fn help_dialog() -> Dialog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::{ui, worker::Sent};
+    use crate::tui::{ui, worker::QueuedCommand};
     use pocketeer_core::{
         cores::{BiosRow, BiosStatus, InstalledCore, InventoryCore},
         device::OrphanDeviceSave,
@@ -1599,7 +1620,7 @@ mod tests {
         let saves = saves
             .iter()
             .enumerate()
-            .map(|(i, b)| Save::from_bytes(b, at(i)));
+            .map(|(i, save_bytes)| Save::from_bytes(save_bytes, at(i)));
         LocalEntry {
             name: name.into(),
             game: game(crc32),
@@ -1612,25 +1633,25 @@ mod tests {
         DeviceEntry {
             path: PathBuf::from(path),
             game: game(crc32),
-            save: save.map(|b| Save::from_bytes(b, UNIX_EPOCH)),
+            save: save.map(|save_bytes| Save::from_bytes(save_bytes, UNIX_EPOCH)),
         }
     }
 
-    fn row(row: GameRow) -> Row {
-        Row::Game {
+    fn row(row: GameRow) -> GamesTableRow {
+        GamesTableRow::Game {
             files: row
                 .local_entry()
                 .iter()
-                .map(|l| PathBuf::from(format!("roms/gba/{}", l.name)))
+                .map(|local| PathBuf::from(format!("roms/gba/{}", local.name)))
                 .collect(),
             row,
             standard_name: None,
         }
     }
 
-    /// In order: only in the library, on both sides, only on the device, and
-    /// an orphan save.
-    fn rows() -> Vec<Row> {
+    /// One row only in the library, one on both sides, one only on the device,
+    /// and an orphan save.
+    fn rows() -> Vec<GamesTableRow> {
         vec![
             row(GameRow::InLibrary(local("Alpha.gba", 1, &[]))),
             row(GameRow::Both {
@@ -1638,7 +1659,7 @@ mod tests {
                 on_device: on_device("Both.gba", 2, Some(b"new")),
             }),
             row(GameRow::OnDevice(on_device("Hack.gba", 3, None))),
-            Row::OrphanOnDevice(OrphanDeviceSave {
+            GamesTableRow::OrphanOnDevice(OrphanDeviceSave {
                 platform: Platform::Gba,
                 path: PathBuf::from("Gone.sav"),
                 save: Save::from_bytes(b"x", UNIX_EPOCH),
@@ -1646,34 +1667,34 @@ mod tests {
         ]
     }
 
-    fn app() -> (App, Receiver<Sent>) {
+    fn app() -> (App, Receiver<QueuedCommand>) {
         let (worker, rx) = Worker::recording();
         let covers = Covers::spawn(Picker::halfblocks(), || {});
         let paths = DirReader::spawn(|| {});
         let mut app = App::new(worker, covers, paths);
-        app.update(Update::Snapshot(Snapshot {
+        app.handle_worker_message(WorkerMessage::GamesPageChanged(GamesPageData {
             rows: rows(),
-            device: Some(PathBuf::from("/Volumes/POCKET")),
+            device_root: Some(PathBuf::from("/Volumes/POCKET")),
         }));
         (app, rx)
     }
 
     fn press(app: &mut App, keys: &str) {
-        for c in keys.chars() {
-            app.handle_key(KeyEvent::from(match c {
+        for character in keys.chars() {
+            app.handle_key(KeyEvent::from(match character {
                 '\n' => KeyCode::Enter,
                 '\x1b' => KeyCode::Esc,
-                c => KeyCode::Char(c),
+                character => KeyCode::Char(character),
             }));
         }
     }
 
-    fn sent(rx: &Receiver<Sent>) -> Vec<Command> {
-        rx.try_iter().map(|(_, c)| c).collect()
+    fn sent(rx: &Receiver<QueuedCommand>) -> Vec<WorkerCommand> {
+        rx.try_iter().map(|queued| queued.command).collect()
     }
 
     fn paths(entries: &[DeviceEntry]) -> Vec<&Path> {
-        entries.iter().map(|e| e.path.as_path()).collect()
+        entries.iter().map(|entry| entry.path.as_path()).collect()
     }
 
     /// Clears the path being typed and presses `keys`.
@@ -1717,12 +1738,12 @@ mod tests {
         }
     }
 
-    /// In order: not on the device, with an update, up to date, and one that
-    /// can't be installed; on the Cores page.
-    fn on_cores_page() -> (App, Receiver<Sent>) {
+    /// On the Cores page, one core each that isn't on the device, has an
+    /// update, is up to date, and can't be installed.
+    fn on_cores_page() -> (App, Receiver<QueuedCommand>) {
         let (mut app, rx) = app();
         app.handle_key(KeyEvent::from(KeyCode::Tab));
-        app.update(Update::Cores {
+        app.handle_worker_message(WorkerMessage::CoreListChanged {
             rows: vec![
                 core_row("new.Core", None, Some("1")),
                 core_row("old.Core", Some("1"), Some("2")),
@@ -1731,7 +1752,7 @@ mod tests {
             ],
             failure: None,
         });
-        assert_eq!(sent(&rx), [Command::ShowCores]);
+        assert_eq!(sent(&rx), [WorkerCommand::ShowCores]);
         (app, rx)
     }
 
@@ -1745,12 +1766,12 @@ mod tests {
         }
     }
 
-    /// A file that is there, then one that is missing; on the BIOS page, with
-    /// a device open.
-    fn on_bios_page() -> (App, Receiver<Sent>) {
+    /// On the BIOS page with a device open, a file that is there and then one
+    /// that is missing.
+    fn on_bios_page() -> (App, Receiver<QueuedCommand>) {
         let (mut app, rx) = app();
         press(&mut app, "3");
-        app.update(Update::Bios(vec![
+        app.handle_worker_message(WorkerMessage::BiosFilesChanged(vec![
             bios_row("there.bin", BiosStatus::Present),
             bios_row("gone.bin", BiosStatus::Missing),
         ]));
@@ -1776,14 +1797,14 @@ mod tests {
         press(&mut app, "j\n");
         assert_eq!(app.games.selected_save_versions().len(), 2);
         press(&mut app, "jS");
-        let [Command::PushSaveVersion(game, version)] = &sent(&rx)[..] else {
+        let [WorkerCommand::PushSaveVersion(game, version)] = &sent(&rx)[..] else {
             panic!()
         };
         assert_eq!(game.path, Path::new("Both.gba"));
         assert_eq!(version, &app.games.selected_save_versions()[1]);
         press(&mut app, "x");
         press(&mut app, "y");
-        let [Command::TrashSaveVersion(game, version)] = &sent(&rx)[..] else {
+        let [WorkerCommand::TrashSaveVersion(game, version)] = &sent(&rx)[..] else {
             panic!()
         };
         assert_eq!(game.name, "Both.gba");
@@ -1796,16 +1817,16 @@ mod tests {
     fn escape_cancels_running_job() {
         let (mut app, rx) = app();
         press(&mut app, "jp");
-        let (cancel_token, _) = rx.try_recv().unwrap();
-        assert!(!cancel_token.load(Ordering::Relaxed));
-        app.update(Update::Started {
+        let is_canceled = rx.try_recv().unwrap().is_canceled;
+        assert!(!is_canceled.load(Ordering::Relaxed));
+        app.handle_worker_message(WorkerMessage::CommandStarted {
             label: "pulling games".into(),
             total: 2,
         });
         press(&mut app, "\x1b");
-        assert!(cancel_token.load(Ordering::Relaxed));
+        assert!(is_canceled.load(Ordering::Relaxed));
         assert!(app.job_status().unwrap().is_canceling);
-        app.update(Update::Finished {
+        app.handle_worker_message(WorkerMessage::CommandFinished {
             summary: "stopped".into(),
             failed: false,
         });
@@ -1904,7 +1925,7 @@ mod tests {
         fn acts_on_selected_row_without_marks() {
             let (mut app, rx) = app();
             press(&mut app, "jp");
-            let [Command::PullGames(games)] = &sent(&rx)[..] else {
+            let [WorkerCommand::PullGames(games)] = &sent(&rx)[..] else {
                 panic!()
             };
             assert_eq!(paths(games), [Path::new("Both.gba")]);
@@ -1915,7 +1936,7 @@ mod tests {
             let (mut app, rx) = app();
             // Each mark moves on.
             press(&mut app, "jmms");
-            let [Command::PullSaves(games)] = &sent(&rx)[..] else {
+            let [WorkerCommand::PullSaves(games)] = &sent(&rx)[..] else {
                 panic!()
             };
             assert_eq!(paths(games), [Path::new("Both.gba"), Path::new("Hack.gba")]);
@@ -1958,7 +1979,7 @@ mod tests {
         fn shift_s_pushes_newest_save_of_selected_row() {
             let (mut app, rx) = app();
             press(&mut app, "jS");
-            let [Command::PushSaves(games)] = &sent(&rx)[..] else {
+            let [WorkerCommand::PushSaves(games)] = &sent(&rx)[..] else {
                 panic!()
             };
             assert_eq!(paths(games), [Path::new("Both.gba")]);
@@ -1975,7 +1996,7 @@ mod tests {
         fn acts_on_marked_rows_hidden_by_search() {
             let (mut app, rx) = app();
             press(&mut app, "jjm/alpha\nmP");
-            let [Command::PushGames(games)] = &sent(&rx)[..] else {
+            let [WorkerCommand::PushGames(games)] = &sent(&rx)[..] else {
                 panic!()
             };
             // The game only on the device, hidden, has nothing to push.
@@ -1989,9 +2010,9 @@ mod tests {
             press(&mut app, "jjkm");
             let mut fewer = rows();
             fewer.remove(0);
-            app.update(Update::Snapshot(Snapshot {
+            app.handle_worker_message(WorkerMessage::GamesPageChanged(GamesPageData {
                 rows: fewer,
-                device: None,
+                device_root: None,
             }));
             assert_eq!(name_of(app.games.selected_row().unwrap()), "Hack.gba");
             assert_eq!(app.games.marked_count(), 1);
@@ -2006,14 +2027,17 @@ mod tests {
             let (mut app, rx) = app();
             press(&mut app, "jjX");
             let asking = app.dialog().unwrap().title.clone();
-            app.update(Update::Duplicates(vec!["a line".to_string()]));
+            app.handle_worker_message(WorkerMessage::DuplicateGamesSkipped(vec![
+                "a line".to_string(),
+            ]));
             assert_eq!(app.dialog().unwrap().title, asking);
-            // Closing the dialog open shows them; closing them shows nothing.
+            // Closing the open dialog shows them, and closing them shows
+            // nothing.
             press(&mut app, "\x1b");
             assert!(sent(&rx).is_empty());
             let dialog = app.dialog().unwrap();
             assert_eq!(dialog.title, "Duplicate games on the device");
-            assert!(dialog.lines.iter().any(|l| l == "a line"));
+            assert!(dialog.lines.iter().any(|line| line == "a line"));
             press(&mut app, "\n");
             assert!(app.dialog().is_none());
         }
@@ -2028,7 +2052,7 @@ mod tests {
             assert!(app.dialog().is_none());
             assert!(sent(&rx).is_empty());
             press(&mut app, "X\n");
-            assert!(matches!(sent(&rx)[..], [Command::DeleteGames(_)]));
+            assert!(matches!(sent(&rx)[..], [WorkerCommand::DeleteGames(_)]));
         }
 
         #[test]
@@ -2041,7 +2065,10 @@ mod tests {
             press(&mut app, "\n");
             assert!(sent(&rx).is_empty());
             press(&mut app, "Xh\n");
-            assert!(matches!(sent(&rx)[..], [Command::DeleteOrphanSaves(_)]));
+            assert!(matches!(
+                sent(&rx)[..],
+                [WorkerCommand::DeleteOrphanSaves(_)]
+            ));
         }
 
         #[test]
@@ -2061,10 +2088,10 @@ mod tests {
                 dialog
                     .lines
                     .iter()
-                    .any(|l| l.contains("roms/gba/Alpha.gba"))
+                    .any(|line| line.contains("roms/gba/Alpha.gba"))
             );
             press(&mut app, "y");
-            assert!(matches!(sent(&rx)[..], [Command::TrashGames(_)]));
+            assert!(matches!(sent(&rx)[..], [WorkerCommand::TrashGames(_)]));
         }
     }
 
@@ -2076,7 +2103,7 @@ mod tests {
             let (mut app, rx) = app();
             press(&mut app, "i");
             retype(&mut app, "/some/Mine.GBA\n");
-            let [Command::ImportGame(path, None)] = &sent(&rx)[..] else {
+            let [WorkerCommand::ImportGame(path, None)] = &sent(&rx)[..] else {
                 panic!()
             };
             assert_eq!(path, Path::new("/some/Mine.GBA"));
@@ -2088,7 +2115,7 @@ mod tests {
             let (mut app, rx) = app();
             press(&mut app, "i");
             retype(&mut app, "/some/roms/\n");
-            let [Command::ImportGame(path, None)] = &sent(&rx)[..] else {
+            let [WorkerCommand::ImportGame(path, None)] = &sent(&rx)[..] else {
                 panic!()
             };
             assert_eq!(path, Path::new("/some/roms"));
@@ -2103,7 +2130,7 @@ mod tests {
             assert!(sent(&rx).is_empty());
             assert!(matches!(app.prompt(), Some(Prompt::Platform(_))));
             press(&mut app, "j\n");
-            let [Command::ImportGame(path, Some(Platform::Gbc))] = &sent(&rx)[..] else {
+            let [WorkerCommand::ImportGame(path, Some(Platform::Gbc))] = &sent(&rx)[..] else {
                 panic!()
             };
             assert_eq!(path, Path::new("/some/x.bin"));
@@ -2117,7 +2144,7 @@ mod tests {
             retype(&mut app, "/some/x.bin\n");
             app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
             press(&mut app, "\n");
-            let [Command::ImportGame(_, Some(Platform::Gbc))] = &sent(&rx)[..] else {
+            let [WorkerCommand::ImportGame(_, Some(Platform::Gbc))] = &sent(&rx)[..] else {
                 panic!()
             };
         }
@@ -2127,13 +2154,15 @@ mod tests {
             let (mut app, rx) = app();
             press(&mut app, "i");
             retype(&mut app, "/some/Mine.gba");
-            app.update(Update::Duplicates(vec!["a line".to_string()]));
+            app.handle_worker_message(WorkerMessage::DuplicateGamesSkipped(vec![
+                "a line".to_string(),
+            ]));
             press(&mut app, "\n");
             assert!(app.dialog().is_none());
             assert!(sent(&rx).is_empty());
             assert!(app.prompt().is_some());
             press(&mut app, "\n");
-            let [Command::ImportGame(path, None)] = &sent(&rx)[..] else {
+            let [WorkerCommand::ImportGame(path, None)] = &sent(&rx)[..] else {
                 panic!()
             };
             assert_eq!(path, Path::new("/some/Mine.gba"));
@@ -2154,7 +2183,7 @@ mod tests {
             press(&mut app, "c");
             assert!(app.prompt().is_some());
             retype(&mut app, "/some/mine.png\n");
-            let [Command::ImportCover(game, path)] = &sent(&rx)[..] else {
+            let [WorkerCommand::ImportCover(game, path)] = &sent(&rx)[..] else {
                 panic!()
             };
             assert_eq!(game.name, "Alpha.gba");
@@ -2191,7 +2220,7 @@ mod tests {
             press(&mut app, "x");
             assert!(sent(&rx).is_empty());
             retype(&mut app, "/some/Mine.sav\n");
-            let [Command::ImportSave(game, path)] = &sent(&rx)[..] else {
+            let [WorkerCommand::ImportSave(game, path)] = &sent(&rx)[..] else {
                 panic!()
             };
             assert_eq!(game.name, "Both.gba");
@@ -2211,7 +2240,7 @@ mod tests {
             press(&mut app, "\n");
             assert!(sent(&rx).is_empty());
             press(&mut app, "\n");
-            let [Command::ImportSave(_, path)] = &sent(&rx)[..] else {
+            let [WorkerCommand::ImportSave(_, path)] = &sent(&rx)[..] else {
                 panic!()
             };
             assert_eq!(path, &dir.path().join("Mine.sav"));
@@ -2264,7 +2293,7 @@ mod tests {
             assert_eq!((before.as_str(), after.as_str()), ("Alpha", ""));
             // Keys are text here, whatever they do elsewhere.
             press(&mut app, "qx\n");
-            let [Command::RenameGamesInLibrary(games)] = &sent(&rx)[..] else {
+            let [WorkerCommand::RenameGamesInLibrary(games)] = &sent(&rx)[..] else {
                 panic!()
             };
             let [(game, new)] = &games[..] else { panic!() };
@@ -2274,7 +2303,7 @@ mod tests {
 
         /// The rows, with Alpha and Hack named differently in the DATs, and
         /// Both the same.
-        fn app_with_standard_names() -> (App, Receiver<Sent>) {
+        fn app_with_standard_names() -> (App, Receiver<QueuedCommand>) {
             let (mut app, rx) = app();
             let standard_name_of = |name: &str| match name {
                 "Alpha.gba" => Some("Alpha (USA)".to_string()),
@@ -2287,7 +2316,7 @@ mod tests {
                 .map(|row| {
                     let standard_name = standard_name_of(&name_of(&row));
                     match row {
-                        Row::Game { row, files, .. } => Row::Game {
+                        GamesTableRow::Game { row, files, .. } => GamesTableRow::Game {
                             standard_name,
                             row,
                             files,
@@ -2296,9 +2325,9 @@ mod tests {
                     }
                 })
                 .collect();
-            app.update(Update::Snapshot(Snapshot {
+            app.handle_worker_message(WorkerMessage::GamesPageChanged(GamesPageData {
                 rows,
-                device: Some(PathBuf::from("/Volumes/POCKET")),
+                device_root: Some(PathBuf::from("/Volumes/POCKET")),
             }));
             (app, rx)
         }
@@ -2319,7 +2348,7 @@ mod tests {
             assert_eq!(dialog.lines[3..], ["Alpha", "  → Alpha (USA)"]);
             assert!(sent(&rx).is_empty());
             press(&mut app, "\n");
-            let [Command::RenameGamesInLibrary(games)] = &sent(&rx)[..] else {
+            let [WorkerCommand::RenameGamesInLibrary(games)] = &sent(&rx)[..] else {
                 panic!()
             };
             assert_eq!(names_in(games), [("Alpha.gba", "Alpha (USA)")]);
@@ -2329,19 +2358,22 @@ mod tests {
         fn t_shows_five_games_and_counts_rest() {
             let (mut app, rx) = app();
             let rows = (0..7)
-                .map(|i| Row::Game {
+                .map(|i| GamesTableRow::Game {
                     row: GameRow::InLibrary(local(&format!("{i}.gba"), i, &[])),
                     standard_name: Some(format!("Game {i}")),
                     files: Vec::new(),
                 })
                 .collect();
-            app.update(Update::Snapshot(Snapshot { rows, device: None }));
+            app.handle_worker_message(WorkerMessage::GamesPageChanged(GamesPageData {
+                rows,
+                device_root: None,
+            }));
             press(&mut app, "Mt");
             let dialog = app.dialog().unwrap();
             assert_eq!(dialog.title, "Rename 7 games");
             assert_eq!(dialog.lines.last().unwrap(), "… and 2 more");
             press(&mut app, "\n");
-            let [Command::RenameGamesInLibrary(games)] = &sent(&rx)[..] else {
+            let [WorkerCommand::RenameGamesInLibrary(games)] = &sent(&rx)[..] else {
                 panic!()
             };
             assert_eq!(games.len(), 7);
@@ -2359,7 +2391,7 @@ mod tests {
         fn t_leaves_out_marked_rows_with_nothing_to_rename() {
             let (mut app, rx) = app_with_standard_names();
             press(&mut app, "Mt\n");
-            let [Command::RenameGamesInLibrary(games)] = &sent(&rx)[..] else {
+            let [WorkerCommand::RenameGamesInLibrary(games)] = &sent(&rx)[..] else {
                 panic!()
             };
             assert_eq!(names_in(games), [("Alpha.gba", "Alpha (USA)")]);
@@ -2399,7 +2431,7 @@ mod tests {
         fn shift_n_renames_copy_on_device() {
             let (mut app, rx) = app();
             press(&mut app, "jN!\n");
-            let [Command::RenameOnDevice(game, new)] = &sent(&rx)[..] else {
+            let [WorkerCommand::RenameOnDevice(game, new)] = &sent(&rx)[..] else {
                 panic!()
             };
             assert_eq!(game.path, Path::new("Both.gba"));
@@ -2439,7 +2471,7 @@ mod tests {
             // Marks the first and moves on to the second, which goes first.
             press(&mut app, "m");
             let mut rows = rows();
-            let Row::Game { row, .. } = &mut rows[1] else {
+            let GamesTableRow::Game { row, .. } = &mut rows[1] else {
                 panic!()
             };
             let GameRow::Both { local, .. } = row else {
@@ -2448,9 +2480,9 @@ mod tests {
             local.name = "Aaa.gba".to_string();
             let renamed = rows.remove(1);
             rows.insert(0, renamed);
-            app.update(Update::Snapshot(Snapshot {
+            app.handle_worker_message(WorkerMessage::GamesPageChanged(GamesPageData {
                 rows,
-                device: Some(PathBuf::from("/Volumes/POCKET")),
+                device_root: Some(PathBuf::from("/Volumes/POCKET")),
             }));
             let selected = app.games.selected_row().unwrap().local_entry().unwrap();
             assert_eq!(selected.name, "Aaa.gba");
@@ -2479,9 +2511,9 @@ mod tests {
         fn shift_u_installs_new_core_or_updates_installed_one() {
             let (mut app, rx) = on_cores_page();
             press(&mut app, "U");
-            assert_eq!(sent(&rx), [Command::InstallCores(ids(&["new.Core"]))]);
+            assert_eq!(sent(&rx), [WorkerCommand::InstallCores(ids(&["new.Core"]))]);
             press(&mut app, "jU");
-            assert_eq!(sent(&rx), [Command::InstallCores(ids(&["old.Core"]))]);
+            assert_eq!(sent(&rx), [WorkerCommand::InstallCores(ids(&["old.Core"]))]);
         }
 
         #[test]
@@ -2503,9 +2535,9 @@ mod tests {
         #[test]
         fn shift_u_reports_no_device() {
             let (mut app, rx) = on_cores_page();
-            app.update(Update::Snapshot(Snapshot {
+            app.handle_worker_message(WorkerMessage::GamesPageChanged(GamesPageData {
                 rows: Vec::new(),
-                device: None,
+                device_root: None,
             }));
             press(&mut app, "U");
             assert_eq!(app.status_message().unwrap().text, "no device is open");
@@ -2524,13 +2556,13 @@ mod tests {
         fn shift_a_updates_cores_with_newer_release() {
             let (mut app, rx) = on_cores_page();
             press(&mut app, "A");
-            assert_eq!(sent(&rx), [Command::InstallCores(ids(&["old.Core"]))]);
+            assert_eq!(sent(&rx), [WorkerCommand::InstallCores(ids(&["old.Core"]))]);
         }
 
         #[test]
         fn shift_a_reports_every_core_up_to_date() {
             let (mut app, rx) = on_cores_page();
-            app.update(Update::Cores {
+            app.handle_worker_message(WorkerMessage::CoreListChanged {
                 rows: vec![core_row("same.Core", Some("2"), Some("2"))],
                 failure: None,
             });
@@ -2552,7 +2584,7 @@ mod tests {
             press(&mut app, "\n");
             assert_eq!(sent(&rx), []);
             press(&mut app, "Xh\n");
-            assert_eq!(sent(&rx), [Command::RemoveCores(ids(&["old.Core"]))]);
+            assert_eq!(sent(&rx), [WorkerCommand::RemoveCores(ids(&["old.Core"]))]);
         }
 
         #[test]
@@ -2571,7 +2603,7 @@ mod tests {
         fn keeps_selection_on_same_core_when_rows_change() {
             let (mut app, _rx) = on_cores_page();
             press(&mut app, "jj");
-            app.update(Update::Cores {
+            app.handle_worker_message(WorkerMessage::CoreListChanged {
                 rows: vec![
                     core_row("old.Core", Some("2"), Some("2")),
                     core_row("same.Core", Some("2"), Some("2")),
@@ -2579,7 +2611,7 @@ mod tests {
                 failure: None,
             });
             assert_eq!(app.cores.selected_row().unwrap().id(), "same.Core");
-            app.update(Update::Cores {
+            app.handle_worker_message(WorkerMessage::CoreListChanged {
                 rows: vec![core_row("old.Core", Some("2"), Some("2"))],
                 failure: None,
             });
@@ -2598,7 +2630,7 @@ mod tests {
             retype(&mut app, "/some/mine.bin\n");
             assert_eq!(
                 sent(&rx),
-                [Command::PutBios(
+                [WorkerCommand::PutBios(
                     bios_row("gone.bin", BiosStatus::Missing),
                     PathBuf::from("/some/mine.bin")
                 )]
@@ -2633,7 +2665,7 @@ mod tests {
         #[test]
         fn shift_i_reports_no_device() {
             let (mut app, rx) = app();
-            app.update(Update::Snapshot(Snapshot::default()));
+            app.handle_worker_message(WorkerMessage::GamesPageChanged(GamesPageData::default()));
             press(&mut app, "3I");
             assert!(app.prompt().is_none());
             assert_eq!(app.status_message().unwrap().text, "no device is open");
@@ -2644,13 +2676,13 @@ mod tests {
         fn keeps_selection_on_same_file_when_rows_change() {
             let (mut app, _rx) = on_bios_page();
             press(&mut app, "j");
-            app.update(Update::Bios(vec![
+            app.handle_worker_message(WorkerMessage::BiosFilesChanged(vec![
                 bios_row("first.bin", BiosStatus::Missing),
                 bios_row("there.bin", BiosStatus::Present),
                 bios_row("gone.bin", BiosStatus::Missing),
             ]));
             assert_eq!(app.bios.selected_row().unwrap().path, Path::new("gone.bin"));
-            app.update(Update::Bios(Vec::new()));
+            app.handle_worker_message(WorkerMessage::BiosFilesChanged(Vec::new()));
             assert_eq!(app.bios.selected_row(), None);
         }
     }
@@ -2671,18 +2703,18 @@ mod tests {
             let (mut app, _rx) = app();
             assert_eq!(app.device_root(), Some(Path::new("/Volumes/POCKET")));
             let root = PathBuf::from("/Volumes/OTHER");
-            app.update(Update::ReadingDevice(root.clone()));
+            app.handle_worker_message(WorkerMessage::DeviceReadStarted(root.clone()));
             assert_eq!(app.device_root(), None);
             assert!(app.is_busy());
             assert!(app.job_status().is_none());
             let top = header(&mut app);
             assert!(top.contains("reading OTHER…"), "{top}");
-            // In the order the worker tells of them.
-            app.update(Update::Snapshot(Snapshot {
+            // In the order the worker sends them.
+            app.handle_worker_message(WorkerMessage::GamesPageChanged(GamesPageData {
                 rows: rows(),
-                device: Some(root),
+                device_root: Some(root),
             }));
-            app.update(Update::DeviceRead);
+            app.handle_worker_message(WorkerMessage::DeviceReadFinished);
             assert!(!app.is_busy());
             let top = header(&mut app);
             assert!(top.contains("● OTHER"), "{top}");
@@ -2706,7 +2738,10 @@ mod tests {
             // Nothing to select.
             press(&mut app, "3");
             assert_eq!(platform_column(&mut app), 3);
-            app.update(Update::Bios(vec![bios_row("x.bin", BiosStatus::Missing)]));
+            app.handle_worker_message(WorkerMessage::BiosFilesChanged(vec![bios_row(
+                "x.bin",
+                BiosStatus::Missing,
+            )]));
             assert_eq!(platform_column(&mut app), 3);
         }
 
@@ -2785,9 +2820,11 @@ mod tests {
                     terminal.draw(|frame| ui::draw(frame, app)).unwrap();
                 };
                 draw(&mut app);
-                app.update(Update::ReadingDevice(PathBuf::from("/Volumes/POCKET")));
+                app.handle_worker_message(WorkerMessage::DeviceReadStarted(PathBuf::from(
+                    "/Volumes/POCKET",
+                )));
                 draw(&mut app);
-                app.update(Update::DeviceRead);
+                app.handle_worker_message(WorkerMessage::DeviceReadFinished);
                 press(&mut app, "jm");
                 draw(&mut app);
                 press(&mut app, "\n");
@@ -2812,18 +2849,18 @@ mod tests {
                 draw(&mut app);
                 press(&mut app, "\x1b");
                 press(&mut app, "\x1b");
-                app.update(Update::Started {
+                app.handle_worker_message(WorkerMessage::CommandStarted {
                     label: "pushing".into(),
                     total: 3,
                 });
                 draw(&mut app);
-                app.update(Update::Finished {
+                app.handle_worker_message(WorkerMessage::CommandFinished {
                     summary: "pushed".into(),
                     failed: false,
                 });
                 app.handle_key(KeyEvent::from(KeyCode::Tab));
                 draw(&mut app);
-                app.update(Update::Cores {
+                app.handle_worker_message(WorkerMessage::CoreListChanged {
                     rows: vec![
                         core_row("new.Core", None, Some("1")),
                         core_row("old.Core", Some("1"), Some("2")),
@@ -2836,7 +2873,7 @@ mod tests {
                 draw(&mut app);
                 press(&mut app, "n3");
                 draw(&mut app);
-                app.update(Update::Bios(vec![
+                app.handle_worker_message(WorkerMessage::BiosFilesChanged(vec![
                     bios_row("there.bin", BiosStatus::Present),
                     bios_row("short.bin", BiosStatus::WrongSize { size: 1 }),
                     bios_row("gone.bin", BiosStatus::Missing),

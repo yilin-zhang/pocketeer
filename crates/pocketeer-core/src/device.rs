@@ -25,12 +25,11 @@ use crate::{
 /// What a folder must have at its root to be a Pocket.
 const MARKERS: [&str; 3] = ["Analogue_Pocket.json", "Assets", "Cores"];
 
-/// One game on the device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceEntry {
-    /// Where it is under `Assets/<platform>/common/`, e.g. `RPG/Pokemon.gba`.
-    /// Its save is at the same path under `Saves/<platform>/common/`, with
-    /// the extension `.sav`.
+    /// Its path under `Assets/<platform>/common/`, e.g. `RPG/Pokemon.gba`. Its
+    /// save is at the same path under `Saves/<platform>/common/`, with the
+    /// extension `.sav`.
     pub path: PathBuf,
     pub game: Game,
     pub save: Option<Save>,
@@ -45,38 +44,37 @@ impl DeviceEntry {
 /// What a scan found besides the games.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanReport {
-    /// Copies of a game at a later path than its first copy. They are left
-    /// out of everything else: only the first copy's save is synced.
+    /// Copies of a game at a later path than its first copy. Everything else
+    /// ignores them, since only the first copy's save is synced.
     pub duplicates: Vec<DeviceEntry>,
 }
 
-/// Why a game on the device wasn't renamed. Nothing has changed, then.
+/// Why a game on the device wasn't renamed, in which case nothing has changed.
 #[derive(Debug, thiserror::Error)]
 pub enum RenameOnDeviceError {
     #[error("the device can't hold a game of that name")]
     BadName,
     #[error("it has that name already")]
     SameName,
-    /// A file beside it has the name, whatever its extension or case: on the
+    /// A file beside it has that name, whatever its extension or case. On the
     /// device they would share a save.
     #[error("another file on the device has that name")]
     NameTaken,
-    /// The Pocket would give what is there to this game.
+    /// The Pocket would give this game the save already at that name.
     #[error("the device has a save under that name")]
     LeftoversThere,
-    /// A file beside it has its name, and so its save: moving the save would
-    /// take it from that one.
+    /// A file beside it has the same name and therefore the same save, so
+    /// moving the save would take it from that file.
     #[error("another file beside it shares its save")]
     SharesSave,
-    /// A core loads a file of that name, which is no game.
+    /// A core loads a file of that name, so it isn't a game.
     #[error("a core on the device loads a file of that name")]
     BiosName,
     #[error(transparent)]
     Shared(#[from] SharedError),
 }
 
-/// Where everything is on a device: every path pocketeer reads or writes on
-/// it is spelled out here.
+/// Every path pocketeer reads or writes on a device is spelled out here.
 #[derive(Debug, Clone)]
 struct DeviceLayout {
     root: PathBuf,
@@ -105,9 +103,9 @@ impl DeviceLayout {
         self.saves().join(platform.id()).join("common")
     }
 
-    /// The save of the game at `path` under `common/`: the same path under
-    /// `Saves/`, as a `.sav`. This is the Pocket's rule, and it means that
-    /// `Foo.pce` and `Foo.sgx` in one folder share `Foo.sav`.
+    /// The save of the game at `path` under `common/`, which is the same path
+    /// under `Saves/` with the extension `.sav`. This is the Pocket's own rule,
+    /// and it means `Foo.pce` and `Foo.sgx` in one folder share `Foo.sav`.
     fn save(&self, platform: &Platform, path: &Path) -> PathBuf {
         self.saves_common(platform).join(path.with_extension("sav"))
     }
@@ -120,7 +118,7 @@ impl DeviceLayout {
         self.cores().join(id)
     }
 
-    /// Kept apart from what the Pocket uses.
+    /// Pocketeer's own folder, apart from what the Pocket uses.
     fn pocketeer(&self) -> PathBuf {
         self.root.join(".pocketeer")
     }
@@ -129,13 +127,14 @@ impl DeviceLayout {
         self.pocketeer().join("cache.json")
     }
 
-    /// Where what is to be installed waits until all of it is there. On the
-    /// device, so that it only has to be renamed.
+    /// Holds what is being installed until all of it is there. It is on the
+    /// device so that each file only has to be renamed.
     fn staging(&self) -> PathBuf {
         self.pocketeer().join("staging")
     }
 
-    /// Where a platform set aside goes, which by being there stays set aside.
+    /// Where a platform that has been set aside goes. Being there keeps it set
+    /// aside.
     fn archived_platform(&self, file: &Path) -> PathBuf {
         self.root.join("Platforms").join("_archive").join(file)
     }
@@ -151,17 +150,14 @@ pub struct OrphanDeviceSave {
     pub save: Save,
 }
 
-/// Why a save on the device wasn't deleted.
 #[derive(Debug, thiserror::Error)]
 pub enum DeleteSaveError {
-    /// There is no such save on the device.
     #[error("no save on the device")]
     NoSave,
     #[error(transparent)]
     Shared(#[from] SharedError),
 }
 
-/// Why no device was opened.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenDeviceError {
     /// `path` lacks some of the files and folders every Pocket has.
@@ -170,42 +166,43 @@ pub enum OpenDeviceError {
         path: PathBuf,
         missing: Vec<&'static str>,
     },
-    /// More than one device is mounted, at `found`.
     #[error("more than one device is mounted: {}", joined_paths(.found))]
     ManyDevices { found: Vec<PathBuf> },
 }
 
 fn joined_paths(paths: &[PathBuf]) -> String {
-    let paths: Vec<_> = paths.iter().map(|p| p.display().to_string()).collect();
+    let paths: Vec<_> = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
     paths.join(", ")
 }
 
-/// Why the device wasn't ejected. Clones, as what an operation returns also
-/// goes in the log.
+/// Why the device wasn't ejected. This derives `Clone` because operation
+/// results also go in the log.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum EjectDeviceError {
-    /// The system didn't eject the device; `message` is what it said.
+    /// The system didn't eject the device, and `message` is what it said.
     #[error("couldn't eject the device: {message}")]
     EjectFailed { message: String },
     #[error(transparent)]
     Shared(#[from] SharedError),
 }
 
-/// A Pocket, as a mounted drive: the Pocket itself or its SD card in a reader.
+/// A Pocket as a mounted drive, either the Pocket itself or its SD card in a
+/// reader.
 #[derive(Debug, Clone)]
 pub struct Device {
     layout: DeviceLayout,
     cache: Cache,
-    /// What the last scan found, by platform and path, each game once, with
-    /// what pocketeer has put on the device since.
+    /// What the last scan found, sorted by platform id and path with each game
+    /// once, plus what pocketeer has put on the device since.
     entries: Vec<DeviceEntry>,
-    /// Whether `entries` has been read at all.
     scanned: bool,
 }
 
 impl Device {
-    /// The roots of the devices mounted now, sorted; there may be none, or
-    /// more than one.
+    /// The roots of the mounted devices, sorted.
     pub fn find_mounted() -> Vec<PathBuf> {
         devices_among(mounted_volumes())
     }
@@ -249,15 +246,16 @@ impl Device {
         self.scanned
     }
 
-    /// The game of `platform` at `path` under `common/`, as the last scan
-    /// found it.
+    /// The game of `platform` at `path` under `common/`, as of the last scan.
     pub fn entry_at(&self, platform: &Platform, path: &Path) -> Option<&DeviceEntry> {
-        self.entries.iter().find(|e| e.is_at(platform, path))
+        self.entries
+            .iter()
+            .find(|entry| entry.is_at(platform, path))
     }
 
     /// The device's copy of `game`, wherever it is.
     pub fn entry_for(&self, game: &Game) -> Option<&DeviceEntry> {
-        self.entries.iter().find(|e| &e.game == game)
+        self.entries.iter().find(|entry| &entry.game == game)
     }
 
     /// Deletes `entry`'s file for good. Its save stays.
@@ -267,7 +265,7 @@ impl Device {
         self.cache.forget(&path);
         self.cache.save();
         self.entries
-            .retain(|e| !e.is_at(&entry.game.platform, &entry.path));
+            .retain(|existing| !existing.is_at(&entry.game.platform, &entry.path));
         Ok(())
     }
 
@@ -276,22 +274,24 @@ impl Device {
         let path = self.save_path(entry);
         let removed = match fs::remove_file(&path) {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(DeleteSaveError::NoSave),
-            Err(e) => return Err(SharedError::from(e).into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Err(DeleteSaveError::NoSave),
+            Err(error) => return Err(SharedError::from(error).into()),
         };
-        if let Some(e) = self.entry_mut(entry) {
-            e.save = None;
+        if let Some(stored_entry) = self.entry_mut(entry) {
+            stored_entry.save = None;
         }
         removed
     }
 
-    /// Deletes `orphan` for good, if it is still an orphan: a game may have
-    /// been put at its path since.
+    /// Deletes `orphan` for good if it is still an orphan, since a game may
+    /// have been put at its path.
     pub(crate) fn remove_orphan_save(
         &self,
         orphan: &OrphanDeviceSave,
     ) -> Result<(), DeleteSaveError> {
-        let is_it = |o: &OrphanDeviceSave| o.platform == orphan.platform && o.path == orphan.path;
+        let is_it = |candidate: &OrphanDeviceSave| {
+            candidate.platform == orphan.platform && candidate.path == orphan.path
+        };
         if !self.find_orphan_saves()?.iter().any(is_it) {
             return Err(DeleteSaveError::NoSave);
         }
@@ -304,8 +304,8 @@ impl Device {
     }
 
     /// Finds every game on the device, keeping the first copy of each. A game
-    /// whose file is unchanged since the last scan is not read again. A file a
-    /// core loads is no game.
+    /// whose file is unchanged since the last scan is not read again, and files
+    /// a core loads don't count as games.
     pub fn scan(&mut self) -> Result<ScanReport, SharedError> {
         let declared = self.declared_files()?;
         let layout = &self.layout;
@@ -339,15 +339,14 @@ impl Device {
         Ok(ScanReport { duplicates })
     }
 
-    /// Where a game of `platform` at `path` under `common/` is, whether or
-    /// not there is one.
+    /// Where a game of `platform` at `path` under `common/` would be.
     pub fn game_path(&self, platform: &Platform, path: &Path) -> PathBuf {
         self.layout.game(platform, path)
     }
 
     /// Copies the file at `from`, which holds `game`, to `path` under
-    /// `common/`, replacing what is there. The device's cache learns its hash,
-    /// so the next scan doesn't read it back.
+    /// `common/`, replacing what is there. The cache records its hash, so the
+    /// next scan doesn't read the file back.
     pub(crate) fn put_game(
         &mut self,
         game: &Game,
@@ -367,10 +366,12 @@ impl Device {
         Ok(entry)
     }
 
-    /// Adds `entry` to the entries, in its place, in place of any at its path.
+    /// Inserts `entry` so that `entries` stays sorted by platform id and path,
+    /// replacing any entry already at that path.
     fn insert(&mut self, entry: DeviceEntry) {
-        let place = self.entries.binary_search_by(|e| {
-            (e.game.platform.id(), &e.path).cmp(&(entry.game.platform.id(), &entry.path))
+        let place = self.entries.binary_search_by(|existing| {
+            (existing.game.platform.id(), &existing.path)
+                .cmp(&(entry.game.platform.id(), &entry.path))
         });
         match place {
             Ok(at) => self.entries[at] = entry,
@@ -378,9 +379,9 @@ impl Device {
         }
     }
 
-    /// Calls `entry` `new` instead, in the same folder, keeping its extension,
-    /// with every file of its name beside its save: a core may keep more than
-    /// the save there. Its contents aren't read again.
+    /// Renames `entry` to `new` in the same folder, keeping its extension.
+    /// Every file beside its save with the same name moves too, because a core
+    /// may keep more than the save there. The contents aren't read again.
     pub(crate) fn rename_game(
         &mut self,
         entry: &DeviceEntry,
@@ -404,7 +405,7 @@ impl Device {
         let lowercase_to = to.to_string_lossy().to_lowercase();
         if declared
             .iter()
-            .any(|f| f.to_string_lossy().to_lowercase() == lowercase_to)
+            .any(|file| file.to_string_lossy().to_lowercase() == lowercase_to)
         {
             return Err(RenameOnDeviceError::BiosName);
         }
@@ -427,7 +428,7 @@ impl Device {
             .saves_common(platform)
             .join(entry.path.parent().unwrap_or(Path::new("")));
         let saves = list_dir(&saves_dir)?.files;
-        // With only the case changed, those are the game's own.
+        // If only the case changed, those files are the game's own.
         if old_stem != new_stem && saves.iter().any(|name| stem_of(name) == new_stem) {
             return Err(RenameOnDeviceError::LeftoversThere);
         }
@@ -450,7 +451,8 @@ impl Device {
         self.cache.forget(&from);
         self.cache.record_game(&to, &entry.game)?;
         self.cache.save();
-        self.entries.retain(|e| !e.is_at(platform, &entry.path));
+        self.entries
+            .retain(|existing| !existing.is_at(platform, &entry.path));
         let renamed = DeviceEntry {
             path: new_path,
             game: entry.game.clone(),
@@ -465,8 +467,8 @@ impl Device {
         self.layout.save(&entry.game.platform, &entry.path)
     }
 
-    /// The saves on the device with no game, as the folders are now: they
-    /// are looked for each time, and the device needn't be scanned.
+    /// The saves on the device with no game, as the folders are now. They are
+    /// looked up each time, so the device needn't be scanned.
     pub fn find_orphan_saves(&self) -> Result<Vec<OrphanDeviceSave>, SharedError> {
         let declared = self.declared_files()?;
         let saves = self.layout.saves();
@@ -476,12 +478,12 @@ impl Device {
             let games = list_files_recursive(&self.layout.common(&platform))?;
             let games: Vec<PathBuf> = games
                 .iter()
-                .filter(|p| !declared.contains(&self.layout.game(&platform, p)))
-                .map(|p| p.with_extension(""))
+                .filter(|path| !declared.contains(&self.layout.game(&platform, path)))
+                .map(|path| path.with_extension(""))
                 .collect();
             let dir = self.layout.saves_common(&platform);
             for path in list_files_recursive(&dir)? {
-                let is_save = path.extension().is_some_and(|e| e == "sav");
+                let is_save = path.extension().is_some_and(|extension| extension == "sav");
                 if !is_save || games.contains(&path.with_extension("")) {
                     continue;
                 }
@@ -496,20 +498,20 @@ impl Device {
         Ok(orphans)
     }
 
-    /// `entry`'s save as it is now, which may not be what the scan saw;
+    /// `entry`'s save as it is now, which may differ from what the scan saw, or
     /// none if it has none.
     pub fn read_save(&self, entry: &DeviceEntry) -> Result<Option<Save>, SharedError> {
         read_save(&self.save_path(entry))
     }
 
-    /// Makes the file at `from` `entry`'s save, last written when `from`
-    /// was, so that it is the same version as `from`.
+    /// Makes the file at `from` into `entry`'s save, keeping `from`'s write
+    /// time so that it counts as the same version.
     pub(crate) fn put_save(&mut self, entry: &DeviceEntry, from: &Path) -> Result<(), SharedError> {
-        let modified = fs::metadata(from).and_then(|m| m.modified())?;
+        let modified = fs::metadata(from).and_then(|metadata| metadata.modified())?;
         let bytes = fs::read(from)?;
         write_atomically(&self.save_path(entry), &bytes, Some(modified))?;
-        if let Some(e) = self.entry_mut(entry) {
-            e.save = Some(Save::from_bytes(&bytes, modified));
+        if let Some(stored_entry) = self.entry_mut(entry) {
+            stored_entry.save = Some(Save::from_bytes(&bytes, modified));
         }
         Ok(())
     }
@@ -517,7 +519,7 @@ impl Device {
     fn entry_mut(&mut self, entry: &DeviceEntry) -> Option<&mut DeviceEntry> {
         self.entries
             .iter_mut()
-            .find(|e| e.is_at(&entry.game.platform, &entry.path))
+            .find(|existing| existing.is_at(&entry.game.platform, &entry.path))
     }
 
     /// The cores on the device, as the folders are now. One whose `core.json`
@@ -531,7 +533,7 @@ impl Device {
                 let json = fs::read(self.layout.core(&id).join("core.json")).ok();
                 let (version, platforms) = json
                     .and_then(|bytes| parse_core_json(&bytes))
-                    .map_or((None, Vec::new()), |(v, p)| (Some(v), p));
+                    .map_or((None, Vec::new()), |(version, path)| (Some(version), path));
                 InstalledCore {
                     id,
                     version,
@@ -541,15 +543,17 @@ impl Device {
             .collect())
     }
 
-    /// Installs `zip`. All of it is written beside the device's files before
-    /// any is touched, so that a zip that can't be read or a device that is
-    /// full changes nothing; then each file is renamed into place with
-    /// `core.json` last, so that a core stopped halfway is still at its old
-    /// version and installing it again finishes the job.
+    /// Installs `zip`.
+    ///
+    /// Everything is written beside the device's files before any of them
+    /// changes, so an unreadable zip or a full device changes nothing. Each
+    /// file is then renamed into place with `core.json` last, so a core stopped
+    /// halfway still reports its old version and installing it again finishes
+    /// the job.
     pub(crate) fn install_core(&self, zip: &mut CoreZip) -> Result<(), SharedError> {
         let staging = self.layout.staging();
         match fs::remove_dir_all(&staging) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
             _ => {}
         }
         let installed = self.stage_and_place(zip, &staging);
@@ -577,9 +581,10 @@ impl Device {
         Ok(())
     }
 
-    /// Whether a file of a core's zip is to be written at `path`. What the
-    /// device has in `Platforms/` is kept: cores share it, and it may have
-    /// been changed by hand. A platform set aside stays set aside.
+    /// Whether a file from a core's zip should be written at `path`. What the
+    /// device already has in `Platforms/` is kept, because cores share it and
+    /// it may have been changed by hand. A platform that was set aside stays
+    /// set aside.
     fn can_install_at(&self, path: &Path) -> bool {
         let Ok(in_platforms) = path.strip_prefix("Platforms") else {
             return true;
@@ -587,9 +592,9 @@ impl Device {
         !self.root().join(path).exists() && !self.layout.archived_platform(in_platforms).exists()
     }
 
-    /// Deletes the core's own folder for good; what else it uses stays.
+    /// Deletes the core's own folder for good. Anything else it uses stays.
     pub(crate) fn remove_core(&self, id: &str) -> Result<(), RemoveCoreError> {
-        if !self.installed_cores()?.iter().any(|c| c.id == id) {
+        if !self.installed_cores()?.iter().any(|core| core.id == id) {
             return Err(RemoveCoreError::NotInstalled);
         }
         let path = self.layout.core(id);
@@ -603,7 +608,7 @@ impl Device {
         for core in self.installed_cores()? {
             let json = fs::read(self.layout.core(&core.id).join("data.json")).unwrap_or_default();
             let declared = parse_core_files(&core.platforms, &json);
-            files.extend(declared.into_iter().map(|f| (core.id.clone(), f)));
+            files.extend(declared.into_iter().map(|file| (core.id.clone(), file)));
         }
         Ok(files)
     }
@@ -614,7 +619,7 @@ impl Device {
         let files = self.core_files()?;
         Ok(files
             .iter()
-            .map(|(_, f)| self.layout.game(&f.platform, &f.path))
+            .map(|(_, file)| self.layout.game(&file.platform, &file.path))
             .collect())
     }
 
@@ -623,7 +628,7 @@ impl Device {
     pub fn read_bios_rows(&self) -> Result<Vec<BiosRow>, SharedError> {
         let mut rows: Vec<BiosRow> = Vec::new();
         for (core, file) in self.core_files()? {
-            let same = |r: &&mut BiosRow| r.platform == file.platform && r.path == file.path;
+            let same = |row: &&mut BiosRow| row.platform == file.platform && row.path == file.path;
             if let Some(row) = rows.iter_mut().find(same) {
                 row.needed_by.push((core, file.required));
                 row.size_exact = row.size_exact.filter(|_| row.size_exact == file.size_exact);
@@ -644,8 +649,8 @@ impl Device {
                     BiosStatus::WrongSize { size: meta.len() }
                 }
                 Ok(_) => BiosStatus::Present,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => BiosStatus::Missing,
-                Err(e) => return Err(e.into()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => BiosStatus::Missing,
+                Err(error) => return Err(error.into()),
             };
         }
         rows.sort_by(|a, b| (a.platform.id(), &a.path).cmp(&(b.platform.id(), &b.path)));
@@ -663,7 +668,7 @@ impl Device {
         let rows = self.read_bios_rows()?;
         let row = rows
             .iter()
-            .find(|r| &r.platform == platform && r.path == path);
+            .find(|row| &row.platform == platform && row.path == path);
         let row = row.ok_or(PutBiosError::NotDeclared)?;
         if row.status != BiosStatus::Missing {
             return Err(PutBiosError::AlreadyThere);
@@ -707,14 +712,15 @@ impl Device {
     }
 }
 
-/// Every volume mounted now, by the system's conventions: the folders in
-/// the folders volumes are mounted in, or on Windows the drives.
+/// Every volume mounted now, by each system's conventions. On Windows these are
+/// the drives, and elsewhere the folders inside the folders that volumes are
+/// mounted in.
 fn mounted_volumes() -> Vec<PathBuf> {
     let in_dirs = |dirs: &[PathBuf]| -> Vec<PathBuf> {
         dirs.iter()
             .filter_map(|dir| fs::read_dir(dir).ok())
             .flatten()
-            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter_map(|entry| entry.ok().map(|dir_entry| dir_entry.path()))
             .collect()
     };
     match std::env::consts::OS {
@@ -729,13 +735,12 @@ fn mounted_volumes() -> Vec<PathBuf> {
             ])
         }
         "windows" => (b'A'..=b'Z')
-            .map(|d| PathBuf::from(format!("{}:\\", d as char)))
+            .map(|drive_letter| PathBuf::from(format!("{}:\\", drive_letter as char)))
             .collect(),
         _ => Vec::new(),
     }
 }
 
-/// Those of `volumes` that are devices, sorted.
 fn devices_among(volumes: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut devices: Vec<PathBuf> = volumes
         .into_iter()
@@ -746,18 +751,19 @@ fn devices_among(volumes: Vec<PathBuf>) -> Vec<PathBuf> {
     devices
 }
 
-/// The markers `root` lacks to be a device.
 fn missing_markers(root: &Path) -> Vec<&'static str> {
     MARKERS
         .into_iter()
-        .filter(|m| !root.join(m).exists())
+        .filter(|marker| !root.join(marker).exists())
         .collect()
 }
 
-/// Runs `command`; what it printed, if it succeeded.
+/// Runs `command` and returns what it printed if it succeeded.
 fn run_command(command: &mut Command) -> Result<String, EjectDeviceError> {
     let eject_failed = |message: String| EjectDeviceError::EjectFailed { message };
-    let out = command.output().map_err(|e| eject_failed(e.to_string()))?;
+    let out = command
+        .output()
+        .map_err(|error| eject_failed(error.to_string()))?;
     if !out.status.success() {
         let said = [&out.stderr[..], &out.stdout[..]].concat();
         return Err(eject_failed(
@@ -767,12 +773,11 @@ fn run_command(command: &mut Command) -> Result<String, EjectDeviceError> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// The save at `path`; none if there is none.
 fn read_save(path: &Path) -> Result<Option<Save>, SharedError> {
     match Save::read(path) {
         Ok(save) => Ok(Some(save)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -787,7 +792,6 @@ mod tests {
         device.entries().to_vec()
     }
 
-    /// An empty device.
     fn empty_device() -> (tempfile::TempDir, Device) {
         let dir = tempfile::tempdir().unwrap();
         put(dir.path(), "Analogue_Pocket.json", b"{}");
@@ -798,13 +802,13 @@ mod tests {
     }
 
     fn paths(entries: &[DeviceEntry]) -> Vec<PathBuf> {
-        entries.iter().map(|e| e.path.clone()).collect()
+        entries.iter().map(|entry| entry.path.clone()).collect()
     }
 
     fn crc32s(entries: &[DeviceEntry]) -> Vec<u32> {
         entries
             .iter()
-            .map(|e| match e.game.files {
+            .map(|entry| match entry.game.files {
                 Files::Single(rom) => rom.crc32,
             })
             .collect()
@@ -903,11 +907,12 @@ mod tests {
             let path = "Assets/gba/common/Tetris.gba";
             put_at(&root, path, b"hello", 1_000_000);
             scanned(&mut device);
-            // Same size and time, other contents: the cache answers.
+            // Same size and time with other contents, so the cached game is
+            // used.
             put_at(&root, path, b"jello", 1_000_000);
             let mut reopened = Device::open(&root).unwrap();
             assert_eq!(crc32s(&scanned(&mut reopened)), [0x3610a686]);
-            // A new time: read again.
+            // A new time, so it is read again.
             put_at(&root, path, b"jello", 1_000_002);
             assert_eq!(crc32s(&scanned(&mut reopened)), [0x4cd0f5e6]);
         }
@@ -983,7 +988,8 @@ mod tests {
             assert_eq!(fs::read(&path).unwrap(), b"hello");
             // Listed at once, without a scan.
             assert_eq!(device.entries(), std::slice::from_ref(&put_there));
-            // Other contents of the same size and time: the cache answers.
+            // Other contents of the same size and time, so the cached game is
+            // used.
             let time = fs::metadata(&path).unwrap().modified().unwrap();
             fs::write(&path, b"jello").unwrap();
             fs::File::options()
@@ -995,7 +1001,8 @@ mod tests {
             assert_eq!(scanned(&mut device), [put_there]);
         }
 
-        /// A device with `One.gba`, its save, and `Two.gba`; and `One.gba`'s entry.
+        /// A device with `One.gba`, its save, and `Two.gba`, along with
+        /// `One.gba`'s entry.
         fn with_two_games() -> (tempfile::TempDir, Device, DeviceEntry) {
             let (dir, mut device) = empty_device();
             let root = dir.path();
@@ -1145,8 +1152,8 @@ mod tests {
                 ("Cores/a.B/core.json", core_json("2.0").as_bytes()),
                 ("Cores/a.B/core.rbf_r", b"new bits"),
             ]);
-            // What is in the way of the staging folder is where it can't be
-            // written.
+            // A file sits where the staging folder goes, so the new version
+            // can't be written.
             let root = device.root();
             let staged = put(root, ".pocketeer/in the way", b"x");
             fs::rename(&staged, root.join(".pocketeer/staging")).unwrap();
@@ -1198,7 +1205,7 @@ mod tests {
             put(root, "Saves/gba/common/Old.sav", b"another folder's");
             let entry = scanned(&mut device)
                 .into_iter()
-                .find(|e| e.path == Path::new("RPG/Old.gba"))
+                .find(|entry| entry.path == Path::new("RPG/Old.gba"))
                 .unwrap();
             (dir, device, entry)
         }
@@ -1245,10 +1252,13 @@ mod tests {
         fn does_not_reread_renamed_game() {
             let (dir, mut device, entry) = with_game();
             device.rename_game(&entry, "New").unwrap();
-            // Same size and time, other contents: the cache answers.
+            // Same size and time with other contents, so the cached game is
+            // used.
             put_at(dir.path(), "Assets/gba/common/RPG/New.gba", b"new", 1_000);
             let found = scanned(&mut device);
-            let found = found.iter().find(|e| e.path == Path::new("RPG/New.gba"));
+            let found = found
+                .iter()
+                .find(|entry| entry.path == Path::new("RPG/New.gba"));
             assert_eq!(found.unwrap().game, entry.game);
         }
 
@@ -1312,7 +1322,7 @@ mod tests {
             put(root, "Assets/gba/common/Mine.gba", b"mine");
             let entry = scanned(&mut device)
                 .into_iter()
-                .find(|e| e.path == Path::new("Mine.gba"))
+                .find(|entry| entry.path == Path::new("Mine.gba"))
                 .unwrap();
             let before = all_files(root);
             let refused = device.rename_game(&entry, "Bios").unwrap_err();
@@ -1325,8 +1335,9 @@ mod tests {
             let (dir, mut device, entry) = with_game();
             let root = dir.path();
             let before = all_files(root);
-            // Too long to be a file's name with a longer extension than `.a`,
-            // which goes first.
+            // The new name fits a file ending in `.a` but is too long with
+            // `.sav`. The `.a` file moves first, so this checks that it is
+            // moved back.
             put(root, "Saves/gba/common/RPG/Old.a", b"short");
             let new = "x".repeat(253);
             assert!(matches!(
@@ -1522,7 +1533,8 @@ mod tests {
                 let root = device.root().to_path_buf();
                 put(&root, "Assets/gba/common/gba_bios.bin", b"four");
                 put(&root, "Assets/gba/common/Sonic.bin", b"game");
-                // Only where the core looks.
+                // The same file name in another folder isn't where the core
+                // looks, so it counts as a game.
                 put(&root, "Assets/gba/common/RPG/gba_bios.bin", b"other");
                 assert_eq!(
                     paths(&scanned(&mut device)),
@@ -1553,7 +1565,7 @@ mod tests {
                 put(root, "Saves/gba/common/gba_bios.sav", b"save");
                 put(root, "Saves/gba/common/Kept.sav", b"save");
                 let orphans = device.find_orphan_saves().unwrap();
-                let found: Vec<_> = orphans.iter().map(|o| o.path.clone()).collect();
+                let found: Vec<_> = orphans.iter().map(|orphan| orphan.path.clone()).collect();
                 assert_eq!(found, [PathBuf::from("gba_bios.sav")]);
             }
         }
@@ -1571,12 +1583,19 @@ mod tests {
             put(root, "Saves/gba/common/RPG/Gone.sav", b"none");
             put(root, "Saves/gba/common/._Gone.sav", b"hidden");
             put(root, "Saves/gba/common/notes.txt", b"not a save");
-            // No folder for this platform under `Assets/`, nor a scan.
+            // This platform has no folder under `Assets/`, and the device
+            // hasn't been scanned.
             put(root, "Saves/gb/common/Gone Too.sav", b"none");
             let orphans = device.find_orphan_saves().unwrap();
             let found: Vec<_> = orphans
                 .iter()
-                .map(|o| (o.platform.clone(), o.path.clone(), o.save.size))
+                .map(|orphan| {
+                    (
+                        orphan.platform.clone(),
+                        orphan.path.clone(),
+                        orphan.save.size,
+                    )
+                })
                 .collect();
             assert_eq!(
                 found,

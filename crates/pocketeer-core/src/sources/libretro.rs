@@ -18,7 +18,7 @@ const DAT_FILES: &str =
 /// One repository per system, named after its DAT with `_` for spaces.
 const COVER_TREES: &str = "https://api.github.com/repos/libretro-thumbnails";
 const COVER_FILES: &str = "https://raw.githubusercontent.com/libretro-thumbnails";
-/// The folder of each repository with the covers; the others hold
+/// The folder in each repository that holds the covers. The others hold
 /// screenshots, title screens and logos.
 const BOXARTS: &str = "Named_Boxarts";
 
@@ -55,7 +55,7 @@ impl Libretro {
                 "NEC - PC Engine - TurboGrafx 16",
                 "NEC - PC Engine SuperGrafx",
             ],
-            // Neo Geo is arcade; No-Intro has no DAT for it.
+            // Neo Geo is arcade, and No-Intro has no DAT for it.
             Platform::NeoGeo | Platform::Other(_) => &[],
         }
     }
@@ -76,10 +76,10 @@ impl RemoteDatSource for Libretro {
         let files: Vec<File> = get_json(DAT_LISTING)?;
         Ok(files
             .into_iter()
-            .filter_map(|f| {
+            .filter_map(|file| {
                 Some(RemoteDat {
-                    name: f.name.strip_suffix(".dat")?.to_string(),
-                    version: f.sha,
+                    name: file.name.strip_suffix(".dat")?.to_string(),
+                    version: file.sha,
                 })
             })
             .collect())
@@ -87,9 +87,9 @@ impl RemoteDatSource for Libretro {
 
     fn fetch(&self, name: &str) -> Result<String, SharedError> {
         let url = format!("{DAT_FILES}/{}.dat", encode(name));
-        String::from_utf8(get(&url)?).map_err(|e| SharedError::BadResponse {
+        String::from_utf8(get(&url)?).map_err(|error| SharedError::BadResponse {
             from: url,
-            message: e.to_string(),
+            message: error.to_string(),
         })
     }
 
@@ -103,15 +103,15 @@ impl RemoteCoverSource for Libretro {
         Libretro::systems(platform)
     }
 
-    /// The covers folder's own id, which changes with what is in it; one
-    /// request to GitHub's API.
+    /// The covers folder's own id, which changes with its contents. This takes
+    /// one request to GitHub's API.
     fn version(&self, system: &str) -> Result<String, SharedError> {
         let url = format!("{COVER_TREES}/{}/git/trees/master", repository(system));
         let root: Tree = get_json(&url)?;
         root.tree
             .into_iter()
-            .find(|e| e.path == BOXARTS)
-            .map(|e| e.sha)
+            .find(|tree_entry| tree_entry.path == BOXARTS)
+            .map(|tree_entry| tree_entry.sha)
             .ok_or_else(|| SharedError::BadResponse {
                 from: url,
                 message: format!("no {BOXARTS} folder"),
@@ -125,7 +125,7 @@ impl RemoteCoverSource for Libretro {
         Ok(dir
             .tree
             .into_iter()
-            .filter_map(|e| Some(e.path.strip_suffix(".png")?.to_string()))
+            .filter_map(|tree_entry| Some(tree_entry.path.strip_suffix(".png")?.to_string()))
             .collect())
     }
 
@@ -134,15 +134,15 @@ impl RemoteCoverSource for Libretro {
     fn cover_name(&self, game_name: &str) -> String {
         game_name
             .chars()
-            .map(|c| match c {
+            .map(|character| match character {
                 '&' | '*' | '/' | ':' | '`' | '<' | '>' | '?' | '\\' | '|' | '"' => '_',
-                c => c,
+                character => character,
             })
             .collect()
     }
 
-    /// Some covers are symlinks to another cover, which come as the name of
-    /// that cover; those are followed, once.
+    /// Some covers are symlinks to another cover, which arrive as that cover's
+    /// name. They are followed once.
     fn fetch(&self, system: &str, cover_name: &str) -> Result<Cover, SharedError> {
         let url = cover_url(system, cover_name);
         let mut bytes = get(&url)?;
@@ -164,9 +164,8 @@ fn cover_url(system: &str, cover_name: &str) -> String {
     )
 }
 
-/// The cover that `bytes`, downloaded as a cover, name if they are a symlink:
-/// one line that is the file name of a PNG beside it, and no path, since they
-/// come from the network.
+/// The cover that `bytes` point to if they are a symlink. A symlink is one line
+/// naming a PNG beside it, with no path, since the data comes from the network.
 fn link_target(bytes: &[u8]) -> Option<&str> {
     let target = std::str::from_utf8(bytes).ok()?.strip_suffix(".png")?;
     let plain = !target.is_empty() && !target.contains(['/', '\\', '\n', '\r']);
@@ -180,11 +179,11 @@ fn repository(system: &str) -> String {
 /// `name` as one URL path segment.
 fn encode(name: &str) -> String {
     name.bytes()
-        .map(|b| match b {
+        .map(|byte| match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                (b as char).to_string()
+                (byte as char).to_string()
             }
-            _ => format!("%{b:02X}"),
+            _ => format!("%{byte:02X}"),
         })
         .collect()
 }

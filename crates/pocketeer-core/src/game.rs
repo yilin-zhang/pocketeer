@@ -12,24 +12,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::platform::Platform;
 
-/// Whether a game can be called `name` in a folder: it would otherwise be put
-/// elsewhere, or be hidden and so not found again.
+/// Whether a game can be called `name` in a folder. Other names would put it
+/// elsewhere, or hide it so that it can't be found again.
 pub(crate) fn is_valid_file_name(name: &str) -> bool {
     !name.is_empty() && !name.starts_with('.') && !name.contains(['/', '\\'])
 }
 
-/// Whether a game can be given `name` and be the same on a device: FAT file
-/// systems don't take these characters, and macOS writes them as something else
-/// rather than refusing them.
+/// Whether a game can have `name` and keep it on a device. FAT file systems
+/// don't allow these characters, and macOS silently writes something else
+/// instead of refusing them.
 pub(crate) fn is_valid_fat_name(name: &str) -> bool {
     is_valid_file_name(name) && !name.contains([':', '?', '*', '"', '<', '>', '|'])
 }
 
-/// What the file `name` is called once renamed to `new`: it keeps its extension,
-/// even if `new` has it already.
+/// The file name after renaming `name` to `new`. The extension stays, even if
+/// `new` already has it.
 pub(crate) fn renamed_file_name(name: &str, new: &str) -> String {
     let new = new.trim();
-    let Some(extension) = Path::new(name).extension().and_then(|e| e.to_str()) else {
+    let Some(extension) = Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+    else {
         return new.to_string();
     };
     let dotted = format!(".{extension}").to_lowercase();
@@ -48,10 +51,8 @@ pub struct Rom {
     pub crc32: u32,
 }
 
-/// What a game's files are.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Files {
-    /// One ROM file.
     Single(Rom),
     // Games made of several files (an instance JSON and its data files, as
     // CD games are) will be another variant.
@@ -64,7 +65,7 @@ pub struct Game {
 }
 
 impl Game {
-    /// Reads the ROM at `path` once.
+    /// Hashes the ROM at `path` without holding all of it in memory.
     pub fn read(platform: Platform, path: &Path) -> io::Result<Self> {
         let mut file = File::open(path)?;
         // No-Intro lists NES ROMs without the 16-byte iNES header the cores
@@ -95,7 +96,6 @@ impl Save {
         Ok(Save::from_bytes(&bytes, fs::metadata(path)?.modified()?))
     }
 
-    /// A save with these contents, written at `modified`.
     pub fn from_bytes(bytes: &[u8], modified: SystemTime) -> Self {
         Self {
             size: bytes.len() as u64,
@@ -104,7 +104,7 @@ impl Save {
         }
     }
 
-    /// When it was written, in UTC, as a file name can hold it, e.g.
+    /// When it was written, in UTC, in a form a file name can hold, e.g.
     /// `2026-11-03T14-20-05`.
     pub fn timestamp(&self) -> String {
         let time = Timestamp::try_from(self.modified).unwrap_or(Timestamp::UNIX_EPOCH);
@@ -117,7 +117,7 @@ impl Save {
     }
 }
 
-/// A save as the library keeps it: the current backup and the ones it
+/// A save as the library keeps it, with the current backup and the ones it
 /// replaced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveHistory {
@@ -127,9 +127,9 @@ pub struct SaveHistory {
 }
 
 impl SaveHistory {
-    /// `saves` in order, newest first; none if there are none.
+    /// Sorts `saves` newest first. Returns none if there are none.
     pub fn from_saves(mut saves: Vec<Save>) -> Option<Self> {
-        saves.sort_by_key(|s| std::cmp::Reverse(s.modified));
+        saves.sort_by_key(|save| std::cmp::Reverse(save.modified));
         let mut saves = saves.into_iter();
         Some(Self {
             current: saves.next()?,
@@ -142,26 +142,30 @@ impl SaveHistory {
         std::iter::once(&self.current).chain(&self.versions)
     }
 
-    /// The versions written at `timestamp`, as [`Save::timestamp`] writes
-    /// it: one, or none, or rarely several written in the same second.
+    /// The versions written at `timestamp`, in the format of
+    /// [`Save::timestamp`]. That is usually one or none, and rarely several
+    /// written in the same second.
     pub fn written_at(&self, timestamp: &str) -> Vec<&Save> {
-        self.iter().filter(|s| s.timestamp() == timestamp).collect()
+        self.iter()
+            .filter(|save| save.timestamp() == timestamp)
+            .collect()
     }
 
-    /// Whether some version holds the same save as `save`.
     pub fn contains(&self, save: &Save) -> bool {
-        self.iter().any(|s| s.has_same_contents_as(save))
+        self.iter()
+            .any(|version| version.has_same_contents_as(save))
     }
 }
 
-/// Reads the 16 bytes of an iNES header; whether that is what they were.
+/// Skips the 16 bytes of an iNES header and returns whether that is what they
+/// were.
 fn skip_ines_header(file: &mut File) -> io::Result<bool> {
     let mut start = Vec::new();
     file.take(16).read_to_end(&mut start)?;
     Ok(start.len() == 16 && start.starts_with(b"NES\x1a"))
 }
 
-/// The rest of `file`.
+/// Hashes the rest of `file`.
 fn hash_rom(mut file: File) -> io::Result<Rom> {
     let mut crc = crc32fast::Hasher::new();
     let mut size = 0;
@@ -169,9 +173,9 @@ fn hash_rom(mut file: File) -> io::Result<Rom> {
     loop {
         match file.read(&mut buf)? {
             0 => break,
-            n => {
-                crc.update(&buf[..n]);
-                size += n as u64;
+            read_count => {
+                crc.update(&buf[..read_count]);
+                size += read_count as u64;
             }
         }
     }
@@ -245,9 +249,9 @@ mod tests {
     }
 
     fn file(bytes: &[u8]) -> tempfile::NamedTempFile {
-        let f = tempfile::NamedTempFile::new().unwrap();
-        fs::write(f.path(), bytes).unwrap();
-        f
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(file.path(), bytes).unwrap();
+        file
     }
 
     fn rom(game: &Game) -> Rom {
@@ -258,8 +262,8 @@ mod tests {
 
     #[test]
     fn reads_rom_size_and_crc32() {
-        let f = file(b"hello");
-        let game = Game::read(Platform::Gba, f.path()).unwrap();
+        let file = file(b"hello");
+        let game = Game::read(Platform::Gba, file.path()).unwrap();
         assert_eq!(
             rom(&game),
             Rom {
@@ -315,7 +319,7 @@ mod tests {
             Save::from_bytes(b"c", at(2)),
         ])
         .unwrap();
-        let times: Vec<_> = history.iter().map(|s| s.modified).collect();
+        let times: Vec<_> = history.iter().map(|save| save.modified).collect();
         assert_eq!(times, [at(3), at(2), at(1)]);
         assert!(history.contains(&Save::from_bytes(b"c", at(9))));
         assert!(!history.contains(&Save::from_bytes(b"d", at(2))));

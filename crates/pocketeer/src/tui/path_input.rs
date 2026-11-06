@@ -1,6 +1,6 @@
-//! Typing text, and above all a path, with what is in its folder offered as
-//! you go. The folder is
-//! read on its own thread, so that a slow disk doesn't hold up the typing.
+//! Text input, especially for paths, which offers what is in the folder while
+//! typing. The folder is read on its own thread so that a slow disk doesn't
+//! hold up typing.
 
 use std::{
     cell::RefCell,
@@ -19,13 +19,14 @@ use nucleo_matcher::{
 use tui_input::{Input, InputRequest, backend::crossterm::to_input_request};
 
 thread_local! {
-    /// It keeps a large buffer, so one is kept rather than one for each name.
+    /// It keeps a large buffer, so one is shared instead of creating one per
+    /// name.
     static MATCHER: RefCell<Matcher> = RefCell::new(Matcher::new(Config::DEFAULT));
 }
 
-/// How well `name` has the letters of `typed` in order, whatever their case,
-/// and which of its characters they are; none if it doesn't. Every name has
-/// nothing typed.
+/// How well `name` contains the letters of `typed` in order, ignoring case, and
+/// which of its characters they are. Returns none if it doesn't match. Empty
+/// `typed` matches every name.
 pub fn fuzzy_match(typed: &str, name: &str) -> Option<(u16, Vec<usize>)> {
     if typed.is_empty() {
         return Some((0, Vec::new()));
@@ -40,14 +41,14 @@ pub fn fuzzy_match(typed: &str, name: &str) -> Option<(u16, Vec<usize>)> {
     let mut chars = Vec::new();
     let name = Utf32Str::new(name, &mut chars);
     let mut found = Vec::new();
-    let score = MATCHER.with_borrow_mut(|m| atom.indices(name, m, &mut found))?;
+    let score = MATCHER.with_borrow_mut(|matcher| atom.indices(name, matcher, &mut found))?;
     found.sort_unstable();
     found.dedup();
     Some((score, found.into_iter().map(|i| i as usize).collect()))
 }
 
-/// Edits `input` as the Emacs keys and the others say; whether its text
-/// changed. The keys `tui_input` doesn't have, or takes otherwise, are here.
+/// Applies `key` to `input`, including the Emacs keys `tui_input` lacks or
+/// handles differently. Returns whether the text changed.
 pub fn edit(input: &mut Input, key: KeyEvent) -> bool {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let request = match key.code {
@@ -59,7 +60,6 @@ pub fn edit(input: &mut Input, key: KeyEvent) -> bool {
     changed.is_some_and(|changed| changed.value)
 }
 
-/// The text before and after the cursor.
 pub fn text_around_cursor(input: &Input) -> (String, String) {
     let text = input.value();
     let at = text.char_indices().nth(input.cursor());
@@ -67,7 +67,6 @@ pub fn text_around_cursor(input: &Input) -> (String, String) {
     (before.to_string(), after.to_string())
 }
 
-/// What a folder holds, as offered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathEntry {
     pub name: String,
@@ -75,7 +74,7 @@ pub struct PathEntry {
 }
 
 impl PathEntry {
-    /// Which of the name's characters `typed` matches, to show it.
+    /// Which of the name's characters match `typed`, for highlighting.
     pub fn matched_positions(&self, typed: &str) -> Vec<usize> {
         fuzzy_match(typed, &self.name).map_or(Vec::new(), |(_, found)| found)
     }
@@ -84,11 +83,11 @@ impl PathEntry {
 /// The text of a path being typed, and what its folder offers.
 pub struct PathInput {
     input: Input,
-    /// The folder last asked to be read.
+    /// The folder last requested.
     asked: Option<PathBuf>,
-    /// The folder `entries` are of.
+    /// The folder `entries` came from.
     listed: Option<PathBuf>,
-    /// By name.
+    /// Sorted by name.
     entries: Vec<PathEntry>,
     /// Which of the matches the arrow keys moved to.
     picked: Option<usize>,
@@ -105,7 +104,6 @@ impl PathInput {
         }
     }
 
-    /// The text before and after the cursor.
     pub fn text_around_cursor(&self) -> (String, String) {
         text_around_cursor(&self.input)
     }
@@ -120,15 +118,15 @@ impl PathInput {
         &self.input.value()[self.partial_start()..]
     }
 
-    /// Whether what is typed ends in `/`, so can only be a folder.
+    /// Whether the text ends in `/`, which means it can only be a folder.
     pub fn is_dir(&self) -> bool {
         self.partial().is_empty() && !self.input.value().is_empty()
     }
 
-    /// Whether what is typed is a folder, going by what has been read of the
-    /// folder it is in.
+    /// Whether the text names a folder, judging by what has been read of its
+    /// parent.
     pub fn names_dir(&self) -> bool {
-        let is_it = |e: &&PathEntry| e.is_dir && e.name == self.partial();
+        let is_it = |entry: &&PathEntry| entry.is_dir && entry.name == self.partial();
         self.is_dir() || self.matches().iter().any(is_it)
     }
 
@@ -136,8 +134,8 @@ impl PathInput {
         self.picked
     }
 
-    /// What the folder holds that is like what is typed, best first. Hidden
-    /// ones only once a `.` is typed. None until the folder has been read.
+    /// The entries matching the text, best first. Hidden ones only appear once
+    /// a `.` is typed. None until the folder has been read.
     pub fn matches(&self) -> Vec<&PathEntry> {
         if self.listed.as_deref() != Some(self.dir().as_path()) {
             return Vec::new();
@@ -147,14 +145,14 @@ impl PathInput {
         let mut found: Vec<(u16, &PathEntry)> = self
             .entries
             .iter()
-            .filter(|e| hidden || !e.name.starts_with('.'))
-            .filter_map(|e| Some((fuzzy_match(partial, &e.name)?.0, e)))
+            .filter(|entry| hidden || !entry.name.starts_with('.'))
+            .filter_map(|entry| Some((fuzzy_match(partial, &entry.name)?.0, entry)))
             .collect();
         found.sort_by_key(|(score, _)| Reverse(*score));
-        found.into_iter().map(|(_, e)| e).collect()
+        found.into_iter().map(|(_, entry)| entry).collect()
     }
 
-    /// The folder to read now, if it hasn't been asked for.
+    /// The folder to read now, unless it has already been requested.
     pub fn dir_to_read(&mut self) -> Option<PathBuf> {
         let dir = self.dir();
         if self.asked.as_ref() == Some(&dir) {
@@ -164,7 +162,7 @@ impl PathInput {
         Some(dir)
     }
 
-    /// Takes what a folder holds, unless the text has moved on from it.
+    /// Stores what a folder holds, unless the text has moved on from it.
     pub fn set_entries(&mut self, dir: PathBuf, entries: Vec<PathEntry>) {
         if dir == self.dir() {
             self.listed = Some(dir);
@@ -173,12 +171,12 @@ impl PathInput {
         }
     }
 
-    /// Lets go of the match picked; whether one was.
+    /// Clears the picked match and returns whether there was one.
     pub fn unpick(&mut self) -> bool {
         self.picked.take().is_some()
     }
 
-    /// Puts the match picked in the text; whether one was.
+    /// Puts the picked match in the text and returns whether there was one.
     pub fn fill_in_picked(&mut self) -> bool {
         let picked = self.picked.and_then(|i| self.matches().get(i).copied());
         let Some(entry) = picked.cloned() else {
@@ -188,7 +186,7 @@ impl PathInput {
         true
     }
 
-    /// Editing, moving through the matches, and Tab.
+    /// Handles editing, moving through the matches, and Tab.
     pub fn handle_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
@@ -211,11 +209,10 @@ impl PathInput {
         self.input.value().rfind('/').map_or(0, |i| i + 1)
     }
 
-    /// The folder of the path typed.
     fn dir(&self) -> PathBuf {
         match self.partial_start() {
             0 => PathBuf::from("."),
-            n => expand_tilde(&self.input.value()[..n]),
+            slash_index => expand_tilde(&self.input.value()[..slash_index]),
         }
     }
 
@@ -228,8 +225,8 @@ impl PathInput {
         self.picked = self.picked.and_then(|i| i.checked_sub(1));
     }
 
-    /// The match picked or the only one; or else as far as all those starting
-    /// with what is typed agree.
+    /// Completes to the picked or only match, or else as far as all matches
+    /// starting with the text agree.
     fn complete(&mut self) {
         if self.fill_in_picked() {
             return;
@@ -243,14 +240,14 @@ impl PathInput {
         let partial = self.partial().to_lowercase();
         let mut starting = matches
             .iter()
-            .filter(|e| e.name.to_lowercase().starts_with(&partial))
-            .map(|e| e.name.as_str());
+            .filter(|entry| entry.name.to_lowercase().starts_with(&partial))
+            .map(|entry| entry.name.as_str());
         let Some(first) = starting.next() else {
             return;
         };
         let common = starting.fold(first, |common, name| {
             let same = common.chars().zip(name.chars()).take_while(|(a, b)| a == b);
-            let bytes = same.map(|(c, _)| c.len_utf8()).sum();
+            let bytes = same.map(|(character, _)| character.len_utf8()).sum();
             &common[..bytes]
         });
         if common.chars().count() > partial.chars().count() {
@@ -269,9 +266,9 @@ impl PathInput {
         self.picked = None;
     }
 
-    /// Cuts the word before the cursor: a word ends at `/` or a space.
+    /// Cuts the word before the cursor. A word ends at `/` or a space.
     fn cut_word(&mut self) {
-        let is_end = |c: char| c == '/' || c == ' ';
+        let is_end = |character: char| character == '/' || character == ' ';
         let (before, after) = self.text_around_cursor();
         let word = before.trim_end_matches(is_end);
         let kept = &word[..word.rfind(is_end).map_or(0, |i| i + 1)];
@@ -287,13 +284,13 @@ pub struct DirReader {
 }
 
 impl DirReader {
-    /// Starts the thread; `wake` is called when a folder has been read.
+    /// Starts the thread. `wake` is called when a folder has been read.
     pub fn spawn(wake: impl Fn() + Send + 'static) -> Self {
         let (tx, requests) = mpsc::channel::<PathBuf>();
         let (done, rx) = mpsc::channel();
         thread::spawn(move || {
             while let Ok(first) = requests.recv() {
-                // Only the last one asked for matters.
+                // Only the latest request matters.
                 let dir = requests.try_iter().last().unwrap_or(first);
                 let entries = read_dir(&dir);
                 if done.send((dir, entries)).is_err() {
@@ -315,7 +312,7 @@ impl DirReader {
     }
 }
 
-/// What `dir` holds, by name; nothing if it can't be read.
+/// What `dir` holds, by name, or nothing if it can't be read.
 fn read_dir(dir: &Path) -> Vec<PathEntry> {
     let Ok(read) = fs::read_dir(dir) else {
         return Vec::new();
@@ -327,11 +324,11 @@ fn read_dir(dir: &Path) -> Vec<PathEntry> {
             is_dir: entry.path().is_dir(),
         })
         .collect();
-    entries.sort_by_key(|e| e.name.to_lowercase());
+    entries.sort_by_key(|entry| entry.name.to_lowercase());
     entries
 }
 
-/// `path` with `~` as the home folder, if there is one.
+/// `path` with `~` expanded to the home folder, if there is one.
 fn expand_tilde(path: &str) -> PathBuf {
     let rest = match path.strip_prefix('~') {
         Some(rest) if rest.is_empty() || rest.starts_with('/') => rest.trim_start_matches('/'),
@@ -377,8 +374,11 @@ mod tests {
         input.handle_key(KeyEvent::from(code));
     }
 
-    fn ctrl(input: &mut PathInput, c: char) {
-        input.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+    fn ctrl(input: &mut PathInput, character: char) {
+        input.handle_key(KeyEvent::new(
+            KeyCode::Char(character),
+            KeyModifiers::CONTROL,
+        ));
     }
 
     fn text(input: &PathInput) -> String {
@@ -387,7 +387,11 @@ mod tests {
     }
 
     fn names(input: &PathInput) -> Vec<&str> {
-        input.matches().iter().map(|e| e.name.as_str()).collect()
+        input
+            .matches()
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect()
     }
 
     mod matches {
@@ -402,8 +406,8 @@ mod tests {
             ];
             let mut input = input("/a/", &entries);
             assert_eq!(names(&input), ["Amine.sav", "mine.sav", "other.sav"]);
-            for c in "MI".chars() {
-                press(&mut input, KeyCode::Char(c));
+            for character in "MI".chars() {
+                press(&mut input, KeyCode::Char(character));
             }
             assert_eq!(names(&input), ["mine.sav", "Amine.sav"]);
         }
@@ -423,7 +427,7 @@ mod tests {
             press(&mut input, KeyCode::Tab);
             assert_eq!(text(&input), "/a/b/");
             assert_eq!(input.matches(), Vec::<&PathEntry>::new());
-            // What comes late for the folder it has left is not taken.
+            // Entries arriving late for a folder the text has left are ignored.
             input.set_entries(PathBuf::from("/a/"), vec![entry("late", false)]);
             assert_eq!(input.matches(), Vec::<&PathEntry>::new());
         }
@@ -431,8 +435,8 @@ mod tests {
         #[test]
         fn matches_letters_in_order() {
             let mut input = input("/a/", &[entry("Pokemon.gba", false), entry("other", false)]);
-            for c in "pkmn".chars() {
-                press(&mut input, KeyCode::Char(c));
+            for character in "pkmn".chars() {
+                press(&mut input, KeyCode::Char(character));
             }
             assert_eq!(names(&input), ["Pokemon.gba"]);
         }
@@ -452,8 +456,8 @@ mod tests {
             assert_eq!(name.matched_positions("mine"), [4, 5, 6, 7]);
         }
 
-        /// A capital that lowercases to two characters, by a name holding those
-        /// two: it once cut one in half, and took the whole UI down.
+        /// A capital that lowercases to two characters, next to a name holding
+        /// those two. It once split one in half and crashed the UI.
         #[test]
         fn keeps_positions_in_bounds_when_lowercase_is_longer() {
             let name = entry("i\u{0307}.gba", false);
@@ -484,7 +488,7 @@ mod tests {
             let mut input = input("/a/m", &[entry("mine-1", false), entry("mine-2", false)]);
             press(&mut input, KeyCode::Tab);
             assert_eq!(text(&input), "/a/mine-");
-            // No further: they differ from here.
+            // No further, because they differ from here.
             press(&mut input, KeyCode::Tab);
             assert_eq!(text(&input), "/a/mine-");
         }
@@ -550,7 +554,7 @@ mod tests {
             assert_eq!(PathInput::new("~/x/y").path(), home.join("x/y"));
             assert_eq!(PathInput::new("~").path(), home);
             assert_eq!(PathInput::new("~/x").dir(), home);
-            // Only as a whole name.
+            // A `~` that is part of a longer name stays as it is.
             assert_eq!(PathInput::new("~x").path(), PathBuf::from("~x"));
         }
     }

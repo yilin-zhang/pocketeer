@@ -25,13 +25,13 @@ pub(crate) struct Listing {
     pub(crate) files: Vec<String>,
 }
 
-/// What is in `dir`; nothing if it doesn't exist. Hidden entries (macOS
+/// What is in `dir`, or nothing if it doesn't exist. Hidden entries (macOS
 /// leaves `._` files on devices) and symlinks are left out.
 pub(crate) fn list_dir(dir: &Path) -> Result<Listing, SharedError> {
     let read = match fs::read_dir(dir) {
         Ok(read) => read,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Listing::default()),
-        Err(e) => return Err(e.into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Listing::default()),
+        Err(error) => return Err(error.into()),
     };
     let (mut dirs, mut files) = (Vec::new(), Vec::new());
     for entry in read {
@@ -81,26 +81,26 @@ pub(crate) fn copy_atomically(from: &Path, to: &Path) -> Result<(), SharedError>
     replace_atomically(to, |tmp| fs::copy(from, tmp).map(drop), None)
 }
 
-/// Renames each of `renames`, pairs of the old path and the new, in turn; if one
-/// can't be, those before it are put back, so that all are renamed or none,
-/// unless the process dies on the way. What is renamed stays in its volume:
-/// nothing is copied.
+/// Renames each pair of old and new paths in turn. If one fails, the earlier
+/// ones are put back, so either all are renamed or none, unless the process
+/// dies on the way. Nothing is copied, so each path stays on its volume.
 pub(crate) fn safe_rename_all(renames: &[(PathBuf, PathBuf)]) -> Result<(), SharedError> {
     for (i, (from, to)) in renames.iter().enumerate() {
-        if let Err(e) = fs::rename(from, to) {
+        if let Err(error) = fs::rename(from, to) {
             for (from, to) in renames[..i].iter().rev() {
                 let _ = fs::rename(to, from);
             }
-            return Err(e.into());
+            return Err(error.into());
         }
     }
     Ok(())
 }
 
 /// Replaces the file at `path` with what `fill` writes to a hidden file beside
-/// it, so that `path` is never half written. If this fails the hidden file is
-/// removed; if the process dies first, [`list_dir`] doesn't see it and the
-/// next write to `path` replaces it.
+/// it, so `path` is never half written.
+///
+/// If this fails the hidden file is removed. If the process dies first,
+/// [`list_dir`] doesn't see it and the next write to `path` replaces it.
 fn replace_atomically(
     path: &Path,
     fill: impl FnOnce(&Path) -> io::Result<()>,
@@ -117,7 +117,7 @@ fn replace_atomically(
             Some(modified) => fs::File::options()
                 .write(true)
                 .open(&tmp)
-                .and_then(|f| f.set_modified(modified)),
+                .and_then(|file| file.set_modified(modified)),
             None => Ok(()),
         })
         .and_then(|()| fs::rename(&tmp, path));
@@ -129,23 +129,24 @@ fn replace_atomically(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Cached {
-    /// The file's size; a NES ROM's [`Rom`] is smaller, without its header.
+    /// The file's size. A NES ROM's [`Rom`] is smaller because it leaves out
+    /// the header.
     size: u64,
     modified: SystemTime,
     rom: Rom,
 }
 
-/// What was read of a device's or library's games: each file's [`Rom`], kept
-/// while its size and time stay the same. It only saves time, so a cache that
-/// can't be read is empty and one that can't be written is not written.
+/// What was read of a device's or library's games. Each file's [`Rom`] is kept
+/// while its size and time stay the same. The cache only saves time, so one
+/// that can't be read counts as empty and a failed write is ignored.
 #[derive(Debug, Clone)]
 pub(crate) struct Cache {
     /// The root of the device or library.
     root: PathBuf,
     /// The file it is kept in.
     path: PathBuf,
-    /// Path from `root` → what was read, so that it holds wherever the device
-    /// is mounted.
+    /// Paths are relative to `root`, so entries hold wherever the device is
+    /// mounted.
     files: HashMap<PathBuf, Cached>,
 }
 
@@ -169,8 +170,8 @@ impl Cache {
         }
     }
 
-    /// The game at `path`: from this cache if its size and time are what they
-    /// were, otherwise read, and then noted here.
+    /// The game at `path`, taken from this cache if its size and time are
+    /// unchanged, otherwise read and recorded.
     pub(crate) fn read_game(
         &mut self,
         platform: &Platform,
@@ -180,7 +181,7 @@ impl Cache {
         let (size, modified) = (meta.len(), meta.modified()?);
         let key = key(&self.root, path);
         let rom = match self.files.get(key) {
-            Some(c) if c.size == size && c.modified == modified => c.rom,
+            Some(cached) if cached.size == size && cached.modified == modified => cached.rom,
             _ => {
                 let Files::Single(rom) = Game::read(platform.clone(), path)?.files;
                 rom
@@ -193,8 +194,8 @@ impl Cache {
         })
     }
 
-    /// Notes that the file at `path` holds `game` as it is now: for a file
-    /// just written from a game whose hash is known.
+    /// Records that the file at `path` holds `game`. This is for a file just
+    /// written from a game whose hash is known.
     pub(crate) fn record_game(&mut self, path: &Path, game: &Game) -> Result<(), SharedError> {
         let meta = fs::metadata(path)?;
         let Files::Single(rom) = game.files;
@@ -202,7 +203,7 @@ impl Cache {
         Ok(())
     }
 
-    /// Notes that the file at `path` is gone.
+    /// Records that the file at `path` is gone.
     pub(crate) fn forget(&mut self, path: &Path) {
         self.files.remove(key(&self.root, path));
     }
@@ -228,7 +229,7 @@ fn key<'a>(root: &Path, path: &'a Path) -> &'a Path {
     path.strip_prefix(root).unwrap_or(path)
 }
 
-/// What the tests of the modules that keep files on disk share.
+/// Helpers shared by the tests of modules that keep files on disk.
 #[cfg(test)]
 pub(crate) mod testing {
     use std::time::{Duration, UNIX_EPOCH};
@@ -268,7 +269,7 @@ mod tests {
     fn all_in(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(dir)
             .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
         names

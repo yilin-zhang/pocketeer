@@ -1,5 +1,5 @@
-//! pocketeer's core: games, the library, the device, and moving games and
-//! saves between them.
+//! The core of pocketeer, covering games, the library, the device, and moving
+//! games and saves between them.
 
 pub mod cores;
 pub mod cover;

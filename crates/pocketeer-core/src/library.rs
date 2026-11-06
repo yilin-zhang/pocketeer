@@ -17,17 +17,17 @@ use crate::{
     platform::Platform,
 };
 
-/// One game in the library.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalEntry {
-    /// The game's name, which is also its file name: on the device a save is
-    /// found by the name of the game's file.
+    /// The game's name, which is also its file name, because on the device a
+    /// save is found by the game file's name.
     pub name: String,
     pub game: Game,
-    /// Where its cover is, if it has one. A path rather than the cover:
-    /// covers are large and only a few are shown at a time, so each is read
-    /// when it is needed, by whoever needs it, without going through the
-    /// library.
+    /// Where its cover is, if it has one.
+    ///
+    /// This is a path rather than the cover because covers are large and only a
+    /// few are shown at a time. Whoever needs one reads it when needed, without
+    /// going through the library.
     pub cover_path: Option<PathBuf>,
     pub save: Option<SaveHistory>,
 }
@@ -37,14 +37,13 @@ impl LocalEntry {
         &self.game.platform == platform && self.name == name
     }
 
-    /// The name without its extension.
     pub fn stem(&self) -> &str {
         stem(&self.name)
     }
 }
 
-/// Saves in the library with no game of that name: a game put in the trash
-/// leaves them, and a game put there under that name has them again.
+/// Saves in the library with no game of that name. Trashing a game leaves them
+/// behind, and adding a game under that name picks them up again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrphanLocalSave {
     pub platform: Platform,
@@ -53,47 +52,43 @@ pub struct OrphanLocalSave {
     pub save: SaveHistory,
 }
 
-/// Why no library was opened.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenLibraryError {
-    /// There is no home folder to keep the default library in.
     #[error("no home folder; give a --library")]
     NoHome,
-    /// `path` is not a folder, so not a library.
     #[error("no library at {}", .path.display())]
     NoLibrary { path: PathBuf },
     #[error(transparent)]
     Shared(#[from] SharedError),
 }
 
-/// Why a game wasn't added to the library.
 #[derive(Debug, thiserror::Error)]
 pub enum AddGameError {
-    /// Another game of the platform has the name, whatever its extension or
-    /// case: saves and covers are kept by the name without the extension, and
-    /// a file system may not tell cases apart.
+    /// Another game of the platform has this name, whatever its extension or
+    /// case. Saves and covers are kept by the name without the extension, and a
+    /// file system may not tell cases apart.
     #[error("another game in the library has its name")]
     NameTaken,
-    /// The name can't be a file's in the library: it would be put elsewhere,
-    /// or hidden and so not found again.
+    /// The library can't hold a file with this name, because it would end up
+    /// elsewhere or be hidden and not found again.
     #[error("the library can't hold a game of that name")]
     BadName,
     #[error(transparent)]
     Shared(#[from] SharedError),
 }
 
-/// Why a game in the library wasn't renamed. Nothing has changed, then.
+/// Why a game in the library wasn't renamed, in which case nothing has changed.
 #[derive(Debug, thiserror::Error)]
 pub enum RenameInLibraryError {
     #[error("the library can't hold a game of that name")]
     BadName,
     #[error("it has that name already")]
     SameName,
-    /// Another game of the platform has the name, whatever its extension or
-    /// case: saves and covers are kept by the name without the extension.
+    /// Another game of the platform has this name, whatever its extension or
+    /// case. Saves and covers are kept by the name without the extension.
     #[error("another game in the library has that name")]
     NameTaken,
-    /// Saves or a cover with no game have the name, and would become this
+    /// Saves or a cover with no game have this name and would become this
     /// game's.
     #[error("the library has saves or a cover under that name")]
     LeftoversThere,
@@ -101,8 +96,7 @@ pub enum RenameInLibraryError {
     Shared(#[from] SharedError),
 }
 
-/// Where everything is in a library folder: every path in it is spelled
-/// out here.
+/// Every path in a library folder is spelled out here.
 #[derive(Debug, Clone)]
 pub(crate) struct LibraryLayout {
     root: PathBuf,
@@ -113,12 +107,12 @@ impl LibraryLayout {
         self.root.join("dats")
     }
 
-    /// Which cores can be downloaded.
+    /// The cached list of cores that can be downloaded.
     pub(crate) fn core_inventory(&self) -> PathBuf {
         self.root.join("cores.json")
     }
 
-    /// Which covers can be downloaded.
+    /// The cached list of covers that can be downloaded.
     pub(crate) fn cover_index(&self) -> PathBuf {
         self.root.join("covers.json")
     }
@@ -127,7 +121,6 @@ impl LibraryLayout {
         self.root.join("roms")
     }
 
-    /// The folder of a platform's games.
     fn platform_roms(&self, platform: &Platform) -> PathBuf {
         self.roms().join(platform.id())
     }
@@ -145,7 +138,6 @@ impl LibraryLayout {
         self.root.join("saves")
     }
 
-    /// The folder of the saves of a platform's games.
     fn platform_saves(&self, platform: &Platform) -> PathBuf {
         self.all_saves().join(platform.id())
     }
@@ -156,18 +148,23 @@ impl LibraryLayout {
         self.platform_saves(platform).join(stem)
     }
 
-    /// The `n`th file for `save`, a version of a game's save: they are named
-    /// after when the Pocket wrote them, and a second written in the same
-    /// second is `-2`.
-    fn save_version(&self, platform: &Platform, stem: &str, save: &Save, n: u32) -> PathBuf {
-        let file = match n {
+    /// The file for version number `version_number` of `save`. Files are named
+    /// after when the Pocket wrote them, and a second one from the same second
+    /// gets `-2`.
+    fn save_version(
+        &self,
+        platform: &Platform,
+        stem: &str,
+        save: &Save,
+        version_number: u32,
+    ) -> PathBuf {
+        let file = match version_number {
             1 => format!("{}.sav", save.timestamp()),
-            n => format!("{}-{n}.sav", save.timestamp()),
+            version_number => format!("{}-{version_number}.sav", save.timestamp()),
         };
         self.saves(platform, stem).join(file)
     }
 
-    /// What the front ends did.
     pub(crate) fn log(&self) -> PathBuf {
         self.root.join("pocketeer.log")
     }
@@ -180,7 +177,7 @@ impl LibraryLayout {
 pub struct Library {
     layout: LibraryLayout,
     cache: Cache,
-    /// By platform and name.
+    /// Sorted by platform id and name.
     entries: Vec<LocalEntry>,
 }
 
@@ -216,35 +213,35 @@ impl Library {
         &self.entries
     }
 
-    /// The game of `platform` called `name`.
     pub fn entry_named(&self, platform: &Platform, name: &str) -> Option<&LocalEntry> {
-        self.entries.iter().find(|e| e.is_called(platform, name))
+        self.entries
+            .iter()
+            .find(|entry| entry.is_called(platform, name))
     }
 
     /// The library's copy of `game`, under whatever name.
     pub fn entry_for(&self, game: &Game) -> Option<&LocalEntry> {
-        self.entries.iter().find(|e| &e.game == game)
+        self.entries.iter().find(|entry| &entry.game == game)
     }
 
     pub(crate) fn layout(&self) -> &LibraryLayout {
         &self.layout
     }
 
-    /// Reads the folder again, for changes made outside pocketeer. A game
-    /// whose file is unchanged since the last time is not read again;
-    /// covers are not read at all.
+    /// Reads the folder again to pick up changes made outside pocketeer. Games
+    /// whose files are unchanged aren't read again, and covers aren't read at
+    /// all.
     pub fn reload(&mut self) -> Result<(), SharedError> {
         self.entries = self.scan()?;
         Ok(())
     }
 
-    /// Where `entry`'s file is.
     pub fn game_path(&self, entry: &LocalEntry) -> PathBuf {
         self.layout.rom(&entry.game.platform, &entry.name)
     }
 
-    /// The files of `entry` as a game: its file and its cover, if it has
-    /// one. Not its saves, which are kept by its name apart from it.
+    /// The files of `entry` as a game, which are its file and its cover if it
+    /// has one. Its saves are kept apart under its name.
     pub fn files_of(&self, entry: &LocalEntry) -> Vec<PathBuf> {
         let mut files = vec![self.game_path(entry)];
         files.extend(entry.cover_path.clone());
@@ -259,7 +256,8 @@ impl Library {
             let platform = Platform::from_id(&id);
             let dir = self.layout.platform_saves(&platform);
             for name in list_dir(&dir)?.dirs {
-                let has_game = |e: &LocalEntry| e.game.platform == platform && e.stem() == name;
+                let has_game =
+                    |entry: &LocalEntry| entry.game.platform == platform && entry.stem() == name;
                 if self.entries.iter().any(has_game) {
                     continue;
                 }
@@ -275,19 +273,20 @@ impl Library {
         Ok(orphans)
     }
 
-    /// The file of every version of `entry`'s save.
     pub fn files_of_all_saves(&self, entry: &LocalEntry) -> Result<Vec<PathBuf>, SharedError> {
         let files = self.files_of_saves(&entry.game.platform, entry.stem())?;
         Ok(files.into_iter().map(|(path, _)| path).collect())
     }
 
-    /// The file of every version of `orphan`'s save, if it is still an orphan:
-    /// a game may have been put under its name since. None if it isn't.
+    /// The files of every version of `orphan`'s save, or none if it is no
+    /// longer an orphan because a game has been put under its name.
     pub(crate) fn files_of_orphan_save(
         &self,
         orphan: &OrphanLocalSave,
     ) -> Result<Vec<PathBuf>, SharedError> {
-        let is_it = |o: &OrphanLocalSave| o.platform == orphan.platform && o.stem == orphan.stem;
+        let is_it = |candidate: &OrphanLocalSave| {
+            candidate.platform == orphan.platform && candidate.stem == orphan.stem
+        };
         if !self.find_orphan_saves()?.iter().any(is_it) {
             return Ok(Vec::new());
         }
@@ -308,9 +307,11 @@ impl Library {
     }
 
     /// Copies the file at `from`, which holds `game`, into the library as the
-    /// game called `name`, unless another game of the platform has that name,
-    /// whatever its extension or case, or a file is there already: this never
-    /// replaces one. The copy isn't read: `game` is what is noted of it.
+    /// game called `name`.
+    ///
+    /// This never replaces a file, so it fails if one is already there or if
+    /// another game of the platform has that name, whatever its extension or
+    /// case. The copy isn't read, as `game` is what gets recorded.
     pub(crate) fn add_game(
         &mut self,
         game: &Game,
@@ -322,8 +323,9 @@ impl Library {
         }
         let platform = &game.platform;
         let lowercase = stem(name).to_lowercase();
-        let taken =
-            |e: &LocalEntry| &e.game.platform == platform && e.stem().to_lowercase() == lowercase;
+        let taken = |entry: &LocalEntry| {
+            &entry.game.platform == platform && entry.stem().to_lowercase() == lowercase
+        };
         let to = self.layout.rom(platform, name);
         if self.entries.iter().any(taken) || to.exists() {
             return Err(AddGameError::NameTaken);
@@ -341,17 +343,18 @@ impl Library {
         Ok(entry)
     }
 
-    /// Adds `entry` to the entries, in its place.
+    /// Inserts `entry` so that `entries` stays sorted by platform id and name.
     fn insert(&mut self, entry: LocalEntry) {
-        let place = self.entries.binary_search_by(|e| {
-            (e.game.platform.id(), &e.name).cmp(&(entry.game.platform.id(), &entry.name))
+        let place = self.entries.binary_search_by(|existing| {
+            (existing.game.platform.id(), &existing.name)
+                .cmp(&(entry.game.platform.id(), &entry.name))
         });
         let (Ok(at) | Err(at)) = place;
         self.entries.insert(at, entry);
     }
 
-    /// Calls the game called `name` `new` instead, keeping its extension, with
-    /// its saves and its cover. Its contents aren't read again.
+    /// Renames the game called `name` to `new`, keeping its extension and
+    /// moving its saves and cover. The contents aren't read again.
     pub(crate) fn rename_game(
         &mut self,
         platform: &Platform,
@@ -368,8 +371,10 @@ impl Library {
         }
         let (old_stem, new_stem) = (stem(name), stem(&new_name));
         let lowercase = new_stem.to_lowercase();
-        let taken = |(j, e): (usize, &LocalEntry)| {
-            j != i && &e.game.platform == platform && e.stem().to_lowercase() == lowercase
+        let taken = |(other_index, entry): (usize, &LocalEntry)| {
+            other_index != i
+                && &entry.game.platform == platform
+                && entry.stem().to_lowercase() == lowercase
         };
         if self.entries.iter().enumerate().any(taken) {
             return Err(RenameInLibraryError::NameTaken);
@@ -380,8 +385,8 @@ impl Library {
         );
         let saves = self.layout.saves(platform, old_stem);
         let new_saves = self.layout.saves(platform, new_stem);
-        // With only the case changed, what is at the new name on a file system
-        // that doesn't tell cases apart is the game's own.
+        // If only the case changed, on a file system that doesn't tell cases
+        // apart, whatever is at the new name is the game's own.
         if old_stem.to_lowercase() != lowercase {
             if to.exists() {
                 return Err(RenameInLibraryError::NameTaken);
@@ -412,8 +417,8 @@ impl Library {
         Ok(entry)
     }
 
-    /// Adds the save at `from` to the game called `name`, unless it has one
-    /// with the same contents already; the new version, if it was added.
+    /// Adds the save at `from` to the game called `name`, unless it already has
+    /// one with the same contents. Returns the new version if one was added.
     pub(crate) fn add_save(
         &mut self,
         platform: &Platform,
@@ -421,34 +426,42 @@ impl Library {
         from: &Path,
     ) -> Result<Option<Save>, SharedError> {
         let i = self.index_of(platform, name)?;
-        let modified = fs::metadata(from).and_then(|m| m.modified())?;
+        let modified = fs::metadata(from).and_then(|metadata| metadata.modified())?;
         let bytes = fs::read(from)?;
         let save = Save::from_bytes(&bytes, modified);
         if self.entries[i]
             .save
             .as_ref()
-            .is_some_and(|h| h.contains(&save))
+            .is_some_and(|history| history.contains(&save))
         {
             return Ok(None);
         }
         let path = (1..)
-            .map(|n| self.layout.save_version(platform, stem(name), &save, n))
+            .map(|version_number| {
+                self.layout
+                    .save_version(platform, stem(name), &save, version_number)
+            })
             .find(|path| !path.exists())
             .expect("some name is free");
         write_atomically(&path, &bytes, Some(modified))?;
         let entry = &mut self.entries[i];
-        let mut saves: Vec<Save> = entry.save.iter().flat_map(|h| h.iter().cloned()).collect();
+        let mut saves: Vec<Save> = entry
+            .save
+            .iter()
+            .flat_map(|history| history.iter().cloned())
+            .collect();
         saves.push(save.clone());
         entry.save = SaveHistory::from_saves(saves);
         Ok(Some(save))
     }
 
-    /// Leaves the game called `name` out of the entries and the cache, once
-    /// its files are gone.
+    /// Removes the game called `name` from the entries and the cache, once its
+    /// files are gone.
     pub(crate) fn forget_game(&mut self, platform: &Platform, name: &str) {
         self.cache.forget(&self.layout.rom(platform, name));
         self.cache.save();
-        self.entries.retain(|e| !e.is_called(platform, name));
+        self.entries
+            .retain(|entry| !entry.is_called(platform, name));
     }
 
     /// Makes `cover` the cover of the game called `name`, replacing a cover of
@@ -466,7 +479,7 @@ impl Library {
         Ok(())
     }
 
-    /// The file of a version of `entry`'s save; none if it has no such
+    /// The file of a version of `entry`'s save, or none if it has no such
     /// version.
     pub fn file_of_save(
         &self,
@@ -476,14 +489,14 @@ impl Library {
         Ok(self
             .files_of_saves(&entry.game.platform, entry.stem())?
             .into_iter()
-            .find(|(_, s)| s == save)
+            .find(|(_, version)| version == save)
             .map(|(path, _)| path))
     }
 
     fn index_of(&self, platform: &Platform, name: &str) -> Result<usize, SharedError> {
         self.entries
             .iter()
-            .position(|e| e.is_called(platform, name))
+            .position(|entry| entry.is_called(platform, name))
             .ok_or(SharedError::NotInLibrary)
     }
 
@@ -542,7 +555,7 @@ impl Library {
             .find(|path| path.is_file())
     }
 
-    /// Every version of the game's save, newest first; none if it has none.
+    /// Every version of the game's save, newest first, or none if it has none.
     fn read_save_history(
         &self,
         platform: &Platform,
@@ -551,11 +564,11 @@ impl Library {
         let saves = self
             .files_of_saves(platform, stem)?
             .into_iter()
-            .map(|(_, s)| s);
+            .map(|(_, save)| save);
         Ok(SaveHistory::from_saves(saves.collect()))
     }
 
-    /// The game's save files, each with what it holds.
+    /// The game's save files, each with its parsed save.
     fn files_of_saves(
         &self,
         platform: &Platform,
@@ -564,7 +577,10 @@ impl Library {
         let dir = self.layout.saves(platform, stem);
         let mut files = Vec::new();
         for name in list_dir(&dir)?.files {
-            if Path::new(&name).extension().is_some_and(|e| e == "sav") {
+            if Path::new(&name)
+                .extension()
+                .is_some_and(|extension| extension == "sav")
+            {
                 let path = dir.join(&name);
                 let save = Save::read(&path)?;
                 files.push((path, save));
@@ -577,7 +593,7 @@ impl Library {
 fn stem(name: &str) -> &str {
     Path::new(name)
         .file_stem()
-        .and_then(|s| s.to_str())
+        .and_then(|file_stem| file_stem.to_str())
         .unwrap_or(name)
 }
 
@@ -609,7 +625,11 @@ mod tests {
         }
 
         fn names(library: &Library) -> Vec<&str> {
-            library.entries().iter().map(|e| e.name.as_str()).collect()
+            library
+                .entries()
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect()
         }
 
         /// What is under the library's `roms`, `covers` and `saves`.
@@ -688,7 +708,8 @@ mod tests {
             let (dir, mut library) = with_game();
             let before = library.entries()[0].game.clone();
             rename(&mut library, "New").unwrap();
-            // Same size and time, other contents: the cache answers.
+            // Same size and time with other contents, so the cached game is
+            // used.
             put_at(dir.path(), "roms/gba/New.gba", b"new", 1_000);
             library.reload().unwrap();
             assert_eq!(library.entries()[0].game, before);
@@ -738,8 +759,9 @@ mod tests {
         fn restores_everything_on_failure() {
             let (dir, mut library) = with_game();
             let root = dir.path();
-            // With its extension, too long to be a file's name: its save folder,
-            // with none, is renamed before its cover can't be.
+            // With its extension, the name is too long for a file. Its save
+            // folder, which has no extension, is renamed before its cover
+            // fails.
             let new = "x".repeat(252);
             let before = all_files(root);
             assert!(matches!(
@@ -751,7 +773,7 @@ mod tests {
         }
     }
 
-    /// An empty library; tests put files in it and then reload.
+    /// An empty library. Tests put files in it and then reload.
     fn library() -> (tempfile::TempDir, Library) {
         let dir = tempfile::tempdir().unwrap();
         let library = Library::open(dir.path()).unwrap();
@@ -767,7 +789,7 @@ mod tests {
         0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
 
-    /// Adds the file at `from`, read to tell what game it holds.
+    /// Adds the file at `from`, hashing it to find out which game it holds.
     fn add(
         library: &mut Library,
         platform: &Platform,
@@ -948,7 +970,8 @@ mod tests {
             let (_dir, mut library) = library();
             let elsewhere = tempfile::tempdir().unwrap();
             let from = put(elsewhere.path(), "x.gba", b"hello");
-            // Not what the file holds: only what is given can be noted.
+            // This isn't what the file holds, because only the given game is
+            // recorded.
             let game = Game {
                 platform: Platform::Gba,
                 files: Files::Single(Rom { size: 1, crc32: 1 }),
@@ -981,10 +1004,11 @@ mod tests {
                 library.game_path(&added),
                 library.root().join("roms/gba/C.gba")
             );
-            let names = |l: &Library| {
-                l.entries()
+            let names = |library: &Library| {
+                library
+                    .entries()
                     .iter()
-                    .map(|e| e.name.clone())
+                    .map(|entry| entry.name.clone())
                     .collect::<Vec<_>>()
             };
             assert_eq!(names(&library), ["B.gba", "C.gba", "D.gba"]);
@@ -1161,7 +1185,7 @@ mod tests {
             let orphans = library.find_orphan_saves().unwrap();
             let found: Vec<_> = orphans
                 .iter()
-                .map(|o| (o.platform.clone(), o.stem.as_str()))
+                .map(|orphan| (orphan.platform.clone(), orphan.stem.as_str()))
                 .collect();
             assert_eq!(found, [(Platform::Gb, "Kept"), (Platform::Gba, "Gone")]);
         }

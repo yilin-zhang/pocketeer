@@ -58,7 +58,7 @@ impl Platform {
 
     pub fn from_id(id: &str) -> Self {
         Self::iter()
-            .find(|p| p.id() == id)
+            .find(|platform| platform.id() == id)
             .unwrap_or_else(|| Platform::Other(id.to_string()))
     }
 }
@@ -96,20 +96,20 @@ mod tests {
 
     #[test]
     fn keeps_unknown_id() {
-        let p = Platform::from_id("arduboy");
-        assert_eq!(p, Platform::Other("arduboy".into()));
-        assert_eq!(p.id(), "arduboy");
+        let platform = Platform::from_id("arduboy");
+        assert_eq!(platform, Platform::Other("arduboy".into()));
+        assert_eq!(platform.id(), "arduboy");
     }
 
     #[test]
     fn iterates_only_named_platforms() {
-        assert!(!Platform::iter().any(|p| matches!(p, Platform::Other(_))));
+        assert!(!Platform::iter().any(|platform| matches!(platform, Platform::Other(_))));
     }
 
     #[test]
     fn finds_every_named_platform_by_id() {
-        for p in Platform::iter() {
-            assert_eq!(Platform::from_id(p.id()), p);
+        for platform in Platform::iter() {
+            assert_eq!(Platform::from_id(platform.id()), platform);
         }
     }
 }

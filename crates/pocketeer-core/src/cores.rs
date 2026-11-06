@@ -1,5 +1,5 @@
-//! Cores: what a device has, what the inventory offers, the zips they come in,
-//! and the files they need from the user.
+//! Cores on a device and in the online inventory, their release zips, and the
+//! BIOS files they load.
 
 use std::{
     collections::HashMap,
@@ -14,9 +14,9 @@ use zip::ZipArchive;
 
 use crate::{error::SharedError, files::write_atomically, platform::Platform};
 
-/// The cores pocketeer installs, for now: each comes alone in its zip, which
-/// holds nothing it needs beyond `Cores/` and `Platforms/`, and neither ROMs,
-/// saves nor a license to find. By system, in the order they are listed.
+/// The cores pocketeer installs for now. Each comes alone in its zip and needs
+/// nothing beyond `Cores/` and `Platforms/`, so there are no ROMs, saves or
+/// licenses to find.
 pub const SUPPORTED: &[&str] = &[
     "Spiritualized.GB",
     "budude2.GB",
@@ -36,28 +36,28 @@ pub const SUPPORTED: &[&str] = &[
     "agg23.SNES",
 ];
 
-/// A zip holding more than this is refused: the cores above take a few MB, and
-/// where a zip comes from is up to a third party.
+/// The largest zip pocketeer accepts. The cores above take a few MB, and the
+/// zips are hosted by third parties.
 const MOST_IN_A_ZIP: u64 = 64 * 1024 * 1024;
 
-/// How long the inventory is used before it is asked for again.
+/// How long a fetched inventory is used before it is fetched again.
 const INVENTORY_AGE: Duration = Duration::from_secs(60 * 60);
 
-/// A core on the device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledCore {
     /// The name of its folder, `<author>.<name>`.
     pub id: String,
-    /// None if its `core.json` can't be read, as after an install that didn't
-    /// finish.
+    /// None if its `core.json` can't be read, for example after an unfinished
+    /// install.
     pub version: Option<String>,
     pub platforms: Vec<Platform>,
 }
 
 impl InstalledCore {
-    /// Whether it is at `version`, however that is written.
+    /// Whether it is at `version`, ignoring case, surrounding spaces and a
+    /// leading `v`.
     pub(crate) fn is_at_version(&self, version: &str) -> bool {
-        let plain = |v: &str| v.trim().trim_start_matches(['v', 'V']).to_lowercase();
+        let plain = |version: &str| version.trim().trim_start_matches(['v', 'V']).to_lowercase();
         self.version.as_deref().map(plain) == Some(plain(version))
     }
 }
@@ -83,12 +83,12 @@ pub enum CoreRow {
 }
 
 impl CoreRow {
-    /// A row for each of `latest`, with its copy in `installed` if there is one,
-    /// and then a row for each of the others.
+    /// One row for each core in `latest`, paired with its copy in `installed`
+    /// if there is one, followed by a row for each remaining installed core.
     pub(crate) fn pair(mut installed: Vec<InstalledCore>, latest: Vec<InventoryCore>) -> Vec<Self> {
         let mut rows = Vec::new();
         for latest in latest {
-            let on_device = installed.iter().position(|c| c.id == latest.id);
+            let on_device = installed.iter().position(|core| core.id == latest.id);
             rows.push(match on_device {
                 Some(i) => CoreRow::Both {
                     installed: installed.remove(i),
@@ -135,32 +135,25 @@ impl CoreRow {
     }
 }
 
-/// What installing a core did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallCoreOutcome {
-    /// The version it is at now.
     Installed { version: String },
-    /// The device has the newest version.
     AlreadyCurrent,
 }
 
-/// Why a core wasn't installed.
 #[derive(Debug, thiserror::Error)]
 pub enum InstallCoreError {
     /// It isn't one of [`SUPPORTED`], or the inventory doesn't have it.
     #[error("not a core that can be installed")]
     NotSupported,
-    /// What was downloaded can't be installed, for this reason.
     #[error("not a zip of this core: {0}")]
     NotACoreZip(String),
     #[error(transparent)]
     Shared(#[from] SharedError),
 }
 
-/// Why a core wasn't removed.
 #[derive(Debug, thiserror::Error)]
 pub enum RemoveCoreError {
-    /// The device doesn't have it.
     #[error("not on the device")]
     NotInstalled,
     #[error(transparent)]
@@ -171,45 +164,43 @@ pub enum RemoveCoreError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CoreFile {
     pub(crate) platform: Platform,
-    /// Its name under `common/`.
+    /// The path under `common/`.
     pub(crate) path: PathBuf,
     pub(crate) required: bool,
     /// The only size the core takes.
     pub(crate) size_exact: Option<u64>,
 }
 
-/// How a BIOS file on the device stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BiosStatus {
     Present,
-    /// It is there, at a size the core won't load.
+    /// The file exists, but the core won't load it at this size.
     WrongSize {
         size: u64,
     },
     Missing,
 }
 
-/// One file the cores on the device need, however many of them do.
+/// A file that one or more cores on the device need.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BiosRow {
     pub platform: Platform,
-    /// Its name under `common/`.
+    /// The path under `common/`.
     pub path: PathBuf,
-    /// The cores that load it, and whether each can't run without it.
+    /// The cores that load it, and whether each one requires it.
     pub needed_by: Vec<(String, bool)>,
-    /// None if no size is asked for, or cores ask for different ones.
+    /// None if no core sets a size, or if cores set different ones.
     pub size_exact: Option<u64>,
     pub status: BiosStatus,
 }
 
 impl BiosRow {
-    /// Whether a core can't run without it.
+    /// Whether any core requires it.
     pub fn is_required(&self) -> bool {
         self.needed_by.iter().any(|(_, required)| *required)
     }
 }
 
-/// Why a BIOS file wasn't put on the device.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PutBiosError {
     #[error("no core on the device loads this file")]
@@ -222,7 +213,6 @@ pub enum PutBiosError {
     Shared(#[from] SharedError),
 }
 
-/// Where cores come from.
 pub trait RemoteCoreSource {
     /// Every core with a release, at its newest.
     fn inventory(&self) -> Result<Vec<InventoryCore>, SharedError>;
@@ -230,14 +220,14 @@ pub trait RemoteCoreSource {
     fn download(&self, url: &str) -> Result<Vec<u8>, SharedError>;
 }
 
-/// The inventory, kept in a file. It only saves time, so a file that can't be
-/// read is empty and one that can't be written is not written.
+/// The inventory, cached in a file. The file only saves time, so one that can't
+/// be read counts as empty and a failed write is ignored.
 pub struct CoreInventory<S> {
     path: PathBuf,
     source: S,
     cores: Vec<InventoryCore>,
-    /// When the source was last asked, which a failure counts as: the file
-    /// says so at first, if it can be read.
+    /// When the inventory was last fetched, including failed attempts. It
+    /// starts from what the file says, if the file can be read.
     asked: Option<SystemTime>,
 }
 
@@ -259,9 +249,10 @@ impl<S: RemoteCoreSource> CoreInventory<S> {
         }
     }
 
-    /// The cores in [`SUPPORTED`] the inventory has, in that order. If it is
-    /// old it is asked for again; if that fails what is known is used, and if
-    /// nothing is that is the error.
+    /// The cores in [`SUPPORTED`] that the inventory has, in that order.
+    ///
+    /// An old inventory is fetched again. If that fails, the cached copy is
+    /// used, and if there is none the error is returned.
     pub fn supported_cores(&mut self) -> Result<Vec<InventoryCore>, SharedError> {
         let fresh = |asked: SystemTime| asked.elapsed().is_ok_and(|age| age < INVENTORY_AGE);
         if !self.asked.is_some_and(fresh) {
@@ -273,18 +264,21 @@ impl<S: RemoteCoreSource> CoreInventory<S> {
                     }
                     self.cores = cores;
                 }
-                Err(e) if self.cores.is_empty() => {
+                Err(error) if self.cores.is_empty() => {
                     self.asked = None;
-                    return Err(e);
+                    return Err(error);
                 }
                 Err(_) => {}
             }
         }
-        let by_id: HashMap<&str, &InventoryCore> =
-            self.cores.iter().map(|c| (c.id.as_str(), c)).collect();
+        let by_id: HashMap<&str, &InventoryCore> = self
+            .cores
+            .iter()
+            .map(|core| (core.id.as_str(), core))
+            .collect();
         Ok(SUPPORTED
             .iter()
-            .filter_map(|id| by_id.get(id).map(|c| (*c).clone()))
+            .filter_map(|id| by_id.get(id).map(|core| (*core).clone()))
             .collect())
     }
 
@@ -293,26 +287,33 @@ impl<S: RemoteCoreSource> CoreInventory<S> {
     }
 }
 
-/// A core's release zip, checked: every path in it stays inside where it is
-/// put, and it holds this core at the version its `core.json` says.
+/// A core's release zip after validation. Every path in it stays inside the
+/// install location, and it holds this core at the version its `core.json`
+/// states.
 pub struct CoreZip {
     version: String,
     archive: ZipArchive<Cursor<Vec<u8>>>,
-    /// Where each file to install goes under the device's root, and its name
-    /// in the zip. `core.json` is last.
+    /// Each file's install path under the device root and its name in the zip,
+    /// with `core.json` last.
     files: Vec<(PathBuf, String)>,
 }
 
 impl CoreZip {
     pub fn parse(bytes: Vec<u8>, id: &str) -> Result<Self, InstallCoreError> {
         let bad = |why: String| InstallCoreError::NotACoreZip(why);
-        let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|e| bad(e.to_string()))?;
+        let mut archive =
+            ZipArchive::new(Cursor::new(bytes)).map_err(|error| bad(error.to_string()))?;
         let core = Path::new("Cores").join(id);
         let core_json = core.join("core.json");
         let (mut files, mut json_name, mut total) = (Vec::new(), None, 0);
         for i in 0..archive.len() {
-            let file = archive.by_index(i).map_err(|e| bad(e.to_string()))?;
-            let name = file.name().map_err(|e| bad(e.to_string()))?.into_owned();
+            let file = archive
+                .by_index(i)
+                .map_err(|error| bad(error.to_string()))?;
+            let name = file
+                .name()
+                .map_err(|error| bad(error.to_string()))?
+                .into_owned();
             let Some(path) = file.enclosed_name() else {
                 return Err(bad(format!("{name} goes outside the device")));
             };
@@ -335,9 +336,9 @@ impl CoreZip {
         let mut json = Vec::new();
         archive
             .by_name(&json_name)
-            .map_err(|e| bad(e.to_string()))?
+            .map_err(|error| bad(error.to_string()))?
             .read_to_end(&mut json)
-            .map_err(|e| bad(e.to_string()))?;
+            .map_err(|error| bad(error.to_string()))?;
         let (version, _) =
             parse_core_json(&json).ok_or_else(|| bad("its core.json can't be read".to_string()))?;
         files.push((json_path, json_name));
@@ -352,12 +353,11 @@ impl CoreZip {
         &self.version
     }
 
-    /// Where each file to install goes, and its name in the zip.
     pub(crate) fn files(&self) -> Vec<(PathBuf, String)> {
         self.files.clone()
     }
 
-    /// Writes the file called `name` to `to`, making its folders.
+    /// Writes the file called `name` to `to`, creating its parent folders.
     pub(crate) fn extract(&mut self, name: &str, to: &Path) -> io::Result<()> {
         let mut file = self.archive.by_name(name).map_err(io::Error::other)?;
         if let Some(dir) = to.parent() {
@@ -367,9 +367,9 @@ impl CoreZip {
     }
 }
 
-/// Whether a part of `path` is hidden, or macOS's leftovers from zipping.
+/// Whether any part of `path` is hidden or is a macOS zip leftover.
 fn is_hidden(path: &Path) -> bool {
-    path.components().any(|c| match c {
+    path.components().any(|component| match component {
         Component::Normal(part) => {
             let part = part.to_string_lossy();
             part.starts_with('.') || part == "__MACOSX"
@@ -395,13 +395,12 @@ struct CoreMetadata {
     platform_ids: Vec<String>,
 }
 
-/// A JSON file of a core, which may start with a byte order mark.
+/// Parses a core's JSON file, which may start with a byte order mark.
 fn parse_json<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Option<T> {
     let text = std::str::from_utf8(bytes).ok()?;
     serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()
 }
 
-/// The version and platforms in the text of a `core.json`.
 pub(crate) fn parse_core_json(bytes: &[u8]) -> Option<(String, Vec<Platform>)> {
     let core: CoreJson = parse_json(bytes)?;
     let metadata = core.core.metadata;
@@ -422,25 +421,28 @@ struct DataSection {
     data_slots: Vec<DataSlot>,
 }
 
-/// What Analogue's docs call a data slot: a file the core loads.
+/// A data slot, in the terms of Analogue's docs, which is a file the core
+/// loads.
 #[derive(Deserialize)]
 struct DataSlot {
-    /// Only a slot with a fixed file has one.
+    /// Only slots with a fixed file have a name.
     filename: Option<String>,
     #[serde(default)]
     required: bool,
     parameters: Option<Number>,
-    /// Whether it is written as well: a save.
+    /// Whether the core also writes it, which makes it a save.
     #[serde(default)]
     nonvolatile: bool,
     size_exact: Option<Number>,
 }
 
 impl DataSlot {
-    /// The file it stands for, if it does. The name and the platform come from
-    /// a third party's zip and make a path, so only a plain name and a named
-    /// platform will do. Only a file in `common/` counts, not one in the core's
-    /// own folder, which no core in [`SUPPORTED`] has.
+    /// The file this slot stands for, if any.
+    ///
+    /// The name and platform come from a third party's zip and become part of a
+    /// path, so only plain names and known platforms are accepted. Only files
+    /// in `common/` count, not files in the core's own folder, which no core in
+    /// [`SUPPORTED`] has.
     fn to_core_file(&self, platforms: &[Platform]) -> Option<CoreFile> {
         let name = self.filename.as_deref().filter(|_| !self.nonvolatile)?;
         let parameters = match &self.parameters {
@@ -460,7 +462,8 @@ impl DataSlot {
             platform: platform.clone(),
             path: PathBuf::from(name),
             required: self.required,
-            // Zero doesn't mean an empty file: cartridge slots say it too.
+            // Zero doesn't mean an empty file, because cartridge slots use it
+            // too.
             size_exact: (self.size_exact.as_ref())
                 .and_then(Number::value)
                 .filter(|&size| size > 0),
@@ -468,7 +471,7 @@ impl DataSlot {
     }
 }
 
-/// A number in a `data.json`, which is written either way.
+/// A number in a `data.json`, written either as a number or as a hex string.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Number {
@@ -488,30 +491,28 @@ impl Number {
     }
 }
 
-/// The files the `data.json` of a core for `platforms` says it loads; none if
-/// it can't be read.
+/// The files a core for `platforms` loads according to its `data.json`, or none
+/// if it can't be read.
 pub(crate) fn parse_core_files(platforms: &[Platform], bytes: &[u8]) -> Vec<CoreFile> {
     let data: Option<DataJson> = parse_json(bytes);
-    let slots = data.map_or(Vec::new(), |d| d.data.data_slots);
+    let slots = data.map_or(Vec::new(), |data_file| data_file.data.data_slots);
     slots
         .iter()
-        .filter_map(|s| s.to_core_file(platforms))
+        .filter_map(|slot| slot.to_core_file(platforms))
         .collect()
 }
 
-/// What the tests of the modules that install cores share.
+/// Helpers shared by the tests of modules that install cores.
 #[cfg(test)]
 pub(crate) mod testing {
     use std::io::Write;
 
     use zip::{ZipWriter, write::SimpleFileOptions};
 
-    /// A `core.json` saying this is at `version`.
     pub(crate) fn core_json(version: &str) -> String {
         format!(r#"{{"core":{{"metadata":{{"version":"{version}","platform_ids":["gba"]}}}}}}"#)
     }
 
-    /// A zip of these files.
     pub(crate) fn zip_of(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut zip = ZipWriter::new(std::io::Cursor::new(Vec::new()));
         for (name, bytes) in files {
@@ -521,7 +522,6 @@ pub(crate) mod testing {
         zip.finish().unwrap().into_inner()
     }
 
-    /// A `data.json` with these slots, as JSON.
     pub(crate) fn data_json(slots: &str) -> String {
         format!(r#"{{"data":{{"data_slots":[{slots}]}}}}"#)
     }
@@ -560,7 +560,7 @@ mod tests {
         }
 
         fn paths(slots: &str) -> Vec<PathBuf> {
-            files(slots).into_iter().map(|f| f.path).collect()
+            files(slots).into_iter().map(|file| file.path).collect()
         }
 
         #[test]
@@ -685,7 +685,8 @@ mod tests {
         #[test]
         fn has_update_when_versions_differ() {
             assert!(update_available(Some("1.2.0"), "1.3.0"));
-            // Whichever is newer: versions aren't all numbers.
+            // Any difference counts, whichever is newer, because versions
+            // aren't always numbers.
             assert!(update_available(Some("1.3.0"), "1.2.0"));
         }
 
@@ -723,7 +724,7 @@ mod tests {
             match CoreZip::parse(bytes, "a.B") {
                 Err(InstallCoreError::NotACoreZip(why)) => why,
                 Ok(_) => panic!("it was taken"),
-                Err(e) => panic!("{e}"),
+                Err(error) => panic!("{error}"),
             }
         }
 
@@ -779,8 +780,8 @@ mod tests {
     mod inventory {
         use super::*;
 
-        /// A source with `Spiritualized.GB` at this version, or failing; it
-        /// counts how many times it is asked.
+        /// A source with `Spiritualized.GB` at this version, or failing. It
+        /// counts its calls.
         struct Fake {
             version: Option<&'static str>,
             asked: Cell<u32>,
@@ -820,7 +821,7 @@ mod tests {
         }
 
         fn versions(cores: &[InventoryCore]) -> Vec<&str> {
-            cores.iter().map(|c| c.version.as_str()).collect()
+            cores.iter().map(|core| core.version.as_str()).collect()
         }
 
         /// A file holding `Spiritualized.GB` at 1.0, written long ago.

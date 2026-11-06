@@ -1,6 +1,4 @@
-//! The terminal UI: this runs the loop, `worker` holds the `Pocketeer` on its
-//! own thread, `covers` prepares covers on another, `path_input` reads folders
-//! on a third, `app` keeps the screen's state and takes keys, and `ui` draws.
+//! The terminal UI and its event loop.
 
 mod app;
 mod covers;
@@ -23,14 +21,13 @@ use ratatui_image::picker::Picker;
 use app::App;
 use covers::Covers;
 use path_input::DirReader;
-use worker::{Update, Worker};
+use worker::{Worker, WorkerMessage};
 
 /// What the loop wakes up for.
 enum Event {
     Key(KeyEvent),
-    /// The terminal changed size.
     Resized,
-    Worker(Box<Update>),
+    Worker(Box<WorkerMessage>),
     CoverReady,
     /// A folder to offer paths from has been read.
     DirRead,
@@ -42,7 +39,7 @@ const SPIN: Duration = Duration::from_millis(150);
 pub fn run(library: PathBuf, device: Option<PathBuf>) -> ExitCode {
     // Ask the terminal which image protocol it speaks before entering the
     // alternate screen. POCKETEER_NO_IMAGES=1 skips the query.
-    let no_images = std::env::var_os("POCKETEER_NO_IMAGES").is_some_and(|v| !v.is_empty());
+    let no_images = std::env::var_os("POCKETEER_NO_IMAGES").is_some_and(|value| !value.is_empty());
     let picker = if no_images {
         Picker::halfblocks()
     } else {
@@ -52,7 +49,7 @@ pub fn run(library: PathBuf, device: Option<PathBuf>) -> ExitCode {
     let (mut app, rx) = start_threads(library, device, picker);
     let result = run_event_loop(&mut terminal, &mut app, &rx);
     ratatui::restore();
-    // `app` going waits for the worker, with the terminal the user's again.
+    // Dropping `app` waits for the worker, after the terminal is restored.
     if app.is_busy() {
         eprintln!("finishing what is under way; Ctrl-C stops it now");
     }
@@ -62,14 +59,15 @@ pub fn run(library: PathBuf, device: Option<PathBuf>) -> ExitCode {
             eprintln!("error: couldn't open the library: {reason}");
             ExitCode::from(2)
         }
-        Err(e) => {
-            eprintln!("error: terminal: {e}");
+        Err(error) => {
+            eprintln!("error: terminal: {error}");
             ExitCode::FAILURE
         }
     }
 }
 
-/// The threads, and the app that hears from them through what is returned.
+/// Starts the threads and the app. The threads report through the returned
+/// receiver.
 fn start_threads(
     library: PathBuf,
     device: Option<PathBuf>,
@@ -79,8 +77,8 @@ fn start_threads(
     let input = tx.clone();
     thread::spawn(move || read_input(&input));
     let to_ui = tx.clone();
-    let worker = Worker::spawn(library, device, move |update| {
-        let _ = to_ui.send(Event::Worker(Box::new(update)));
+    let worker = Worker::spawn(library, device, move |message| {
+        let _ = to_ui.send(Event::Worker(Box::new(message)));
     });
     let to_ui = tx.clone();
     let covers = Covers::spawn(picker, move || {
@@ -92,8 +90,8 @@ fn start_threads(
     (App::new(worker, covers, paths), rx)
 }
 
-/// Runs until the user quits, or the library can't be opened, for the reason
-/// returned.
+/// Runs until the user quits, or returns the reason if the library can't be
+/// opened.
 fn run_event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
@@ -117,9 +115,9 @@ fn run_event_loop(
         for event in first.into_iter().chain(rx.try_iter()) {
             match event {
                 Event::Key(key) => app.handle_key(key),
-                Event::Worker(update) => match *update {
-                    Update::LibraryFailed(reason) => return Ok(Some(reason)),
-                    update => app.update(update),
+                Event::Worker(message) => match *message {
+                    WorkerMessage::LibraryOpenFailed(reason) => return Ok(Some(reason)),
+                    message => app.handle_worker_message(message),
                 },
                 Event::CoverReady => app.on_cover_ready(),
                 Event::DirRead => app.on_dir_read(),

@@ -67,7 +67,7 @@ pub enum OperationReport {
 
 impl OperationReport {
     /// Whether it went well. Finding nothing to do is not a failure, unless
-    /// something in particular was asked for.
+    /// something in particular was requested.
     pub fn is_ok(&self) -> bool {
         match self {
             OperationReport::PullSave(_, Err(PullSaveError::NoSave))
@@ -101,7 +101,7 @@ impl OperationReport {
         }
     }
 
-    /// What it was done to, as a person would say it.
+    /// What it was done to, in words for a person.
     pub fn subject(&self) -> String {
         match self {
             OperationReport::PullGame(on_device, _)
@@ -120,7 +120,8 @@ impl OperationReport {
             | OperationReport::RenameInLibrary(local, _) => library_ref(local),
             OperationReport::TrashOrphanSave(orphan, _) => library_orphan_ref(orphan),
             OperationReport::DeleteOrphanSave(orphan, _) => device_orphan_ref(orphan),
-            // Its path is in `to_json`: it would crowd out what comes after.
+            // Its path is in `to_json`, since here it would crowd out what
+            // comes after.
             OperationReport::ImportGame(from, _) => {
                 let name = from.file_name().unwrap_or(from.as_os_str());
                 name.to_string_lossy().into_owned()
@@ -139,7 +140,6 @@ impl OperationReport {
     }
 }
 
-/// The message.
 impl fmt::Display for OperationReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -151,18 +151,22 @@ impl fmt::Display for OperationReport {
             }
             OperationReport::PullGame(
                 _,
-                Err(e @ (AddGameError::NameTaken | AddGameError::BadName)),
+                Err(error @ (AddGameError::NameTaken | AddGameError::BadName)),
             ) => {
-                write!(f, "not pulled: {e}")
+                write!(f, "not pulled: {error}")
             }
-            OperationReport::PullGame(_, Err(AddGameError::Shared(e))) => write!(f, "error: {e}"),
+            OperationReport::PullGame(_, Err(AddGameError::Shared(error))) => {
+                write!(f, "error: {error}")
+            }
 
             OperationReport::PullSave(_, Ok(PullSaveOutcome::Pulled)) => write!(f, "save kept"),
             OperationReport::PullSave(_, Ok(PullSaveOutcome::AlreadyHad)) => {
                 write!(f, "the library has this save already")
             }
-            OperationReport::PullSave(_, Err(PullSaveError::Shared(e))) => write!(f, "error: {e}"),
-            OperationReport::PullSave(_, Err(e)) => write!(f, "{e}"),
+            OperationReport::PullSave(_, Err(PullSaveError::Shared(error))) => {
+                write!(f, "error: {error}")
+            }
+            OperationReport::PullSave(_, Err(error)) => write!(f, "{error}"),
 
             OperationReport::PushGame(_, Ok(PushGameOutcome::Pushed(entry))) => {
                 write!(f, "pushed to {}", device_ref(entry))
@@ -170,8 +174,12 @@ impl fmt::Display for OperationReport {
             OperationReport::PushGame(_, Ok(PushGameOutcome::AlreadyThere(entry))) => {
                 write!(f, "on the device already, at {}", device_ref(entry))
             }
-            OperationReport::PushGame(_, Err(e @ PushGameError::NameTaken)) => write!(f, "{e}"),
-            OperationReport::PushGame(_, Err(PushGameError::Shared(e))) => write!(f, "error: {e}"),
+            OperationReport::PushGame(_, Err(error @ PushGameError::NameTaken)) => {
+                write!(f, "{error}")
+            }
+            OperationReport::PushGame(_, Err(PushGameError::Shared(error))) => {
+                write!(f, "error: {error}")
+            }
 
             OperationReport::PushSave(_, Ok(PushSaveOutcome::Pushed(save))) => {
                 write!(f, "save {} pushed", save.timestamp())
@@ -179,14 +187,14 @@ impl fmt::Display for OperationReport {
             OperationReport::PushSave(_, Ok(PushSaveOutcome::AlreadyThere)) => {
                 write!(f, "the device has this save already")
             }
-            OperationReport::PushSave(_, Err(e @ PushSaveError::NotBackedUp)) => {
-                write!(f, "{e}; back it up first")
+            OperationReport::PushSave(_, Err(error @ PushSaveError::NotBackedUp)) => {
+                write!(f, "{error}; back it up first")
             }
             OperationReport::PushSave(
                 _,
-                Err(e @ (PushSaveError::Shared(_) | PushSaveError::AmbiguousVersion { .. })),
-            ) => write!(f, "error: {e}"),
-            OperationReport::PushSave(_, Err(e)) => write!(f, "{e}"),
+                Err(error @ (PushSaveError::Shared(_) | PushSaveError::AmbiguousVersion { .. })),
+            ) => write!(f, "error: {error}"),
+            OperationReport::PushSave(_, Err(error)) => write!(f, "{error}"),
 
             OperationReport::FetchCover(_, Ok(FetchCoverOutcome::Fetched)) => {
                 write!(f, "cover downloaded")
@@ -194,10 +202,10 @@ impl fmt::Display for OperationReport {
             OperationReport::FetchCover(_, Ok(FetchCoverOutcome::AlreadyHad)) => {
                 write!(f, "it has a cover already")
             }
-            OperationReport::FetchCover(_, Err(FetchCoverError::Shared(e))) => {
-                write!(f, "error: {e}")
+            OperationReport::FetchCover(_, Err(FetchCoverError::Shared(error))) => {
+                write!(f, "error: {error}")
             }
-            OperationReport::FetchCover(_, Err(e)) => write!(f, "{e}"),
+            OperationReport::FetchCover(_, Err(error)) => write!(f, "{error}"),
 
             OperationReport::ImportGame(_, Ok(ImportGameOutcome::Imported(entry))) => {
                 write!(f, "imported as {}", library_ref(entry))
@@ -205,18 +213,23 @@ impl fmt::Display for OperationReport {
             OperationReport::ImportGame(_, Ok(ImportGameOutcome::AlreadyHad(entry))) => {
                 write!(f, "the library has it already, as {}", library_ref(entry))
             }
-            OperationReport::ImportGame(_, Err(e @ ImportGameError::UnknownPlatform)) => {
-                write!(f, "{e}")
+            OperationReport::ImportGame(_, Err(error @ ImportGameError::UnknownPlatform)) => {
+                write!(f, "{error}")
             }
             OperationReport::ImportGame(
                 _,
-                Err(ImportGameError::Add(e @ (AddGameError::NameTaken | AddGameError::BadName))),
+                Err(ImportGameError::Add(
+                    error @ (AddGameError::NameTaken | AddGameError::BadName),
+                )),
             ) => {
-                write!(f, "not imported: {e}")
+                write!(f, "not imported: {error}")
             }
-            OperationReport::ImportGame(_, Err(ImportGameError::Add(AddGameError::Shared(e))))
-            | OperationReport::ImportGame(_, Err(ImportGameError::Shared(e))) => {
-                write!(f, "error: {e}")
+            OperationReport::ImportGame(
+                _,
+                Err(ImportGameError::Add(AddGameError::Shared(error))),
+            )
+            | OperationReport::ImportGame(_, Err(ImportGameError::Shared(error))) => {
+                write!(f, "error: {error}")
             }
 
             OperationReport::ImportSave(_, _, Ok(ImportSaveOutcome::Imported(save))) => {
@@ -225,13 +238,13 @@ impl fmt::Display for OperationReport {
             OperationReport::ImportSave(_, _, Ok(ImportSaveOutcome::AlreadyHad)) => {
                 write!(f, "the library has this save already")
             }
-            OperationReport::ImportSave(_, _, Err(e)) => write!(f, "error: {e}"),
+            OperationReport::ImportSave(_, _, Err(error)) => write!(f, "error: {error}"),
 
             OperationReport::ImportCover(_, _, Ok(())) => write!(f, "cover imported"),
-            OperationReport::ImportCover(_, _, Err(ImportCoverError::Shared(e))) => {
-                write!(f, "error: {e}")
+            OperationReport::ImportCover(_, _, Err(ImportCoverError::Shared(error))) => {
+                write!(f, "error: {error}")
             }
-            OperationReport::ImportCover(_, _, Err(e)) => write!(f, "{e}"),
+            OperationReport::ImportCover(_, _, Err(error)) => write!(f, "{error}"),
 
             OperationReport::TrashGame(_, Ok(())) => write!(f, "put in the trash"),
             OperationReport::TrashSaveAll(_, Ok(()))
@@ -239,32 +252,32 @@ impl fmt::Display for OperationReport {
             | OperationReport::TrashOrphanSave(_, Ok(())) => {
                 write!(f, "save put in the trash")
             }
-            OperationReport::TrashSaveAll(_, Err(e))
-            | OperationReport::TrashSaveVersion(_, _, Err(e))
-            | OperationReport::TrashOrphanSave(_, Err(e))
+            OperationReport::TrashSaveAll(_, Err(error))
+            | OperationReport::TrashSaveVersion(_, _, Err(error))
+            | OperationReport::TrashOrphanSave(_, Err(error))
                 if matches!(
-                    e,
+                    error,
                     TrashSaveError::Shared(_) | TrashSaveError::AmbiguousVersion { .. }
                 ) =>
             {
-                write!(f, "error: {e}")
+                write!(f, "error: {error}")
             }
-            OperationReport::TrashSaveAll(_, Err(e))
-            | OperationReport::TrashSaveVersion(_, _, Err(e))
-            | OperationReport::TrashOrphanSave(_, Err(e)) => write!(f, "{e}"),
+            OperationReport::TrashSaveAll(_, Err(error))
+            | OperationReport::TrashSaveVersion(_, _, Err(error))
+            | OperationReport::TrashOrphanSave(_, Err(error)) => write!(f, "{error}"),
 
             OperationReport::DeleteGame(_, Ok(())) => write!(f, "deleted from the device"),
             OperationReport::DeleteSave(_, Ok(()))
             | OperationReport::DeleteOrphanSave(_, Ok(())) => {
                 write!(f, "save deleted from the device")
             }
-            OperationReport::DeleteSave(_, Err(DeleteSaveError::Shared(e)))
-            | OperationReport::DeleteOrphanSave(_, Err(DeleteSaveError::Shared(e))) => {
-                write!(f, "error: {e}")
+            OperationReport::DeleteSave(_, Err(DeleteSaveError::Shared(error)))
+            | OperationReport::DeleteOrphanSave(_, Err(DeleteSaveError::Shared(error))) => {
+                write!(f, "error: {error}")
             }
-            OperationReport::DeleteSave(_, Err(e))
-            | OperationReport::DeleteOrphanSave(_, Err(e)) => {
-                write!(f, "{e}")
+            OperationReport::DeleteSave(_, Err(error))
+            | OperationReport::DeleteOrphanSave(_, Err(error)) => {
+                write!(f, "{error}")
             }
 
             OperationReport::InstallCore(_, Ok(InstallCoreOutcome::Installed { version })) => {
@@ -273,59 +286,60 @@ impl fmt::Display for OperationReport {
             OperationReport::InstallCore(_, Ok(InstallCoreOutcome::AlreadyCurrent)) => {
                 write!(f, "the device has the newest version")
             }
-            OperationReport::InstallCore(_, Err(InstallCoreError::Shared(e))) => {
-                write!(f, "error: {e}")
+            OperationReport::InstallCore(_, Err(InstallCoreError::Shared(error))) => {
+                write!(f, "error: {error}")
             }
-            OperationReport::InstallCore(_, Err(e)) => write!(f, "{e}"),
+            OperationReport::InstallCore(_, Err(error)) => write!(f, "{error}"),
             OperationReport::RemoveCore(_, Ok(())) => write!(f, "removed from the device"),
-            OperationReport::RemoveCore(_, Err(RemoveCoreError::Shared(e))) => {
-                write!(f, "error: {e}")
+            OperationReport::RemoveCore(_, Err(RemoveCoreError::Shared(error))) => {
+                write!(f, "error: {error}")
             }
-            OperationReport::RemoveCore(_, Err(e)) => write!(f, "{e}"),
+            OperationReport::RemoveCore(_, Err(error)) => write!(f, "{error}"),
             OperationReport::RenameInLibrary(_, Ok(entry)) => {
                 write!(f, "renamed to {}", library_ref(entry))
             }
-            OperationReport::RenameInLibrary(_, Err(RenameInLibraryError::Shared(e))) => {
-                write!(f, "error: {e}")
+            OperationReport::RenameInLibrary(_, Err(RenameInLibraryError::Shared(error))) => {
+                write!(f, "error: {error}")
             }
-            OperationReport::RenameInLibrary(_, Err(e)) => write!(f, "not renamed: {e}"),
+            OperationReport::RenameInLibrary(_, Err(error)) => write!(f, "not renamed: {error}"),
             OperationReport::RenameOnDevice(_, Ok(entry)) => {
                 write!(f, "renamed to {}", device_ref(entry))
             }
-            OperationReport::RenameOnDevice(_, Err(RenameOnDeviceError::Shared(e))) => {
-                write!(f, "error: {e}")
+            OperationReport::RenameOnDevice(_, Err(RenameOnDeviceError::Shared(error))) => {
+                write!(f, "error: {error}")
             }
-            OperationReport::RenameOnDevice(_, Err(e)) => write!(f, "not renamed: {e}"),
+            OperationReport::RenameOnDevice(_, Err(error)) => write!(f, "not renamed: {error}"),
             OperationReport::PutBios(_, _, Ok(())) => write!(f, "put on the device"),
-            OperationReport::PutBios(_, _, Err(PutBiosError::Shared(e))) => write!(f, "error: {e}"),
-            OperationReport::PutBios(_, _, Err(e)) => write!(f, "{e}"),
+            OperationReport::PutBios(_, _, Err(PutBiosError::Shared(error))) => {
+                write!(f, "error: {error}")
+            }
+            OperationReport::PutBios(_, _, Err(error)) => write!(f, "{error}"),
 
             OperationReport::SyncDats(Ok(report)) => {
                 write!(f, "{} platforms updated", report.updated.len())
             }
             OperationReport::Reload(Ok(())) => write!(f, "read again"),
             OperationReport::Eject(root, Ok(())) => {
-                let root = root.as_ref().map(|r| r.display().to_string());
+                let root = root.as_ref().map(|root| root.display().to_string());
                 write!(f, "ejected {}", root.unwrap_or_default())
             }
 
-            OperationReport::TrashGame(_, Err(e))
-            | OperationReport::DeleteGame(_, Err(e))
-            | OperationReport::SyncDats(Err(e))
-            | OperationReport::Reload(Err(e)) => write!(f, "error: {e}"),
-            OperationReport::Eject(_, Err(e)) => write!(f, "error: {e}"),
+            OperationReport::TrashGame(_, Err(error))
+            | OperationReport::DeleteGame(_, Err(error))
+            | OperationReport::SyncDats(Err(error))
+            | OperationReport::Reload(Err(error)) => write!(f, "error: {error}"),
+            OperationReport::Eject(_, Err(error)) => write!(f, "error: {error}"),
         }
     }
 }
 
-/// Which front end did it.
 #[derive(Debug, Clone, Copy)]
 pub enum FrontEnd {
     Cli,
     Tui,
 }
 
-/// A whole record: what happened, when, and through what.
+/// A whole record of what happened, when, and through which front end.
 pub struct LogEntry {
     pub time: Timestamp,
     pub front_end: FrontEnd,
@@ -408,9 +422,11 @@ impl Logger {
         Self { path, front_end }
     }
 
-    /// Adds `report` to the file, with the time and this front end. Returns the
-    /// entry that makes along with whether it was written, not one or the other:
-    /// the operation is done either way, so the front end still has to be told.
+    /// Adds `report` to the file with the time and this front end.
+    ///
+    /// Returns the entry together with whether it was written, rather than one
+    /// or the other, because the operation is done either way and the front end
+    /// still has to show it.
     pub(crate) fn record(&self, report: OperationReport) -> (LogEntry, Result<(), SharedError>) {
         let entry = LogEntry {
             time: Timestamp::now(),
@@ -564,7 +580,7 @@ mod tests {
         fs::read_to_string(path)
             .unwrap()
             .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
+            .map(|line| serde_json::from_str(line).unwrap())
             .collect()
     }
 
@@ -579,7 +595,7 @@ mod tests {
             .record(OperationReport::DeleteGame(on_device(), Ok(())))
             .1
             .unwrap();
-        // Another run adds to what is there.
+        // Another run appends to the file.
         let next = Logger::new(path.clone(), FrontEnd::Tui);
         next.record(OperationReport::Reload(Err(SharedError::NoDevice)))
             .1
