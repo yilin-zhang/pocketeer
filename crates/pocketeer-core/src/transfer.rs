@@ -38,12 +38,12 @@ pub enum PullSaveOutcome {
     Pulled,
     /// The library already has a version with the same contents.
     AlreadyHad,
+    /// The game has no save on the device.
+    NoSave,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum PullSaveError {
-    #[error("no save on the device")]
-    NoSave,
     #[error("not in the library; pull the game first")]
     NotInLibrary,
     #[error(transparent)]
@@ -120,7 +120,7 @@ pub(crate) fn pull_save(
 ) -> Result<PullSaveOutcome, PullSaveError> {
     let from = device.save_path(on_device);
     if !from.is_file() {
-        return Err(PullSaveError::NoSave);
+        return Ok(PullSaveOutcome::NoSave);
     }
     let Some(entry) = library.entry_for(&on_device.game) else {
         return Err(PullSaveError::NotInLibrary);
@@ -249,14 +249,14 @@ mod tests {
         }
 
         #[test]
-        fn rejects_pull_without_save_or_game() {
+        fn reports_no_save_and_rejects_pull_without_game() {
             let mut without_save = setup(None, None);
             let pulled = pull_save(
                 &mut without_save.library,
                 &without_save.device,
                 &without_save.on_device,
             );
-            assert!(matches!(pulled, Err(PullSaveError::NoSave)));
+            assert!(matches!(pulled, Ok(PullSaveOutcome::NoSave)));
             let mut without_game = setup(None, Some(b"a"));
             fs::remove_file(without_game.library.root().join("roms/gba/Tetris.gba")).unwrap();
             without_game.library.reload().unwrap();

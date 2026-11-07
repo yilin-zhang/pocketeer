@@ -15,8 +15,8 @@ use crate::{
     cover::{Cover, CoverIndex, RemoteCoverSource},
     dat::{DatMirror, RemoteDatSource, SyncReport},
     device::{
-        DeleteSaveError, Device, DeviceEntry, EjectDeviceError, OpenDeviceError, OrphanDeviceSave,
-        RenameOnDeviceError, ScanReport,
+        DeleteSaveOutcome, Device, DeviceEntry, EjectDeviceError, OpenDeviceError,
+        OrphanDeviceSave, RenameOnDeviceError, ScanReport,
     },
     error::SharedError,
     files::list_files_recursive,
@@ -45,10 +45,16 @@ pub type BatchResult = Result<ControlFlow<()>, SharedError>;
 // What operations return
 // ============================================================================
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrashSaveAllOutcome {
+    Trashed,
+    /// The library has no save of the game.
+    NoSave,
+}
+
+/// Why a version of a save wasn't trashed.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum TrashSaveError {
-    #[error("no such save in the library")]
-    NoSave,
     /// The save has no version written at that time.
     #[error("the library has no such save")]
     NoSuchVersion,
@@ -71,14 +77,8 @@ pub enum ImportCoverError {
 pub enum FetchCoverOutcome {
     Fetched,
     AlreadyHad,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum FetchCoverError {
-    #[error("no cover found for it")]
+    /// The source has no cover for it.
     NoCover,
-    #[error(transparent)]
-    Shared(#[from] SharedError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -563,7 +563,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     /// Downloads a cover for `local` if it has none. It looks under the DAT
     /// name if known and otherwise under the file name without its extension.
-    fn fetch_cover(&mut self, local: &LocalEntry) -> Result<FetchCoverOutcome, FetchCoverError> {
+    fn fetch_cover(&mut self, local: &LocalEntry) -> Result<FetchCoverOutcome, SharedError> {
         let local = self.current_local_entry(local)?;
         if local.cover_path.is_some() {
             return Ok(FetchCoverOutcome::AlreadyHad);
@@ -574,7 +574,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         };
         let platform = &local.game.platform;
         let Some(cover) = self.covers.fetch(platform, &name)? else {
-            return Err(FetchCoverError::NoCover);
+            return Ok(FetchCoverOutcome::NoCover);
         };
         self.library.add_cover(platform, &local.name, &cover)?;
         Ok(FetchCoverOutcome::Fetched)
@@ -824,13 +824,17 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         )
     }
 
-    fn trash_every_version_in_library(&mut self, local: &LocalEntry) -> Result<(), TrashSaveError> {
+    fn trash_every_version_in_library(
+        &mut self,
+        local: &LocalEntry,
+    ) -> Result<TrashSaveAllOutcome, SharedError> {
         let local = self.current_local_entry(local)?;
         let files = self.library.files_of_all_saves(&local)?;
         if files.is_empty() {
-            return Err(TrashSaveError::NoSave);
+            return Ok(TrashSaveAllOutcome::NoSave);
         }
-        self.trash_save_files(&local, &files)
+        self.trash_save_files(&local, &files)?;
+        Ok(TrashSaveAllOutcome::Trashed)
     }
 
     /// Trashes the version of each game's save written at `at`, in the format
@@ -885,18 +889,16 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         let Some(file) = self.library.file_of_save(&local, version)? else {
             return Err(TrashSaveError::NoSuchVersion);
         };
-        self.trash_save_files(&local, &[file])
+        Ok(self.trash_save_files(&local, &[file])?)
     }
 
     fn trash_save_files(
         &mut self,
         local: &LocalEntry,
         files: &[PathBuf],
-    ) -> Result<(), TrashSaveError> {
-        trash::delete_all(files).map_err(SharedError::from)?;
-        self.library
-            .reread_saves(&local.game.platform, &local.name)?;
-        Ok(())
+    ) -> Result<(), SharedError> {
+        trash::delete_all(files)?;
+        self.library.reread_saves(&local.game.platform, &local.name)
     }
 
     pub fn delete_saves_on_device(
@@ -915,7 +917,10 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     /// Deletes the save of `on_device` from the device for good, even if the
     /// library doesn't have it.
-    fn delete_save_on_device(&mut self, on_device: &DeviceEntry) -> Result<(), DeleteSaveError> {
+    fn delete_save_on_device(
+        &mut self,
+        on_device: &DeviceEntry,
+    ) -> Result<DeleteSaveOutcome, SharedError> {
         let on_device = self.current_device_entry(on_device)?;
         let device = self.device.as_mut().ok_or(SharedError::NoDevice)?;
         device.remove_save(&on_device)
@@ -955,12 +960,12 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     fn trash_orphan_save_in_library(
         &mut self,
         orphan: &OrphanLocalSave,
-    ) -> Result<(), TrashSaveError> {
+    ) -> Result<(), SharedError> {
         let files = self.library.files_of_orphan_save(orphan)?;
         if files.is_empty() {
-            return Err(TrashSaveError::NoSave);
+            return Err(SharedError::NoOrphanSave);
         }
-        trash::delete_all(&files).map_err(SharedError::from)?;
+        trash::delete_all(&files)?;
         Ok(())
     }
 
@@ -984,7 +989,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     fn delete_orphan_save_on_device(
         &mut self,
         orphan: &OrphanDeviceSave,
-    ) -> Result<(), DeleteSaveError> {
+    ) -> Result<(), SharedError> {
         let device = self.device.as_ref().ok_or(SharedError::NoDevice)?;
         device.remove_orphan_save(orphan)
     }
@@ -1556,12 +1561,12 @@ mod tests {
             setup.pocketeer.reload_library().unwrap();
             assert!(matches!(
                 setup.pocketeer.fetch_cover(&local),
-                Err(FetchCoverError::Shared(SharedError::NotInLibrary))
+                Err(SharedError::NotInLibrary)
             ));
         }
 
         #[test]
-        fn returns_error_when_required_save_is_missing() {
+        fn reports_no_save_and_rejects_missing_version() {
             let mut setup = setup(
                 &[("Assets/gba/common/Tetris.gba", b"hello")],
                 &[("roms/gba/Tetris (World).gba", b"hello")],
@@ -1570,7 +1575,7 @@ mod tests {
             let local = setup.first_local();
             assert!(matches!(
                 setup.pocketeer.trash_every_version_in_library(&local),
-                Err(TrashSaveError::NoSave)
+                Ok(TrashSaveAllOutcome::NoSave)
             ));
             let gone = Save::from_bytes(b"gone", std::time::UNIX_EPOCH);
             assert!(matches!(
@@ -2148,7 +2153,7 @@ mod tests {
                     .pocketeer
                     .trash_orphan_saves_in_library(&orphans, on_logged)
             });
-            assert_eq!(lines, ["gba/Gone: no such save in the library"]);
+            assert_eq!(lines, ["gba/Gone: error: no such orphan save"]);
         }
     }
 }

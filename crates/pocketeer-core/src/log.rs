@@ -16,13 +16,13 @@ use crate::{
     cores::{BiosRow, InstallCoreError, InstallCoreOutcome, PutBiosError, RemoveCoreError},
     dat::SyncReport,
     device::{
-        DeleteSaveError, DeviceEntry, EjectDeviceError, OrphanDeviceSave, RenameOnDeviceError,
+        DeleteSaveOutcome, DeviceEntry, EjectDeviceError, OrphanDeviceSave, RenameOnDeviceError,
     },
     error::SharedError,
     library::{AddGameError, LocalEntry, OrphanLocalSave, RenameInLibraryError},
     pocketeer::{
-        FetchCoverError, FetchCoverOutcome, ImportCoverError, ImportGameError, ImportGameOutcome,
-        ImportSaveOutcome, TrashSaveError,
+        FetchCoverOutcome, ImportCoverError, ImportGameError, ImportGameOutcome, ImportSaveOutcome,
+        TrashSaveAllOutcome, TrashSaveError,
     },
     transfer::{
         PullGameOutcome, PullSaveError, PullSaveOutcome, PushGameError, PushGameOutcome,
@@ -36,7 +36,7 @@ pub enum OperationReport {
     PullSave(DeviceEntry, Result<PullSaveOutcome, PullSaveError>),
     PushGame(LocalEntry, Result<PushGameOutcome, PushGameError>),
     PushSave(DeviceEntry, Result<PushSaveOutcome, PushSaveError>),
-    FetchCover(LocalEntry, Result<FetchCoverOutcome, FetchCoverError>),
+    FetchCover(LocalEntry, Result<FetchCoverOutcome, SharedError>),
     /// The file it was imported from.
     ImportGame(PathBuf, Result<ImportGameOutcome, ImportGameError>),
     /// The file it was imported from.
@@ -44,13 +44,13 @@ pub enum OperationReport {
     /// The file it was imported from.
     ImportCover(LocalEntry, PathBuf, Result<(), ImportCoverError>),
     TrashGame(LocalEntry, Result<(), SharedError>),
-    TrashSaveAll(LocalEntry, Result<(), TrashSaveError>),
+    TrashSaveAll(LocalEntry, Result<TrashSaveAllOutcome, SharedError>),
     /// The version, as [`crate::game::Save::timestamp`] writes it.
     TrashSaveVersion(LocalEntry, String, Result<(), TrashSaveError>),
-    TrashOrphanSave(OrphanLocalSave, Result<(), TrashSaveError>),
+    TrashOrphanSave(OrphanLocalSave, Result<(), SharedError>),
     DeleteGame(DeviceEntry, Result<(), SharedError>),
-    DeleteSave(DeviceEntry, Result<(), DeleteSaveError>),
-    DeleteOrphanSave(OrphanDeviceSave, Result<(), DeleteSaveError>),
+    DeleteSave(DeviceEntry, Result<DeleteSaveOutcome, SharedError>),
+    DeleteOrphanSave(OrphanDeviceSave, Result<(), SharedError>),
     /// The core's id.
     InstallCore(String, Result<InstallCoreOutcome, InstallCoreError>),
     /// The core's id.
@@ -66,14 +66,10 @@ pub enum OperationReport {
 }
 
 impl OperationReport {
-    /// Whether it went well. Finding nothing to do is not a failure, unless
-    /// something in particular was requested.
+    /// Whether it went well. Each operation decides that by what it returns,
+    /// and finding nothing to do is an outcome, not an error.
     pub fn is_ok(&self) -> bool {
         match self {
-            OperationReport::PullSave(_, Err(PullSaveError::NoSave))
-            | OperationReport::FetchCover(_, Err(FetchCoverError::NoCover))
-            | OperationReport::TrashSaveAll(_, Err(TrashSaveError::NoSave))
-            | OperationReport::DeleteSave(_, Err(DeleteSaveError::NoSave)) => true,
             OperationReport::PullGame(_, done) => done.is_ok(),
             OperationReport::PullSave(_, done) => done.is_ok(),
             OperationReport::PushGame(_, done) => done.is_ok(),
@@ -84,14 +80,13 @@ impl OperationReport {
             OperationReport::ImportCover(_, _, done) => done.is_ok(),
             OperationReport::TrashGame(_, done)
             | OperationReport::DeleteGame(_, done)
+            | OperationReport::TrashOrphanSave(_, done)
+            | OperationReport::DeleteOrphanSave(_, done)
             | OperationReport::Reload(done) => done.is_ok(),
             OperationReport::Eject(_, done) => done.is_ok(),
-            OperationReport::TrashSaveAll(_, done)
-            | OperationReport::TrashSaveVersion(_, _, done)
-            | OperationReport::TrashOrphanSave(_, done) => done.is_ok(),
-            OperationReport::DeleteSave(_, done) | OperationReport::DeleteOrphanSave(_, done) => {
-                done.is_ok()
-            }
+            OperationReport::TrashSaveAll(_, done) => done.is_ok(),
+            OperationReport::TrashSaveVersion(_, _, done) => done.is_ok(),
+            OperationReport::DeleteSave(_, done) => done.is_ok(),
             OperationReport::InstallCore(_, done) => done.is_ok(),
             OperationReport::RemoveCore(_, done) => done.is_ok(),
             OperationReport::PutBios(_, _, done) => done.is_ok(),
@@ -163,6 +158,9 @@ impl fmt::Display for OperationReport {
             OperationReport::PullSave(_, Ok(PullSaveOutcome::AlreadyHad)) => {
                 write!(f, "the library has this save already")
             }
+            OperationReport::PullSave(_, Ok(PullSaveOutcome::NoSave)) => {
+                write!(f, "no save on the device")
+            }
             OperationReport::PullSave(_, Err(PullSaveError::Shared(error))) => {
                 write!(f, "error: {error}")
             }
@@ -202,10 +200,9 @@ impl fmt::Display for OperationReport {
             OperationReport::FetchCover(_, Ok(FetchCoverOutcome::AlreadyHad)) => {
                 write!(f, "it has a cover already")
             }
-            OperationReport::FetchCover(_, Err(FetchCoverError::Shared(error))) => {
-                write!(f, "error: {error}")
+            OperationReport::FetchCover(_, Ok(FetchCoverOutcome::NoCover)) => {
+                write!(f, "no cover found for it")
             }
-            OperationReport::FetchCover(_, Err(error)) => write!(f, "{error}"),
 
             OperationReport::ImportGame(_, Ok(ImportGameOutcome::Imported(entry))) => {
                 write!(f, "imported as {}", library_ref(entry))
@@ -247,37 +244,28 @@ impl fmt::Display for OperationReport {
             OperationReport::ImportCover(_, _, Err(error)) => write!(f, "{error}"),
 
             OperationReport::TrashGame(_, Ok(())) => write!(f, "put in the trash"),
-            OperationReport::TrashSaveAll(_, Ok(()))
+            OperationReport::TrashSaveAll(_, Ok(TrashSaveAllOutcome::Trashed))
             | OperationReport::TrashSaveVersion(_, _, Ok(()))
             | OperationReport::TrashOrphanSave(_, Ok(())) => {
                 write!(f, "save put in the trash")
             }
-            OperationReport::TrashSaveAll(_, Err(error))
-            | OperationReport::TrashSaveVersion(_, _, Err(error))
-            | OperationReport::TrashOrphanSave(_, Err(error))
-                if matches!(
-                    error,
-                    TrashSaveError::Shared(_) | TrashSaveError::AmbiguousVersion { .. }
-                ) =>
-            {
-                write!(f, "error: {error}")
+            OperationReport::TrashSaveAll(_, Ok(TrashSaveAllOutcome::NoSave)) => {
+                write!(f, "no save in the library")
             }
-            OperationReport::TrashSaveAll(_, Err(error))
-            | OperationReport::TrashSaveVersion(_, _, Err(error))
-            | OperationReport::TrashOrphanSave(_, Err(error)) => write!(f, "{error}"),
+            OperationReport::TrashSaveVersion(
+                _,
+                _,
+                Err(error @ (TrashSaveError::Shared(_) | TrashSaveError::AmbiguousVersion { .. })),
+            ) => write!(f, "error: {error}"),
+            OperationReport::TrashSaveVersion(_, _, Err(error)) => write!(f, "{error}"),
 
             OperationReport::DeleteGame(_, Ok(())) => write!(f, "deleted from the device"),
-            OperationReport::DeleteSave(_, Ok(()))
+            OperationReport::DeleteSave(_, Ok(DeleteSaveOutcome::Deleted))
             | OperationReport::DeleteOrphanSave(_, Ok(())) => {
                 write!(f, "save deleted from the device")
             }
-            OperationReport::DeleteSave(_, Err(DeleteSaveError::Shared(error)))
-            | OperationReport::DeleteOrphanSave(_, Err(DeleteSaveError::Shared(error))) => {
-                write!(f, "error: {error}")
-            }
-            OperationReport::DeleteSave(_, Err(error))
-            | OperationReport::DeleteOrphanSave(_, Err(error)) => {
-                write!(f, "{error}")
+            OperationReport::DeleteSave(_, Ok(DeleteSaveOutcome::NoSave)) => {
+                write!(f, "no save on the device")
             }
 
             OperationReport::InstallCore(_, Ok(InstallCoreOutcome::Installed { version })) => {
@@ -324,8 +312,13 @@ impl fmt::Display for OperationReport {
                 write!(f, "ejected {}", root.unwrap_or_default())
             }
 
-            OperationReport::TrashGame(_, Err(error))
+            OperationReport::FetchCover(_, Err(error))
+            | OperationReport::TrashGame(_, Err(error))
+            | OperationReport::TrashSaveAll(_, Err(error))
+            | OperationReport::TrashOrphanSave(_, Err(error))
             | OperationReport::DeleteGame(_, Err(error))
+            | OperationReport::DeleteSave(_, Err(error))
+            | OperationReport::DeleteOrphanSave(_, Err(error))
             | OperationReport::SyncDats(Err(error))
             | OperationReport::Reload(Err(error)) => write!(f, "error: {error}"),
             OperationReport::Eject(_, Err(error)) => write!(f, "error: {error}"),
@@ -524,46 +517,6 @@ mod tests {
             refused.to_string(),
             "not renamed: another game in the library has that name"
         );
-    }
-
-    #[test]
-    fn treats_nothing_found_as_failure_only_when_asked_for() {
-        for (report, ok) in [
-            (
-                OperationReport::PullSave(on_device(), Err(PullSaveError::NoSave)),
-                true,
-            ),
-            (
-                OperationReport::FetchCover(local(), Err(FetchCoverError::NoCover)),
-                true,
-            ),
-            (
-                OperationReport::TrashSaveAll(local(), Err(TrashSaveError::NoSave)),
-                true,
-            ),
-            (
-                OperationReport::DeleteSave(on_device(), Err(DeleteSaveError::NoSave)),
-                true,
-            ),
-            (
-                OperationReport::TrashSaveVersion(
-                    local(),
-                    "x".into(),
-                    Err(TrashSaveError::NoSuchVersion),
-                ),
-                false,
-            ),
-            (
-                OperationReport::PullSave(on_device(), Err(PullSaveError::NotInLibrary)),
-                false,
-            ),
-            (
-                OperationReport::PushSave(on_device(), Err(PushSaveError::NoSuchVersion)),
-                false,
-            ),
-        ] {
-            assert_eq!(report.is_ok(), ok, "{}", report.to_line());
-        }
     }
 
     #[test]

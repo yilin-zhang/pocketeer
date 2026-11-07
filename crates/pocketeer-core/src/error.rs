@@ -25,6 +25,9 @@ pub enum SharedError {
     /// The library no longer has the given game.
     #[error("the library doesn't have the game")]
     NotInLibrary,
+    /// The given orphan save is gone, or a game has taken it.
+    #[error("no such orphan save")]
+    NoOrphanSave,
     #[error("{url}: {source}")]
     Http {
         url: String,

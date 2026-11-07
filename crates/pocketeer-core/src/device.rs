@@ -156,12 +156,11 @@ pub struct OrphanDeviceSave {
     pub save: Save,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum DeleteSaveError {
-    #[error("no save on the device")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteSaveOutcome {
+    Deleted,
+    /// The game has no save on the device.
     NoSave,
-    #[error(transparent)]
-    Shared(#[from] SharedError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -326,36 +325,36 @@ impl Device {
     }
 
     /// Deletes `entry`'s save for good.
-    pub(crate) fn remove_save(&mut self, entry: &DeviceEntry) -> Result<(), DeleteSaveError> {
+    pub(crate) fn remove_save(
+        &mut self,
+        entry: &DeviceEntry,
+    ) -> Result<DeleteSaveOutcome, SharedError> {
         let path = self.save_path(entry);
         let removed = match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Err(DeleteSaveError::NoSave),
-            Err(error) => return Err(SharedError::from(error).into()),
+            Ok(()) => DeleteSaveOutcome::Deleted,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => DeleteSaveOutcome::NoSave,
+            Err(error) => return Err(error.into()),
         };
         if let Some(stored_entry) = self.entry_mut(entry) {
             stored_entry.save = None;
         }
-        removed
+        Ok(removed)
     }
 
     /// Deletes `orphan` for good if it is still an orphan, since a game may
     /// have been put at its path.
-    pub(crate) fn remove_orphan_save(
-        &self,
-        orphan: &OrphanDeviceSave,
-    ) -> Result<(), DeleteSaveError> {
+    pub(crate) fn remove_orphan_save(&self, orphan: &OrphanDeviceSave) -> Result<(), SharedError> {
         let is_it = |candidate: &OrphanDeviceSave| {
             candidate.platform == orphan.platform && candidate.path == orphan.path
         };
         if !self.find_orphan_saves()?.iter().any(is_it) {
-            return Err(DeleteSaveError::NoSave);
+            return Err(SharedError::NoOrphanSave);
         }
         let path = self
             .layout
             .saves_common(&orphan.platform)
             .join(&orphan.path);
-        fs::remove_file(&path).map_err(SharedError::from)?;
+        fs::remove_file(&path)?;
         Ok(())
     }
 
@@ -1085,12 +1084,12 @@ mod tests {
         }
 
         #[test]
-        fn rejects_removing_save_already_gone() {
+        fn reports_no_save_when_removing_save_already_gone() {
             let (_dir, mut device, entry) = with_two_games();
             device.remove_save(&entry).unwrap();
             assert!(matches!(
                 device.remove_save(&entry),
-                Err(DeleteSaveError::NoSave)
+                Ok(DeleteSaveOutcome::NoSave)
             ));
         }
 
@@ -1736,7 +1735,7 @@ mod tests {
             put(dir.path(), "Assets/gba/common/Tetris.gba", b"hello");
             assert!(matches!(
                 device.remove_orphan_save(&orphan),
-                Err(DeleteSaveError::NoSave)
+                Err(SharedError::NoOrphanSave)
             ));
             assert!(save.exists());
         }
