@@ -1248,7 +1248,7 @@ game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686
         #[test]
         fn summarizes_how_command_went() {
             let ok = || OperationReport::Reload(Ok(()));
-            let bad = || OperationReport::Reload(Err(pocketeer_core::error::SharedError::NoDevice));
+            let bad = || OperationReport::Reload(Err(pocketeer_core::error::BasicError::NoDevice));
             assert_eq!(
                 command_summary("reading", 1, &[ok()]),
                 ("everything: read again".to_string(), false)

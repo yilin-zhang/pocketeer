@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::{
     device::{Device, DeviceEntry},
-    error::SharedError,
+    error::BasicError,
     game::Save,
     library::{AddGameError, Library, LocalEntry},
 };
@@ -30,7 +30,7 @@ pub enum PushGameError {
     #[error("not pushed: another file is where it would go")]
     NameTaken,
     #[error(transparent)]
-    Shared(#[from] SharedError),
+    Other(#[from] BasicError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +47,7 @@ pub enum PullSaveError {
     #[error("not in the library; pull the game first")]
     NotInLibrary,
     #[error(transparent)]
-    Shared(#[from] SharedError),
+    Other(#[from] BasicError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +71,7 @@ pub enum PushSaveError {
     #[error("more than one version of the save was written at {at}")]
     AmbiguousVersion { at: String },
     #[error(transparent)]
-    Shared(#[from] SharedError),
+    Other(#[from] BasicError),
 }
 
 /// Copies `on_device` into the library as the game called `name`. Its save

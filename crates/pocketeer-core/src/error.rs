@@ -1,12 +1,12 @@
-//! Errors that several operations can run into. An error only one operation can
-//! hit lives beside that operation.
+//! The basic failures any operation can run into. An operation's own reasons
+//! to fail live beside it, in an error type that wraps these as `Other`.
 
 use std::{io, path::PathBuf, sync::Arc};
 
 /// Derives `Clone` because operation results also go in the log. System errors
 /// can't be cloned, so they are kept in an `Arc`.
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum SharedError {
+pub enum BasicError {
     /// What went wrong and at which path, as `fs_err` writes it.
     #[error(transparent)]
     Io(Arc<io::Error>),
@@ -25,9 +25,6 @@ pub enum SharedError {
     /// The library no longer has the given game.
     #[error("the library doesn't have the game")]
     NotInLibrary,
-    /// The given orphan save is gone, or a game has taken it.
-    #[error("no such orphan save")]
-    NoOrphanSave,
     #[error("{url}: {source}")]
     Http {
         url: String,
@@ -44,15 +41,15 @@ pub enum SharedError {
     TrashFailed { source: Arc<trash::Error> },
 }
 
-impl From<io::Error> for SharedError {
+impl From<io::Error> for BasicError {
     fn from(source: io::Error) -> Self {
-        SharedError::Io(Arc::new(source))
+        BasicError::Io(Arc::new(source))
     }
 }
 
-impl From<trash::Error> for SharedError {
+impl From<trash::Error> for BasicError {
     fn from(source: trash::Error) -> Self {
-        SharedError::TrashFailed {
+        BasicError::TrashFailed {
             source: Arc::new(source),
         }
     }

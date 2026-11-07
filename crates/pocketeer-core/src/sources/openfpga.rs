@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::{
     cores::{InventoryCore, RemoteCoreSource},
-    error::SharedError,
+    error::BasicError,
     platform::Platform,
     sources::{get, get_json},
 };
@@ -63,12 +63,12 @@ struct Listing {
 pub struct OpenFpga;
 
 impl RemoteCoreSource for OpenFpga {
-    fn inventory(&self) -> Result<Vec<InventoryCore>, SharedError> {
+    fn inventory(&self) -> Result<Vec<InventoryCore>, BasicError> {
         let listing: Listing = get_json(INVENTORY)?;
         Ok(listing.data.into_iter().filter_map(Entry::newest).collect())
     }
 
-    fn download(&self, url: &str) -> Result<Vec<u8>, SharedError> {
+    fn download(&self, url: &str) -> Result<Vec<u8>, BasicError> {
         get(url)
     }
 }

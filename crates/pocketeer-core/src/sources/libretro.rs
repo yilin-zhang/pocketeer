@@ -6,7 +6,7 @@ use serde::Deserialize;
 use crate::{
     cover::{Cover, RemoteCoverSource},
     dat::{Dat, ParseError, RemoteDat, RemoteDatSource},
-    error::SharedError,
+    error::BasicError,
     platform::Platform,
     sources::{get, get_json},
 };
@@ -67,7 +67,7 @@ impl RemoteDatSource for Libretro {
     }
 
     /// One request to GitHub's API, which allows 60 an hour without a login.
-    fn list(&self) -> Result<Vec<RemoteDat>, SharedError> {
+    fn list(&self) -> Result<Vec<RemoteDat>, BasicError> {
         #[derive(Deserialize)]
         struct File {
             name: String,
@@ -85,9 +85,9 @@ impl RemoteDatSource for Libretro {
             .collect())
     }
 
-    fn fetch(&self, name: &str) -> Result<String, SharedError> {
+    fn fetch(&self, name: &str) -> Result<String, BasicError> {
         let url = format!("{DAT_FILES}/{}.dat", encode(name));
-        String::from_utf8(get(&url)?).map_err(|error| SharedError::BadResponse {
+        String::from_utf8(get(&url)?).map_err(|error| BasicError::BadResponse {
             from: url,
             message: error.to_string(),
         })
@@ -105,21 +105,21 @@ impl RemoteCoverSource for Libretro {
 
     /// The covers folder's own id, which changes with its contents. This takes
     /// one request to GitHub's API.
-    fn version(&self, system: &str) -> Result<String, SharedError> {
+    fn version(&self, system: &str) -> Result<String, BasicError> {
         let url = format!("{COVER_TREES}/{}/git/trees/master", repository(system));
         let root: Tree = get_json(&url)?;
         root.tree
             .into_iter()
             .find(|tree_entry| tree_entry.path == BOXARTS)
             .map(|tree_entry| tree_entry.sha)
-            .ok_or_else(|| SharedError::BadResponse {
+            .ok_or_else(|| BasicError::BadResponse {
                 from: url,
                 message: format!("no {BOXARTS} folder"),
             })
     }
 
     /// One request to GitHub's API, for the folder at `version`.
-    fn names(&self, system: &str, version: &str) -> Result<Vec<String>, SharedError> {
+    fn names(&self, system: &str, version: &str) -> Result<Vec<String>, BasicError> {
         let url = format!("{COVER_TREES}/{}/git/trees/{version}", repository(system));
         let dir: Tree = get_json(&url)?;
         Ok(dir
@@ -143,13 +143,13 @@ impl RemoteCoverSource for Libretro {
 
     /// Some covers are symlinks to another cover, which arrive as that cover's
     /// name. They are followed once.
-    fn fetch(&self, system: &str, cover_name: &str) -> Result<Cover, SharedError> {
+    fn fetch(&self, system: &str, cover_name: &str) -> Result<Cover, BasicError> {
         let url = cover_url(system, cover_name);
         let mut bytes = get(&url)?;
         if let Some(target) = link_target(&bytes) {
             bytes = get(&cover_url(system, target))?;
         }
-        Cover::from_bytes(bytes).ok_or_else(|| SharedError::BadResponse {
+        Cover::from_bytes(bytes).ok_or_else(|| BasicError::BadResponse {
             from: url,
             message: "not an image".into(),
         })

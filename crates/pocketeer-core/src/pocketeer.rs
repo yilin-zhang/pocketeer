@@ -15,10 +15,10 @@ use crate::{
     cover::{Cover, CoverIndex, RemoteCoverSource},
     dat::{DatMirror, RemoteDatSource, SyncReport},
     device::{
-        DeleteSaveOutcome, Device, DeviceEntry, EjectDeviceError, OpenDeviceError,
-        OrphanDeviceSave, RenameOnDeviceError, ScanReport,
+        DeleteOrphanSaveError, DeleteSaveOutcome, Device, DeviceEntry, EjectDeviceError,
+        OpenDeviceError, OrphanDeviceSave, RenameOnDeviceError, ScanReport,
     },
-    error::SharedError,
+    error::BasicError,
     files::list_files_recursive,
     game::{Game, Save},
     library::{
@@ -39,7 +39,7 @@ use crate::{
 
 /// How a batch ended. `Break` means the callback stopped it, and an error means
 /// the log couldn't be written.
-pub type BatchResult = Result<ControlFlow<()>, SharedError>;
+pub type BatchResult = Result<ControlFlow<()>, BasicError>;
 
 // ============================================================================
 // What operations return
@@ -62,7 +62,16 @@ pub enum TrashSaveError {
     #[error("more than one version of the save was written at {at}")]
     AmbiguousVersion { at: String },
     #[error(transparent)]
-    Shared(#[from] SharedError),
+    Other(#[from] BasicError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TrashOrphanSaveError {
+    /// The orphan save is gone, or a game has taken it.
+    #[error("the library has no such orphan save")]
+    NoOrphanSave,
+    #[error(transparent)]
+    Other(#[from] BasicError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -70,7 +79,7 @@ pub enum ImportCoverError {
     #[error("not a PNG, JPEG or WebP file")]
     NotAnImage,
     #[error(transparent)]
-    Shared(#[from] SharedError),
+    Other(#[from] BasicError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +115,7 @@ pub enum ImportGameError {
     #[error(transparent)]
     Add(#[from] AddGameError),
     #[error(transparent)]
-    Shared(#[from] SharedError),
+    Other(#[from] BasicError),
 }
 
 // ============================================================================
@@ -190,7 +199,7 @@ impl Pocketeer {
     pub fn default_library_path() -> Result<PathBuf, OpenLibraryError> {
         let home = std::env::home_dir().ok_or(OpenLibraryError::NoHome)?;
         let library = home.join("Pocketeer Library");
-        fs::create_dir_all(&library).map_err(SharedError::from)?;
+        fs::create_dir_all(&library).map_err(BasicError::from)?;
         Ok(library)
     }
 }
@@ -259,8 +268,8 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         self.device = None;
     }
 
-    pub fn scan_device(&mut self) -> Result<ScanReport, SharedError> {
-        self.device.as_mut().ok_or(SharedError::NoDevice)?.scan()
+    pub fn scan_device(&mut self) -> Result<ScanReport, BasicError> {
+        self.device.as_mut().ok_or(BasicError::NoDevice)?.scan()
     }
 
     /// Ejects the open device and closes it. If the system won't eject it, it
@@ -272,7 +281,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
             .map(|device| device.root().to_path_buf());
         let ejected = match &self.device {
             Some(device) => device.eject(),
-            None => Err(SharedError::NoDevice.into()),
+            None => Err(BasicError::NoDevice.into()),
         };
         if ejected.is_ok() {
             self.device = None;
@@ -284,7 +293,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     /// Reads the library's folder again, and the open device's, for changes
     /// made outside pocketeer.
-    pub fn reload(&mut self) -> Result<ScanReport, SharedError> {
+    pub fn reload(&mut self) -> Result<ScanReport, BasicError> {
         let read = self.reload_library().and_then(|()| match self.device {
             Some(_) => self.scan_device(),
             None => Ok(ScanReport::default()),
@@ -292,7 +301,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         self.log_result(read, |read| OperationReport::Reload(read.map(|_| ())))
     }
 
-    fn reload_library(&mut self) -> Result<(), SharedError> {
+    fn reload_library(&mut self) -> Result<(), BasicError> {
         self.library.reload()
     }
 
@@ -363,7 +372,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     // ---- DATs -------------------------------------------------------------------
 
-    pub fn sync_dats(&mut self) -> Result<SyncReport, SharedError> {
+    pub fn sync_dats(&mut self) -> Result<SyncReport, BasicError> {
         let synced = self.dats.sync();
         self.log_result(synced, OperationReport::SyncDats)
     }
@@ -418,7 +427,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     fn pull_game(&mut self, on_device: &DeviceEntry) -> Result<PullGameOutcome, AddGameError> {
         let on_device = self.current_device_entry(on_device)?;
         let name = self.name_for_pull(&on_device);
-        let device = self.device.as_ref().ok_or(SharedError::NoDevice)?;
+        let device = self.device.as_ref().ok_or(BasicError::NoDevice)?;
         transfer::pull_game(&mut self.library, device, &on_device, &name)
     }
 
@@ -436,7 +445,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     fn push_game(&mut self, local: &LocalEntry) -> Result<PushGameOutcome, PushGameError> {
         let local = self.current_local_entry(local)?;
-        let device = self.device.as_mut().ok_or(SharedError::NoDevice)?;
+        let device = self.device.as_mut().ok_or(BasicError::NoDevice)?;
         transfer::push_game(&self.library, device, &local)
     }
 
@@ -478,7 +487,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         let named = platform.filter(|platform| !matches!(platform, Platform::Other(_)));
         let platform = named.cloned().or_else(by_extension);
         let platform = platform.ok_or(ImportGameError::UnknownPlatform)?;
-        let game = Game::read(platform, from).map_err(SharedError::from)?;
+        let game = Game::read(platform, from).map_err(BasicError::from)?;
         if let Some(entry) = self.library.entry_for(&game) {
             return Ok(ImportGameOutcome::AlreadyHad(entry.clone()));
         }
@@ -543,7 +552,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         new: &str,
     ) -> Result<DeviceEntry, RenameOnDeviceError> {
         let on_device = self.current_device_entry(on_device)?;
-        let device = self.device.as_mut().ok_or(SharedError::NoDevice)?;
+        let device = self.device.as_mut().ok_or(BasicError::NoDevice)?;
         device.rename_game(&on_device, new)
     }
 
@@ -563,7 +572,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     /// Downloads a cover for `local` if it has none. It looks under the DAT
     /// name if known and otherwise under the file name without its extension.
-    fn fetch_cover(&mut self, local: &LocalEntry) -> Result<FetchCoverOutcome, SharedError> {
+    fn fetch_cover(&mut self, local: &LocalEntry) -> Result<FetchCoverOutcome, BasicError> {
         let local = self.current_local_entry(local)?;
         if local.cover_path.is_some() {
             return Ok(FetchCoverOutcome::AlreadyHad);
@@ -604,7 +613,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     /// same file name, so it has to go first.
     fn import_cover(&mut self, local: &LocalEntry, from: &Path) -> Result<(), ImportCoverError> {
         let local = self.current_local_entry(local)?;
-        let bytes = fs::read(from).map_err(SharedError::from)?;
+        let bytes = fs::read(from).map_err(BasicError::from)?;
         let cover = Cover::from_bytes(bytes).ok_or(ImportCoverError::NotAnImage)?;
         let platform = &local.game.platform;
         let new_path = self
@@ -613,11 +622,11 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
             .cover(platform, local.stem(), cover.format());
         let old_path = local.cover_path.as_ref();
         if old_path == Some(&new_path) {
-            trash::delete(&new_path).map_err(SharedError::from)?;
+            trash::delete(&new_path).map_err(BasicError::from)?;
         }
         self.library.add_cover(platform, &local.name, &cover)?;
         if let Some(old_path) = old_path.filter(|path| **path != new_path) {
-            trash::delete(old_path).map_err(SharedError::from)?;
+            trash::delete(old_path).map_err(BasicError::from)?;
         }
         Ok(())
     }
@@ -638,7 +647,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     /// Moves `local`'s file and cover to the system's trash, where they can be
     /// restored. Its saves stay, in case a game is added under that name again.
-    fn trash_game_in_library(&mut self, local: &LocalEntry) -> Result<(), SharedError> {
+    fn trash_game_in_library(&mut self, local: &LocalEntry) -> Result<(), BasicError> {
         let local = self.current_local_entry(local)?;
         let files = self.library.files_of(&local);
         trash::delete_all(&files)?;
@@ -665,9 +674,9 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     /// Deletes the file of `on_device` from the device for good. Its save
     /// stays there.
-    fn delete_game_on_device(&mut self, on_device: &DeviceEntry) -> Result<(), SharedError> {
+    fn delete_game_on_device(&mut self, on_device: &DeviceEntry) -> Result<(), BasicError> {
         let on_device = self.current_device_entry(on_device)?;
-        let device = self.device.as_mut().ok_or(SharedError::NoDevice)?;
+        let device = self.device.as_mut().ok_or(BasicError::NoDevice)?;
         device.remove_game(&on_device)
     }
 
@@ -687,7 +696,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     fn pull_save(&mut self, on_device: &DeviceEntry) -> Result<PullSaveOutcome, PullSaveError> {
         let on_device = self.current_device_entry(on_device)?;
-        let device = self.device.as_ref().ok_or(SharedError::NoDevice)?;
+        let device = self.device.as_ref().ok_or(BasicError::NoDevice)?;
         transfer::pull_save(&mut self.library, device, &on_device)
     }
 
@@ -770,7 +779,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         version: &Save,
     ) -> Result<PushSaveOutcome, PushSaveError> {
         let on_device = self.current_device_entry(on_device)?;
-        let device = self.device.as_mut().ok_or(SharedError::NoDevice)?;
+        let device = self.device.as_mut().ok_or(BasicError::NoDevice)?;
         transfer::push_save(&self.library, device, &on_device, version)
     }
 
@@ -798,7 +807,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         &mut self,
         local: &LocalEntry,
         from: &Path,
-    ) -> Result<ImportSaveOutcome, SharedError> {
+    ) -> Result<ImportSaveOutcome, BasicError> {
         let local = self.current_local_entry(local)?;
         let added = self
             .library
@@ -827,7 +836,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     fn trash_every_version_in_library(
         &mut self,
         local: &LocalEntry,
-    ) -> Result<TrashSaveAllOutcome, SharedError> {
+    ) -> Result<TrashSaveAllOutcome, BasicError> {
         let local = self.current_local_entry(local)?;
         let files = self.library.files_of_all_saves(&local)?;
         if files.is_empty() {
@@ -896,7 +905,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         &mut self,
         local: &LocalEntry,
         files: &[PathBuf],
-    ) -> Result<(), SharedError> {
+    ) -> Result<(), BasicError> {
         trash::delete_all(files)?;
         self.library.reread_saves(&local.game.platform, &local.name)
     }
@@ -920,20 +929,20 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     fn delete_save_on_device(
         &mut self,
         on_device: &DeviceEntry,
-    ) -> Result<DeleteSaveOutcome, SharedError> {
+    ) -> Result<DeleteSaveOutcome, BasicError> {
         let on_device = self.current_device_entry(on_device)?;
-        let device = self.device.as_mut().ok_or(SharedError::NoDevice)?;
+        let device = self.device.as_mut().ok_or(BasicError::NoDevice)?;
         device.remove_save(&on_device)
     }
 
     // ---- Orphan saves -----------------------------------------------------------
 
-    pub fn find_orphan_saves_in_library(&self) -> Result<Vec<OrphanLocalSave>, SharedError> {
+    pub fn find_orphan_saves_in_library(&self) -> Result<Vec<OrphanLocalSave>, BasicError> {
         self.library.find_orphan_saves()
     }
 
     /// The saves on the device with no game, or none if no device is open.
-    pub fn find_orphan_saves_on_device(&self) -> Result<Vec<OrphanDeviceSave>, SharedError> {
+    pub fn find_orphan_saves_on_device(&self) -> Result<Vec<OrphanDeviceSave>, BasicError> {
         self.device
             .as_ref()
             .map_or(Ok(Vec::new()), Device::find_orphan_saves)
@@ -960,12 +969,12 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     fn trash_orphan_save_in_library(
         &mut self,
         orphan: &OrphanLocalSave,
-    ) -> Result<(), SharedError> {
+    ) -> Result<(), TrashOrphanSaveError> {
         let files = self.library.files_of_orphan_save(orphan)?;
         if files.is_empty() {
-            return Err(SharedError::NoOrphanSave);
+            return Err(TrashOrphanSaveError::NoOrphanSave);
         }
-        trash::delete_all(&files)?;
+        trash::delete_all(&files).map_err(BasicError::from)?;
         Ok(())
     }
 
@@ -989,8 +998,8 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     fn delete_orphan_save_on_device(
         &mut self,
         orphan: &OrphanDeviceSave,
-    ) -> Result<(), SharedError> {
-        let device = self.device.as_ref().ok_or(SharedError::NoDevice)?;
+    ) -> Result<(), DeleteOrphanSaveError> {
+        let device = self.device.as_ref().ok_or(BasicError::NoDevice)?;
         device.remove_orphan_save(orphan)
     }
 
@@ -1002,7 +1011,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     /// Every core, starting with those that can be installed, then the others
     /// on the device. If the inventory can't be fetched, the error comes back
     /// with the cores on the device alone.
-    pub fn load_core_rows(&mut self) -> Result<(Vec<CoreRow>, Option<SharedError>), SharedError> {
+    pub fn load_core_rows(&mut self) -> Result<(Vec<CoreRow>, Option<BasicError>), BasicError> {
         let installed = match &self.device {
             Some(device) => device.installed_cores()?,
             None => Vec::new(),
@@ -1015,7 +1024,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     }
 
     /// The cores on the device with another version in the inventory.
-    pub fn find_cores_with_updates(&mut self) -> Result<Vec<String>, SharedError> {
+    pub fn find_cores_with_updates(&mut self) -> Result<Vec<String>, BasicError> {
         let (rows, failure) = self.load_core_rows()?;
         if let Some(failure) = failure {
             return Err(failure);
@@ -1043,7 +1052,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         if !SUPPORTED.contains(&id) {
             return Err(InstallCoreError::NotSupported);
         }
-        let device = self.device.as_ref().ok_or(SharedError::NoDevice)?;
+        let device = self.device.as_ref().ok_or(BasicError::NoDevice)?;
         let installed = device.installed_cores()?;
         let latest = self
             .cores
@@ -1077,16 +1086,16 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     }
 
     fn remove_core(&mut self, id: &str) -> Result<(), RemoveCoreError> {
-        let device = self.device.as_ref().ok_or(SharedError::NoDevice)?;
+        let device = self.device.as_ref().ok_or(BasicError::NoDevice)?;
         device.remove_core(id)
     }
 
     // ---- BIOS files -------------------------------------------------------------
 
-    pub fn read_bios_rows(&self) -> Result<Vec<BiosRow>, SharedError> {
+    pub fn read_bios_rows(&self) -> Result<Vec<BiosRow>, BasicError> {
         self.device
             .as_ref()
-            .ok_or(SharedError::NoDevice)?
+            .ok_or(BasicError::NoDevice)?
             .read_bios_rows()
     }
 
@@ -1111,7 +1120,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     /// Copies the file at `from` to where `row` says. The file stays where it
     /// is.
     fn put_bios_file(&mut self, row: &BiosRow, from: &Path) -> Result<(), PutBiosError> {
-        let device = self.device.as_ref().ok_or(SharedError::NoDevice)?;
+        let device = self.device.as_ref().ok_or(BasicError::NoDevice)?;
         device.put_bios(&row.platform, &row.path, from)
     }
 
@@ -1122,7 +1131,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     /// Logs `result` and returns it. If it succeeded but can't be logged, that
     /// is the error.
-    fn log_result<T: Clone, E: Clone + From<SharedError>>(
+    fn log_result<T: Clone, E: Clone + From<BasicError>>(
         &self,
         result: Result<T, E>,
         to_report: impl FnOnce(Result<T, E>) -> OperationReport,
@@ -1176,16 +1185,16 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     // have changed or gone since the caller saw them.
 
     /// `entry` as the device has it now.
-    fn current_device_entry(&self, entry: &DeviceEntry) -> Result<DeviceEntry, SharedError> {
-        let device = self.device.as_ref().ok_or(SharedError::NoDevice)?;
+    fn current_device_entry(&self, entry: &DeviceEntry) -> Result<DeviceEntry, BasicError> {
+        let device = self.device.as_ref().ok_or(BasicError::NoDevice)?;
         let current = device.entry_at(&entry.game.platform, &entry.path);
-        current.cloned().ok_or(SharedError::NotOnDevice)
+        current.cloned().ok_or(BasicError::NotOnDevice)
     }
 
     /// `entry` as the library has it now.
-    fn current_local_entry(&self, entry: &LocalEntry) -> Result<LocalEntry, SharedError> {
+    fn current_local_entry(&self, entry: &LocalEntry) -> Result<LocalEntry, BasicError> {
         let current = self.library.entry_named(&entry.game.platform, &entry.name);
-        current.cloned().ok_or(SharedError::NotInLibrary)
+        current.cloned().ok_or(BasicError::NotInLibrary)
     }
 }
 
@@ -1195,7 +1204,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
 /// `paths` with each folder replaced by every file under it whose extension
 /// indicates a platform. Files stay as they are.
-pub fn expand_import_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, SharedError> {
+pub fn expand_import_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, BasicError> {
     let tells_platform = |file: &PathBuf| {
         let extension = file.extension().and_then(|extension| extension.to_str());
         extension.and_then(Platform::from_extension).is_some()
@@ -1244,11 +1253,11 @@ mod tests {
             }
         }
 
-        fn version(&self, _: &str) -> Result<String, SharedError> {
+        fn version(&self, _: &str) -> Result<String, BasicError> {
             Ok("1".into())
         }
 
-        fn names(&self, _: &str, _: &str) -> Result<Vec<String>, SharedError> {
+        fn names(&self, _: &str, _: &str) -> Result<Vec<String>, BasicError> {
             Ok(vec!["Tetris (World)".into(), "My Hack".into()])
         }
 
@@ -1256,7 +1265,7 @@ mod tests {
             game_name.into()
         }
 
-        fn fetch(&self, _: &str, _: &str) -> Result<Cover, SharedError> {
+        fn fetch(&self, _: &str, _: &str) -> Result<Cover, BasicError> {
             let mut png = Vec::new();
             image::RgbaImage::new(1, 1)
                 .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
@@ -1273,7 +1282,7 @@ mod tests {
     }
 
     impl RemoteCoreSource for CoreSource {
-        fn inventory(&self) -> Result<Vec<InventoryCore>, SharedError> {
+        fn inventory(&self) -> Result<Vec<InventoryCore>, BasicError> {
             Ok(vec![InventoryCore {
                 id: "Spiritualized.GB".into(),
                 version: "2.0".into(),
@@ -1282,7 +1291,7 @@ mod tests {
             }])
         }
 
-        fn download(&self, url: &str) -> Result<Vec<u8>, SharedError> {
+        fn download(&self, url: &str) -> Result<Vec<u8>, BasicError> {
             self.downloaded.set(self.downloaded.get() + 1);
             match url {
                 "core.zip" => Ok(zip_of(&[
@@ -1519,7 +1528,7 @@ mod tests {
             setup.pocketeer.close_device();
             assert!(matches!(
                 setup.pocketeer.read_bios_rows(),
-                Err(SharedError::NoDevice)
+                Err(BasicError::NoDevice)
             ));
         }
 
@@ -1534,11 +1543,11 @@ mod tests {
             setup.pocketeer.close_device();
             assert!(matches!(
                 setup.pocketeer.push_game(&local),
-                Err(PushGameError::Shared(SharedError::NoDevice))
+                Err(PushGameError::Other(BasicError::NoDevice))
             ));
             assert!(matches!(
                 setup.pocketeer.pull_game(&on_device),
-                Err(AddGameError::Shared(SharedError::NoDevice))
+                Err(AddGameError::Other(BasicError::NoDevice))
             ));
         }
 
@@ -1555,13 +1564,13 @@ mod tests {
             setup.pocketeer.scan_device().unwrap();
             assert!(matches!(
                 setup.pocketeer.pull_save(&on_device),
-                Err(PullSaveError::Shared(SharedError::NotOnDevice))
+                Err(PullSaveError::Other(BasicError::NotOnDevice))
             ));
             fs::remove_file(setup.pocketeer.library().game_path(&local)).unwrap();
             setup.pocketeer.reload_library().unwrap();
             assert!(matches!(
                 setup.pocketeer.fetch_cover(&local),
-                Err(SharedError::NotInLibrary)
+                Err(BasicError::NotInLibrary)
             ));
         }
 
@@ -1924,7 +1933,7 @@ mod tests {
                 seen.push(entry.report.subject());
                 ControlFlow::Continue(())
             });
-            assert!(matches!(batch_result, Err(SharedError::LogFailed { .. })));
+            assert!(matches!(batch_result, Err(BasicError::LogFailed { .. })));
             assert_eq!(seen, ["gba/A.gba"]);
             assert_eq!(setup.pocketeer.games_on_device().len(), 1);
         }
@@ -1937,7 +1946,7 @@ mod tests {
             fs::create_dir(setup.pocketeer.library().layout().log()).unwrap();
             assert!(matches!(
                 setup.pocketeer.reload(),
-                Err(SharedError::LogFailed { .. })
+                Err(BasicError::LogFailed { .. })
             ));
             assert_eq!(setup.pocketeer.library().entries().len(), 3);
         }
@@ -1949,7 +1958,7 @@ mod tests {
             fs::create_dir(setup.pocketeer.library().layout().log()).unwrap();
             assert!(matches!(
                 setup.pocketeer.eject_device(),
-                Err(EjectDeviceError::Shared(SharedError::NoDevice))
+                Err(EjectDeviceError::Other(BasicError::NoDevice))
             ));
         }
     }
@@ -2153,7 +2162,7 @@ mod tests {
                     .pocketeer
                     .trash_orphan_saves_in_library(&orphans, on_logged)
             });
-            assert_eq!(lines, ["gba/Gone: error: no such orphan save"]);
+            assert_eq!(lines, ["gba/Gone: the library has no such orphan save"]);
         }
     }
 }
