@@ -977,7 +977,7 @@ mod tests {
     use super::*;
     use crate::tui::{ui, worker::QueuedCommand};
     use pocketeer_core::{
-        cores::{BiosRow, BiosStatus, InstalledCore, InventoryCore},
+        cores::{BiosRow, BiosStatus, InstalledCore, RemoteCore},
         device::{DiskSpace, Firmware},
         error::BasicError,
         platform::Platform,
@@ -1051,7 +1051,7 @@ mod tests {
             version: Some(version.into()),
             platforms: vec![Platform::Gb],
         });
-        let latest = latest.map(|version| InventoryCore {
+        let latest = latest.map(|version| RemoteCore {
             id: id.into(),
             version: version.into(),
             platforms: vec![Platform::Gb],
@@ -1077,7 +1077,7 @@ mod tests {
                 core_row("same.Core", Some("2"), Some("2")),
                 core_row("mine.Core", Some("1"), None),
             ],
-            inventory_failure: None,
+            index_failure: None,
         }));
         assert_eq!(sent(&rx), [WorkerCommand::ShowCores]);
         (app, rx)
@@ -1718,7 +1718,7 @@ mod tests {
             let (mut app, rx) = on_cores_page();
             app.handle_worker_message(WorkerMessage::CoreListChanged(CoreList {
                 rows: vec![core_row("same.Core", Some("2"), Some("2"))],
-                inventory_failure: None,
+                index_failure: None,
             }));
             press(&mut app, "A");
             assert_eq!(
@@ -1750,12 +1750,12 @@ mod tests {
                     core_row("old.Core", Some("2"), Some("2")),
                     core_row("same.Core", Some("2"), Some("2")),
                 ],
-                inventory_failure: None,
+                index_failure: None,
             }));
             assert_eq!(app.cores.selected_row().unwrap().id(), "same.Core");
             app.handle_worker_message(WorkerMessage::CoreListChanged(CoreList {
                 rows: vec![core_row("old.Core", Some("2"), Some("2"))],
-                inventory_failure: None,
+                index_failure: None,
             }));
             assert_eq!(app.cores.selected_row().unwrap().id(), "old.Core");
         }
@@ -2055,8 +2055,8 @@ mod tests {
                         core_row("old.Core", Some("1"), Some("2")),
                         core_row("mine.Core", Some("1"), None),
                     ],
-                    inventory_failure: Some(BasicError::BadResponse {
-                        from: "the inventory".into(),
+                    index_failure: Some(BasicError::BadResponse {
+                        from: "the index".into(),
                         message: "no network".into(),
                     }),
                 }));

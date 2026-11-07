@@ -965,7 +965,7 @@ impl CliSession {
             update_available: bool,
         }
         let core_list = self.pocketeer.load_core_list()?;
-        if let Some(failure) = &core_list.inventory_failure {
+        if let Some(failure) = &core_list.index_failure {
             eprintln!("warning: couldn't get the cores that can be installed: {failure}");
         }
         let rows: Vec<Row> = core_list

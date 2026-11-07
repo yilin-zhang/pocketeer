@@ -1072,17 +1072,17 @@ mod cores {
         format!("http://{address}/core.zip")
     }
 
-    /// A library whose inventory, just written so that it isn't fetched again,
+    /// A library whose index, just written so that it isn't fetched again,
     /// has `Spiritualized.GB` at 2.0 at `url`.
-    fn with_inventory(url: &str) -> Setup {
+    fn with_index(url: &str) -> Setup {
         let setup = Setup::new();
-        let inventory = json!([{
+        let index = json!([{
             "id": GB,
             "version": "2.0",
             "platforms": ["gb"],
             "download_url": url,
         }]);
-        setup.in_library("cores.json", inventory.to_string().as_bytes());
+        setup.in_library("cores.json", index.to_string().as_bytes());
         setup
     }
 
@@ -1094,7 +1094,7 @@ mod cores {
 
     #[test]
     fn prints_list_as_json() {
-        let setup = with_inventory("http://127.0.0.1:1/never");
+        let setup = with_index("http://127.0.0.1:1/never");
         core_on_device(&setup, GB, "1.0");
         core_on_device(&setup, "someone.Else", "3.0");
         assert_eq!(
@@ -1126,7 +1126,7 @@ mod cores {
 
     #[test]
     fn prints_list_as_table() {
-        let setup = with_inventory("http://127.0.0.1:1/never");
+        let setup = with_index("http://127.0.0.1:1/never");
         core_on_device(&setup, GB, "1.0");
         let ran = setup.run(&["cores", "list"]);
         assert_eq!(ran.code, 0, "{}", ran.stderr);
@@ -1139,7 +1139,7 @@ mod cores {
 
     #[test]
     fn prints_install_as_json_with_entry_for_each_core() {
-        let setup = with_inventory(&serve_release("2.0"));
+        let setup = with_index(&serve_release("2.0"));
         assert_eq!(
             setup.run(&["--json", "cores", "install", GB]).json(),
             json!({
@@ -1166,7 +1166,7 @@ mod cores {
 
     #[test]
     fn exits_2_for_unsupported_core_and_installs_nothing() {
-        let setup = with_inventory(&serve_release("2.0"));
+        let setup = with_index(&serve_release("2.0"));
         assert_json_could_not_start(
             &setup.run(&["--json", "cores", "install", GB, "no.Such"]),
             "no.Such: not a core that can be installed, as `cores list` shows",
@@ -1176,7 +1176,7 @@ mod cores {
 
     #[test]
     fn exits_1_when_download_fails() {
-        let setup = with_inventory("http://127.0.0.1:1/never");
+        let setup = with_index("http://127.0.0.1:1/never");
         let ran = setup.run(&["cores", "install", GB]);
         assert_eq!(ran.code, 1);
         assert!(
@@ -1188,7 +1188,7 @@ mod cores {
 
     #[test]
     fn updates_cores_with_newer_release_when_none_named() {
-        let setup = with_inventory(&serve_release("2.0"));
+        let setup = with_index(&serve_release("2.0"));
         core_on_device(&setup, GB, "1.0");
         core_on_device(&setup, "someone.Else", "3.0");
         let ran = setup.run(&["cores", "update"]);
@@ -1200,7 +1200,7 @@ mod cores {
 
     #[test]
     fn exits_2_for_update_or_remove_of_core_not_on_device() {
-        let setup = with_inventory("http://127.0.0.1:1/never");
+        let setup = with_index("http://127.0.0.1:1/never");
         for what in ["update", "remove"] {
             assert_json_could_not_start(
                 &setup.run(&["--json", "cores", what, "../Assets"]),
@@ -1212,7 +1212,7 @@ mod cores {
 
     #[test]
     fn removes_core_from_device() {
-        let setup = with_inventory("http://127.0.0.1:1/never");
+        let setup = with_index("http://127.0.0.1:1/never");
         core_on_device(&setup, GB, "1.0");
         let ran = setup.run(&["cores", "remove", GB]);
         assert_eq!(ran.code, 0, "{}", ran.stderr);

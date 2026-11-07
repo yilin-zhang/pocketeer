@@ -325,13 +325,13 @@ fn page_table<'a>(
         .block(panel_block(title))
 }
 
-/// Shows how many updates there are, or why the inventory can't be fetched.
+/// Shows how many updates there are, or why the index can't be fetched.
 fn draw_cores_status(frame: &mut Frame, app: &App, area: Rect) {
     let Some(cores) = app.cores.core_list() else {
         return;
     };
     let updates = cores.rows.iter().filter(|row| row.has_update()).count();
-    let line = match (&cores.inventory_failure, updates) {
+    let line = match (&cores.index_failure, updates) {
         (Some(failure), _) => {
             Palette::Warn.span(format!(" couldn't get the cores to install: {failure}"))
         }

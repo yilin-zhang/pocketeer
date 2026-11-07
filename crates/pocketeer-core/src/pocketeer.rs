@@ -9,8 +9,8 @@ use fs_err as fs;
 
 use crate::{
     cores::{
-        BiosRow, CoreInventory, CoreList, CoreRow, InstallCoreError, InstallCoreOutcome,
-        PutBiosError, RemoteCoreSource, RemoveCoreError, SUPPORTED,
+        BiosRow, CoreIndex, CoreList, CoreRow, InstallCoreError, InstallCoreOutcome, PutBiosError,
+        RemoteCoreSource, RemoveCoreError, SUPPORTED,
     },
     cover::{Cover, CoverIndex, RemoteCoverSource},
     dat::{DatMirror, RemoteDatSource, SyncReport},
@@ -154,7 +154,7 @@ pub struct Pocketeer<D = Libretro, C = Libretro, I = OpenFpga> {
     library: Library,
     dats: DatMirror<D>,
     covers: CoverIndex<C>,
-    cores: CoreInventory<I>,
+    cores: CoreIndex<I>,
     device: Option<Device>,
     logger: Logger,
 }
@@ -191,7 +191,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         let library = Library::open(library)?;
         let dats = DatMirror::open(&library.layout().dats(), dats)?;
         let covers = CoverIndex::open(&library.layout().cover_index(), covers);
-        let cores = CoreInventory::open(&library.layout().core_inventory(), cores);
+        let cores = CoreIndex::open(&library.layout().core_index(), cores);
         let logger = Logger::new(library.layout().log(), front_end);
         Ok(Self {
             library,
@@ -840,27 +840,27 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     // cores.
 
     /// Every core, starting with those that can be installed, then the others
-    /// on the device. If the inventory can't be fetched, the list says why and
+    /// on the device. If the index can't be fetched, the list says why and
     /// holds the cores on the device alone.
     pub fn load_core_list(&mut self) -> Result<CoreList, BasicError> {
         let installed = match &self.device {
             Some(device) => device.installed_cores()?,
             None => Vec::new(),
         };
-        let (latest, inventory_failure) = match self.cores.supported_cores() {
+        let (latest, index_failure) = match self.cores.supported_cores() {
             Ok(latest) => (latest, None),
             Err(error) => (Vec::new(), Some(error)),
         };
         Ok(CoreList {
             rows: CoreRow::pair(installed, latest),
-            inventory_failure,
+            index_failure,
         })
     }
 
-    /// The cores on the device with another version in the inventory.
+    /// The cores on the device with another version in the index.
     pub fn find_cores_with_updates(&mut self) -> Result<Vec<String>, BasicError> {
         let core_list = self.load_core_list()?;
-        if let Some(failure) = core_list.inventory_failure {
+        if let Some(failure) = core_list.index_failure {
             return Err(failure);
         }
         let with_updates = core_list.rows.iter().filter(|row| row.has_update());
@@ -1060,7 +1060,7 @@ mod tests {
 
     use super::*;
     use crate::cores::{
-        InventoryCore,
+        RemoteCore,
         testing::{core_json, data_json, zip_of},
     };
     use crate::cover::{Cover, testing::PNG};
@@ -1109,8 +1109,8 @@ mod tests {
     }
 
     impl RemoteCoreSource for CoreSource {
-        fn inventory(&self) -> Result<Vec<InventoryCore>, BasicError> {
-            Ok(vec![InventoryCore {
+        fn index(&self) -> Result<Vec<RemoteCore>, BasicError> {
+            Ok(vec![RemoteCore {
                 id: "Spiritualized.GB".into(),
                 version: "2.0".into(),
                 platforms: vec![Platform::Gb],
@@ -1118,7 +1118,7 @@ mod tests {
             }])
         }
 
-        fn download(&self, core: &InventoryCore) -> Result<Vec<u8>, BasicError> {
+        fn download(&self, core: &RemoteCore) -> Result<Vec<u8>, BasicError> {
             self.downloaded.set(self.downloaded.get() + 1);
             match core.download_url.as_str() {
                 "core.zip" => Ok(zip_of(&[

@@ -403,7 +403,7 @@ impl WorkerState<'_> {
         }
         let core_list = pocketeer.load_core_list().unwrap_or_else(|error| CoreList {
             rows: Vec::new(),
-            inventory_failure: Some(error),
+            index_failure: Some(error),
         });
         (self.send_message)(WorkerMessage::CoreListChanged(core_list));
     }
@@ -848,7 +848,7 @@ mod tests {
         (dir, worker_handle, rx)
     }
 
-    /// A device with the core `a.B` and a freshly written inventory, so it
+    /// A device with the core `a.B` and a freshly written index, so it
     /// isn't fetched again, that offers `Spiritualized.GB`.
     fn started_with_cores() -> (tempfile::TempDir, WorkerHandle, Receiver<WorkerMessage>) {
         let (dir, library, device) = empty_library_and_device();

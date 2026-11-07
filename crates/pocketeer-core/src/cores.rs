@@ -1,4 +1,4 @@
-//! Cores on a device and in the online inventory, their release zips, and the
+//! Cores on a device and in the online index, their release zips, and the
 //! BIOS files they load.
 
 use std::{
@@ -40,8 +40,8 @@ pub const SUPPORTED: &[&str] = &[
 /// zips are hosted by third parties.
 const MOST_IN_A_ZIP: u64 = 64 * 1024 * 1024;
 
-/// How long a fetched inventory is used before it is fetched again.
-const INVENTORY_AGE: Duration = Duration::from_secs(60 * 60);
+/// How long a fetched index is used before it is fetched again.
+const INDEX_AGE: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledCore {
@@ -62,32 +62,36 @@ impl InstalledCore {
     }
 }
 
-/// The newest release of a core, as the inventory has it.
+/// The newest release of a core, as the index has it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InventoryCore {
+pub struct RemoteCore {
     pub id: String,
     pub version: String,
     pub platforms: Vec<Platform>,
     pub download_url: String,
 }
 
-/// One core, on the device, in the inventory, or both.
+/// One core, on the device, in the index, or both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreRow {
     Installed(InstalledCore),
-    Available(InventoryCore),
+    Available(RemoteCore),
     Both {
         installed: InstalledCore,
-        latest: InventoryCore,
+        latest: RemoteCore,
     },
 }
 
 impl CoreRow {
-    /// One row for each core in `latest`, paired with its copy in `installed`
-    /// if there is one, followed by a row for each remaining installed core.
-    pub(crate) fn pair(mut installed: Vec<InstalledCore>, latest: Vec<InventoryCore>) -> Vec<Self> {
+    /// One row for each core in `remote_cores`, paired with its copy in
+    /// `installed` if there is one, followed by a row for each remaining
+    /// installed core.
+    pub(crate) fn pair(
+        mut installed: Vec<InstalledCore>,
+        remote_cores: Vec<RemoteCore>,
+    ) -> Vec<Self> {
         let mut rows = Vec::new();
-        for latest in latest {
+        for latest in remote_cores {
             let on_device = installed.iter().position(|core| core.id == latest.id);
             rows.push(match on_device {
                 Some(i) => CoreRow::Both {
@@ -104,7 +108,7 @@ impl CoreRow {
     pub fn id(&self) -> &str {
         match self {
             CoreRow::Installed(InstalledCore { id, .. })
-            | CoreRow::Available(InventoryCore { id, .. })
+            | CoreRow::Available(RemoteCore { id, .. })
             | CoreRow::Both {
                 installed: InstalledCore { id, .. },
                 ..
@@ -119,7 +123,7 @@ impl CoreRow {
         }
     }
 
-    pub fn latest(&self) -> Option<&InventoryCore> {
+    pub fn latest(&self) -> Option<&RemoteCore> {
         match self {
             CoreRow::Available(latest) | CoreRow::Both { latest, .. } => Some(latest),
             CoreRow::Installed(_) => None,
@@ -139,8 +143,8 @@ impl CoreRow {
 #[derive(Debug, Clone)]
 pub struct CoreList {
     pub rows: Vec<CoreRow>,
-    /// Why the inventory couldn't be fetched, if it couldn't.
-    pub inventory_failure: Option<BasicError>,
+    /// Why the index couldn't be fetched, if it couldn't.
+    pub index_failure: Option<BasicError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,7 +156,7 @@ pub enum InstallCoreOutcome {
 
 #[derive(Debug, thiserror::Error)]
 pub enum InstallCoreError {
-    /// It isn't one of [`SUPPORTED`], or the inventory doesn't have it.
+    /// It isn't one of [`SUPPORTED`], or the index doesn't have it.
     #[error("not a core that can be installed")]
     NotSupported,
     #[error("not a zip of this core: {0}")]
@@ -183,7 +187,7 @@ pub(crate) struct CoreFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BiosStatus {
     Present,
-    /// The file exists, but the core won't load it at this size.
+    /// The file exists at this size, but the core won't load it.
     WrongSize(u64),
     Missing,
 }
@@ -222,27 +226,27 @@ pub enum PutBiosError {
 
 pub trait RemoteCoreSource {
     /// Every core with a release, at its newest.
-    fn inventory(&self) -> Result<Vec<InventoryCore>, BasicError>;
+    fn index(&self) -> Result<Vec<RemoteCore>, BasicError>;
 
     /// The bytes of `core`'s release zip.
-    fn download(&self, core: &InventoryCore) -> Result<Vec<u8>, BasicError>;
+    fn download(&self, core: &RemoteCore) -> Result<Vec<u8>, BasicError>;
 }
 
-/// The inventory, cached in a file. The file only saves time, so one that can't
+/// The index, cached in a file. The file only saves time, so one that can't
 /// be read counts as empty and a failed write is ignored.
-pub struct CoreInventory<S> {
+pub struct CoreIndex<S> {
     path: PathBuf,
     source: S,
-    cores: Vec<InventoryCore>,
-    /// When the inventory was last fetched, including failed attempts. It
+    cores: Vec<RemoteCore>,
+    /// When the index was last fetched, including failed attempts. It
     /// starts from what the file says, if the file can be read.
     asked: Option<SystemTime>,
 }
 
-impl<S: RemoteCoreSource> CoreInventory<S> {
-    /// The inventory kept at `path`, without going online.
+impl<S: RemoteCoreSource> CoreIndex<S> {
+    /// The index kept at `path`, without going online.
     pub fn open(path: &Path, source: S) -> Self {
-        let cores: Option<Vec<InventoryCore>> = fs::read(path)
+        let cores: Option<Vec<RemoteCore>> = fs::read(path)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok());
         let asked = cores.as_ref().and_then(|_| {
@@ -257,15 +261,15 @@ impl<S: RemoteCoreSource> CoreInventory<S> {
         }
     }
 
-    /// The cores in [`SUPPORTED`] that the inventory has, in that order.
+    /// The cores in [`SUPPORTED`] that the index has, in that order.
     ///
-    /// An old inventory is fetched again. If that fails, the cached copy is
+    /// An old index is fetched again. If that fails, the cached copy is
     /// used, and if there is none the error is returned.
-    pub fn supported_cores(&mut self) -> Result<Vec<InventoryCore>, BasicError> {
-        let fresh = |asked: SystemTime| asked.elapsed().is_ok_and(|age| age < INVENTORY_AGE);
+    pub fn supported_cores(&mut self) -> Result<Vec<RemoteCore>, BasicError> {
+        let fresh = |asked: SystemTime| asked.elapsed().is_ok_and(|age| age < INDEX_AGE);
         if !self.asked.is_some_and(fresh) {
             self.asked = Some(SystemTime::now());
-            match self.source.inventory() {
+            match self.source.index() {
                 Ok(cores) => {
                     if let Ok(json) = serde_json::to_vec(&cores) {
                         let _ = write_atomically(&self.path, &json, None);
@@ -279,7 +283,7 @@ impl<S: RemoteCoreSource> CoreInventory<S> {
                 Err(_) => {}
             }
         }
-        let by_id: HashMap<&str, &InventoryCore> = self
+        let by_id: HashMap<&str, &RemoteCore> = self
             .cores
             .iter()
             .map(|core| (core.id.as_str(), core))
@@ -291,7 +295,7 @@ impl<S: RemoteCoreSource> CoreInventory<S> {
     }
 
     /// Downloads the release zip of `core`.
-    pub fn download(&self, core: &InventoryCore) -> Result<CoreZip, InstallCoreError> {
+    pub fn download(&self, core: &RemoteCore) -> Result<CoreZip, InstallCoreError> {
         CoreZip::parse(self.source.download(core)?, &core.id)
     }
 }
@@ -661,8 +665,8 @@ mod tests {
         }
     }
 
-    fn latest(id: &str, version: &str) -> InventoryCore {
-        InventoryCore {
+    fn latest(id: &str, version: &str) -> RemoteCore {
+        RemoteCore {
             id: id.into(),
             version: version.into(),
             platforms: vec![Platform::Gba],
@@ -776,7 +780,7 @@ mod tests {
         }
     }
 
-    mod inventory {
+    mod index {
         use super::*;
 
         /// A source with `Spiritualized.GB` at this version, or failing. It
@@ -803,7 +807,7 @@ mod tests {
         }
 
         impl RemoteCoreSource for &Fake {
-            fn inventory(&self) -> Result<Vec<InventoryCore>, BasicError> {
+            fn index(&self) -> Result<Vec<RemoteCore>, BasicError> {
                 self.asked.set(self.asked.get() + 1);
                 match self.version {
                     Some(version) => Ok(vec![
@@ -814,12 +818,12 @@ mod tests {
                 }
             }
 
-            fn download(&self, _: &InventoryCore) -> Result<Vec<u8>, BasicError> {
+            fn download(&self, _: &RemoteCore) -> Result<Vec<u8>, BasicError> {
                 unreachable!()
             }
         }
 
-        fn versions(cores: &[InventoryCore]) -> Vec<&str> {
+        fn versions(cores: &[RemoteCore]) -> Vec<&str> {
             cores.iter().map(|core| core.version.as_str()).collect()
         }
 
@@ -835,11 +839,10 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("cores.json");
             let fake = Fake::at("2.0");
-            let got = CoreInventory::open(&path, &fake).supported_cores().unwrap();
+            let got = CoreIndex::open(&path, &fake).supported_cores().unwrap();
             assert_eq!(got.len(), 1);
             assert_eq!(got[0].id, "Spiritualized.GB");
-            let kept: Vec<InventoryCore> =
-                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let kept: Vec<RemoteCore> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
             assert_eq!(kept.len(), 2);
         }
 
@@ -848,8 +851,8 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("cores.json");
             let fake = Fake::at("2.0");
-            CoreInventory::open(&path, &fake).supported_cores().unwrap();
-            let again = CoreInventory::open(&path, &fake).supported_cores().unwrap();
+            CoreIndex::open(&path, &fake).supported_cores().unwrap();
+            let again = CoreIndex::open(&path, &fake).supported_cores().unwrap();
             assert_eq!(versions(&again), ["2.0"]);
             assert_eq!(fake.asked.get(), 1);
         }
@@ -858,18 +861,18 @@ mod tests {
         fn fetches_again_when_file_is_old() {
             let dir = tempfile::tempdir().unwrap();
             let fake = Fake::at("2.0");
-            let got = CoreInventory::open(&old_file(dir.path()), &fake).supported_cores();
+            let got = CoreIndex::open(&old_file(dir.path()), &fake).supported_cores();
             assert_eq!(versions(&got.unwrap()), ["2.0"]);
             assert_eq!(fake.asked.get(), 1);
         }
 
         #[test]
-        fn uses_old_inventory_without_retrying_when_fetch_fails() {
+        fn uses_old_index_without_retrying_when_fetch_fails() {
             let dir = tempfile::tempdir().unwrap();
             let fake = Fake::failing();
-            let mut inventory = CoreInventory::open(&old_file(dir.path()), &fake);
-            assert_eq!(versions(&inventory.supported_cores().unwrap()), ["1.0"]);
-            assert_eq!(versions(&inventory.supported_cores().unwrap()), ["1.0"]);
+            let mut index = CoreIndex::open(&old_file(dir.path()), &fake);
+            assert_eq!(versions(&index.supported_cores().unwrap()), ["1.0"]);
+            assert_eq!(versions(&index.supported_cores().unwrap()), ["1.0"]);
             assert_eq!(fake.asked.get(), 1);
         }
 
@@ -877,17 +880,17 @@ mod tests {
         fn returns_error_when_fetch_fails_with_nothing_kept() {
             let dir = tempfile::tempdir().unwrap();
             let fake = Fake::failing();
-            let mut inventory = CoreInventory::open(&dir.path().join("cores.json"), &fake);
-            assert!(inventory.supported_cores().is_err());
+            let mut index = CoreIndex::open(&dir.path().join("cores.json"), &fake);
+            assert!(index.supported_cores().is_err());
         }
 
         #[test]
-        fn ignores_corrupt_inventory_file() {
+        fn ignores_corrupt_index_file() {
             let dir = tempfile::tempdir().unwrap();
             // Written just now, so only being corrupt makes it fetch again.
             let path = put(dir.path(), "cores.json", b"{ not json");
             let fake = Fake::at("2.0");
-            let got = CoreInventory::open(&path, &fake).supported_cores().unwrap();
+            let got = CoreIndex::open(&path, &fake).supported_cores().unwrap();
             assert_eq!(versions(&got), ["2.0"]);
         }
     }

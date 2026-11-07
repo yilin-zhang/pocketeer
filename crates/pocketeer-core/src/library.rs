@@ -188,7 +188,7 @@ impl LibraryLayout {
     }
 
     /// The cached list of cores that can be downloaded.
-    pub(crate) fn core_inventory(&self) -> PathBuf {
+    pub(crate) fn core_index(&self) -> PathBuf {
         self.root.join("cores.json")
     }
 

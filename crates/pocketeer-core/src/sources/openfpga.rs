@@ -1,15 +1,15 @@
-//! The community's inventory of openFPGA cores, as a source of cores.
+//! The community's index of openFPGA cores, as a source of cores.
 
 use serde::Deserialize;
 
 use crate::{
-    cores::{InventoryCore, RemoteCoreSource},
+    cores::{RemoteCore, RemoteCoreSource},
     error::BasicError,
     platform::Platform,
     sources::{get, get_json},
 };
 
-const INVENTORY: &str = "https://openfpga-library.github.io/analogue-pocket/api/v3/cores.json";
+const INDEX: &str = "https://openfpga-library.github.io/analogue-pocket/api/v3/cores.json";
 
 #[derive(Deserialize)]
 struct Metadata {
@@ -38,10 +38,10 @@ struct Entry {
 }
 
 impl Entry {
-    fn newest(self) -> Option<InventoryCore> {
+    fn newest(self) -> Option<RemoteCore> {
         let release = self.releases.into_iter().next()?;
         let metadata = release.core.metadata;
-        Some(InventoryCore {
+        Some(RemoteCore {
             id: self.id,
             version: metadata.version,
             platforms: metadata
@@ -63,12 +63,12 @@ struct Listing {
 pub struct OpenFpga;
 
 impl RemoteCoreSource for OpenFpga {
-    fn inventory(&self) -> Result<Vec<InventoryCore>, BasicError> {
-        let listing: Listing = get_json(INVENTORY)?;
+    fn index(&self) -> Result<Vec<RemoteCore>, BasicError> {
+        let listing: Listing = get_json(INDEX)?;
         Ok(listing.data.into_iter().filter_map(Entry::newest).collect())
     }
 
-    fn download(&self, core: &InventoryCore) -> Result<Vec<u8>, BasicError> {
+    fn download(&self, core: &RemoteCore) -> Result<Vec<u8>, BasicError> {
         get(&core.download_url)
     }
 }
@@ -78,7 +78,7 @@ mod tests {
     use super::*;
 
     /// The cores of a listing with these entries, as JSON.
-    fn cores_of(entries: &str) -> Vec<InventoryCore> {
+    fn cores_of(entries: &str) -> Vec<RemoteCore> {
         let listing: Listing = serde_json::from_str(&format!(r#"{{"data":[{entries}]}}"#)).unwrap();
         listing.data.into_iter().filter_map(Entry::newest).collect()
     }
@@ -93,7 +93,7 @@ mod tests {
         );
         assert_eq!(
             cores,
-            [InventoryCore {
+            [RemoteCore {
                 id: "a.B".into(),
                 version: "2".into(),
                 platforms: vec![Platform::Gba],
