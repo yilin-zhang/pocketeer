@@ -15,7 +15,7 @@ use crate::{
     error::BasicError,
     game::{Game, RomCache, Save, renamed_file_name},
     os::{
-        copy_atomically, is_valid_fat_name, is_valid_file_name, list_dir, safe_rename_all,
+        copy_atomically, is_valid_fat_name, is_valid_file_name, list_dir, safe_rename_all, stem,
         write_atomically,
     },
     platform::Platform,
@@ -499,42 +499,16 @@ impl Library {
         new: &str,
     ) -> Result<LocalEntry, RenameInLibraryError> {
         let i = self.index_of(platform, name)?;
-        let new_name = renamed_file_name(name, new);
-        if !is_valid_fat_name(&new_name) {
-            return Err(RenameInLibraryError::BadName);
-        }
-        if new_name == name {
-            return Err(RenameInLibraryError::SameName);
-        }
+        let new_name = self.check_rename(i, new)?;
         let (old_stem, new_stem) = (stem(name), stem(&new_name));
-        let lowercase = new_stem.to_lowercase();
-        let taken = |(other_index, entry): (usize, &LocalEntry)| {
-            other_index != i
-                && &entry.game.platform == platform
-                && entry.stem().to_lowercase() == lowercase
-        };
-        if self.entries.iter().enumerate().any(taken) {
-            return Err(RenameInLibraryError::NameTaken);
-        }
         let (from, to) = (
             self.layout.rom(platform, name),
             self.layout.rom(platform, &new_name),
         );
-        let saves = self.layout.saves(platform, old_stem);
-        let new_saves = self.layout.saves(platform, new_stem);
-        // If only the case changed, on a file system that doesn't tell cases
-        // apart, whatever is at the new name is the game's own.
-        if old_stem.to_lowercase() != lowercase {
-            if to.exists() {
-                return Err(RenameInLibraryError::NameTaken);
-            }
-            if new_saves.exists() || self.cover_path(platform, new_stem).is_some() {
-                return Err(RenameInLibraryError::LeftoversThere);
-            }
-        }
         let mut renames = Vec::new();
+        let saves = self.layout.saves(platform, old_stem);
         if saves.exists() {
-            renames.push((saves, new_saves));
+            renames.push((saves, self.layout.saves(platform, new_stem)));
         }
         if let Some(cover) = &self.entries[i].cover_path {
             let extension = cover.extension().unwrap_or_default().to_string_lossy();
@@ -552,6 +526,45 @@ impl Library {
         self.cache.save();
         self.insert(entry.clone());
         Ok(entry)
+    }
+
+    /// The file name the game at `i` gets if it is renamed to `new`, or why it
+    /// can't be. Nothing is changed.
+    fn check_rename(&self, i: usize, new: &str) -> Result<String, RenameInLibraryError> {
+        let LocalEntry { name, game, .. } = &self.entries[i];
+        let platform = &game.platform;
+        let new_name = renamed_file_name(name, new);
+        if !is_valid_fat_name(&new_name) {
+            return Err(RenameInLibraryError::BadName);
+        }
+        if new_name == *name {
+            return Err(RenameInLibraryError::SameName);
+        }
+        let (old_stem, new_stem) = (stem(name), stem(&new_name));
+        let lowercase = new_stem.to_lowercase();
+        // Another game of the platform has the name, whatever its case.
+        let taken = |(other_index, entry): (usize, &LocalEntry)| {
+            other_index != i
+                && &entry.game.platform == platform
+                && entry.stem().to_lowercase() == lowercase
+        };
+        if self.entries.iter().enumerate().any(taken) {
+            return Err(RenameInLibraryError::NameTaken);
+        }
+        // Files at the new name that aren't a game's. If only the case changed,
+        // on a file system that doesn't tell cases apart, whatever is at the new
+        // name is the game's own.
+        if old_stem.to_lowercase() != lowercase {
+            if self.layout.rom(platform, &new_name).exists() {
+                return Err(RenameInLibraryError::NameTaken);
+            }
+            if self.layout.saves(platform, new_stem).exists()
+                || self.cover_path(platform, new_stem).is_some()
+            {
+                return Err(RenameInLibraryError::LeftoversThere);
+            }
+        }
+        Ok(new_name)
     }
 
     /// Adds the save at `from` to the game called `name`, unless it already has
@@ -749,13 +762,6 @@ impl Library {
         }
         Ok(files)
     }
-}
-
-fn stem(name: &str) -> &str {
-    Path::new(name)
-        .file_stem()
-        .and_then(|file_stem| file_stem.to_str())
-        .unwrap_or(name)
 }
 
 #[cfg(test)]

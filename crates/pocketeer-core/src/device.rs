@@ -19,7 +19,7 @@ use crate::{
     game::{Game, RomCache, Save, renamed_file_name},
     os::{
         copy_atomically, eject_volume, is_valid_fat_name, list_dir, list_files_recursive,
-        mounted_volumes, safe_rename_all, write_atomically,
+        mounted_volumes, safe_rename_all, stem, write_atomically,
     },
     platform::Platform,
 };
@@ -482,62 +482,26 @@ impl Device {
         entry: &DeviceEntry,
         new: &str,
     ) -> Result<DeviceEntry, RenameOnDeviceError> {
+        let new_name = self.check_rename(entry, new)?;
         let platform = &entry.game.platform;
-        let file = entry.path.file_name().unwrap_or_default().to_string_lossy();
-        let new_name = renamed_file_name(&file, new);
-        if !is_valid_fat_name(&new_name) {
-            return Err(RenameOnDeviceError::BadName);
-        }
-        if new_name == file {
-            return Err(RenameOnDeviceError::SameName);
-        }
         let new_path = entry.path.with_file_name(&new_name);
         let (from, to) = (
             self.layout.game(platform, &entry.path),
             self.layout.game(platform, &new_path),
         );
-        let declared = self.declared_files()?;
-        let lowercase_to = to.to_string_lossy().to_lowercase();
-        if declared
+        let file = entry.path.file_name().unwrap_or_default().to_string_lossy();
+        let (old_stem, new_stem) = (stem(&file).to_lowercase(), stem(&new_name));
+        let save = self.save_path(entry);
+        let saves_dir = save.parent().expect("a save is in a folder");
+        let mut renames: Vec<(PathBuf, PathBuf)> = list_dir(saves_dir)?
+            .files
             .iter()
-            .any(|file| file.to_string_lossy().to_lowercase() == lowercase_to)
-        {
-            return Err(RenameOnDeviceError::BiosName);
-        }
-        let stem_of = |name: &str| {
-            let stem = Path::new(name).file_stem().unwrap_or_default();
-            stem.to_string_lossy().to_lowercase()
-        };
-        let (old_stem, new_stem) = (stem_of(&file), stem_of(&new_name));
-        let dir = from.parent().expect("a game is in a folder");
-        let beside = list_dir(dir)?.files;
-        let others = || beside.iter().filter(|name| **name != *file);
-        if others().any(|name| stem_of(name) == new_stem) {
-            return Err(RenameOnDeviceError::NameTaken);
-        }
-        if others().any(|name| stem_of(name) == old_stem) {
-            return Err(RenameOnDeviceError::SharesSave);
-        }
-        let saves_dir = self
-            .layout
-            .saves_common(platform)
-            .join(entry.path.parent().unwrap_or(Path::new("")));
-        let saves = list_dir(&saves_dir)?.files;
-        // If only the case changed, those files are the game's own.
-        if old_stem != new_stem && saves.iter().any(|name| stem_of(name) == new_stem) {
-            return Err(RenameOnDeviceError::LeftoversThere);
-        }
-        let new_file_stem = Path::new(&new_name).file_stem().unwrap_or_default();
-        let mut renames: Vec<(PathBuf, PathBuf)> = saves
-            .iter()
-            .filter(|name| stem_of(name) == old_stem)
+            .filter(|name| stem(name).to_lowercase() == old_stem)
             .map(|name| {
-                let name = Path::new(name);
-                let mut renamed = new_file_stem.to_os_string();
-                if let Some(extension) = name.extension() {
-                    renamed.push(".");
-                    renamed.push(extension);
-                }
+                let renamed = match Path::new(name).extension() {
+                    Some(extension) => format!("{new_stem}.{}", extension.to_string_lossy()),
+                    None => new_stem.to_string(),
+                };
                 (saves_dir.join(name), saves_dir.join(renamed))
             })
             .collect();
@@ -555,6 +519,55 @@ impl Device {
         };
         self.insert(renamed.clone());
         Ok(renamed)
+    }
+
+    /// The file name `entry` gets if it is renamed to `new`, or why it can't
+    /// be. Nothing is changed.
+    fn check_rename(&self, entry: &DeviceEntry, new: &str) -> Result<String, RenameOnDeviceError> {
+        let file = entry.path.file_name().unwrap_or_default().to_string_lossy();
+        let new_name = renamed_file_name(&file, new);
+        if !is_valid_fat_name(&new_name) {
+            return Err(RenameOnDeviceError::BadName);
+        }
+        if new_name == file {
+            return Err(RenameOnDeviceError::SameName);
+        }
+        let from = self.layout.game(&entry.game.platform, &entry.path);
+        // A core loads a file at the new path, whatever its case.
+        let lowercase_to = from
+            .with_file_name(&new_name)
+            .to_string_lossy()
+            .to_lowercase();
+        if self
+            .declared_files()?
+            .iter()
+            .any(|file| file.to_string_lossy().to_lowercase() == lowercase_to)
+        {
+            return Err(RenameOnDeviceError::BiosName);
+        }
+        // The Pocket finds a save by the game's name without its extension, in
+        // any case, so another file beside it with that name shares the save.
+        let (old_stem, new_stem) = (stem(&file).to_lowercase(), stem(&new_name).to_lowercase());
+        let beside = list_dir(from.parent().expect("a game is in a folder"))?.files;
+        let others = || beside.iter().filter(|name| **name != *file);
+        if others().any(|name| stem(name).to_lowercase() == new_stem) {
+            return Err(RenameOnDeviceError::NameTaken);
+        }
+        if others().any(|name| stem(name).to_lowercase() == old_stem) {
+            return Err(RenameOnDeviceError::SharesSave);
+        }
+        // Saves already at the new name. If only the case changed, those files
+        // are the game's own.
+        let save = self.save_path(entry);
+        let saves = list_dir(save.parent().expect("a save is in a folder"))?.files;
+        if old_stem != new_stem
+            && saves
+                .iter()
+                .any(|name| stem(name).to_lowercase() == new_stem)
+        {
+            return Err(RenameOnDeviceError::LeftoversThere);
+        }
+        Ok(new_name)
     }
 
     /// Where `entry`'s save is, even if it has none.

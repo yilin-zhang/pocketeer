@@ -72,6 +72,14 @@ pub(crate) fn is_valid_fat_name(name: &str) -> bool {
     is_valid_file_name(name) && !name.contains([':', '?', '*', '"', '<', '>', '|'])
 }
 
+/// `name` without its extension.
+pub(crate) fn stem(name: &str) -> &str {
+    Path::new(name)
+        .file_stem()
+        .and_then(|file_stem| file_stem.to_str())
+        .unwrap_or(name)
+}
+
 /// Replaces the file at `path` with `bytes`, last written at `modified` if
 /// given.
 pub(crate) fn write_atomically(
