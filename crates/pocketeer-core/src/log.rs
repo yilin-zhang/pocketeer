@@ -72,14 +72,14 @@ impl OperationReport {
         let mut fields = Vec::new();
         let message = match result {
             Ok(PullGameOutcome::Pulled(entry)) => {
-                fields.push(("library", library_ref(entry)));
-                format!("pulled as {}", library_ref(entry))
+                fields.push(("library", entry.to_string()));
+                format!("pulled as {entry}")
             }
             Ok(PullGameOutcome::AlreadyHad) => "the library has it already".to_string(),
             Err(AddGameError::Other(error)) => format!("error: {error}"),
             Err(error) => format!("not pulled: {error}"),
         };
-        Self::new(device_ref(game), result, message, fields)
+        Self::new(game.to_string(), result, message, fields)
     }
 
     pub(crate) fn push_game(
@@ -89,17 +89,17 @@ impl OperationReport {
         let mut fields = Vec::new();
         let message = match result {
             Ok(PushGameOutcome::Pushed(entry)) => {
-                fields.push(("device", device_ref(entry)));
-                format!("pushed to {}", device_ref(entry))
+                fields.push(("device", entry.to_string()));
+                format!("pushed to {entry}")
             }
             Ok(PushGameOutcome::AlreadyThere(entry)) => {
-                fields.push(("device", device_ref(entry)));
-                format!("on the device already, at {}", device_ref(entry))
+                fields.push(("device", entry.to_string()));
+                format!("on the device already, at {entry}")
             }
             Err(PushGameError::Other(error)) => format!("error: {error}"),
             Err(error) => error.to_string(),
         };
-        Self::new(library_ref(game), result, message, fields)
+        Self::new(game.to_string(), result, message, fields)
     }
 
     /// `from` is the file it was imported from.
@@ -110,12 +110,12 @@ impl OperationReport {
         let mut fields = vec![("from", from.display().to_string())];
         let message = match result {
             Ok(ImportGameOutcome::Imported(entry)) => {
-                fields.push(("library", library_ref(entry)));
-                format!("imported as {}", library_ref(entry))
+                fields.push(("library", entry.to_string()));
+                format!("imported as {entry}")
             }
             Ok(ImportGameOutcome::AlreadyHad(entry)) => {
-                fields.push(("library", library_ref(entry)));
-                format!("the library has it already, as {}", library_ref(entry))
+                fields.push(("library", entry.to_string()));
+                format!("the library has it already, as {entry}")
             }
             Err(ImportGameError::Add(AddGameError::Other(error)))
             | Err(ImportGameError::Other(error)) => format!("error: {error}"),
@@ -136,13 +136,13 @@ impl OperationReport {
         let mut fields = Vec::new();
         let message = match result {
             Ok(entry) => {
-                fields.push(("library", library_ref(entry)));
-                format!("renamed to {}", library_ref(entry))
+                fields.push(("library", entry.to_string()));
+                format!("renamed to {entry}")
             }
             Err(RenameInLibraryError::Other(error)) => format!("error: {error}"),
             Err(error) => format!("not renamed: {error}"),
         };
-        Self::new(library_ref(game), result, message, fields)
+        Self::new(game.to_string(), result, message, fields)
     }
 
     pub(crate) fn rename_on_device(
@@ -152,13 +152,13 @@ impl OperationReport {
         let mut fields = Vec::new();
         let message = match result {
             Ok(entry) => {
-                fields.push(("device", device_ref(entry)));
-                format!("renamed to {}", device_ref(entry))
+                fields.push(("device", entry.to_string()));
+                format!("renamed to {entry}")
             }
             Err(RenameOnDeviceError::Other(error)) => format!("error: {error}"),
             Err(error) => format!("not renamed: {error}"),
         };
-        Self::new(device_ref(game), result, message, fields)
+        Self::new(game.to_string(), result, message, fields)
     }
 
     pub(crate) fn trash_game(game: &LocalEntry, result: &Result<(), BasicError>) -> Self {
@@ -166,7 +166,7 @@ impl OperationReport {
             Ok(()) => "put in the trash".to_string(),
             Err(error) => format!("error: {error}"),
         };
-        Self::new(library_ref(game), result, message, Vec::new())
+        Self::new(game.to_string(), result, message, Vec::new())
     }
 
     pub(crate) fn delete_game(game: &DeviceEntry, result: &Result<(), BasicError>) -> Self {
@@ -174,7 +174,7 @@ impl OperationReport {
             Ok(()) => "deleted from the device".to_string(),
             Err(error) => format!("error: {error}"),
         };
-        Self::new(device_ref(game), result, message, Vec::new())
+        Self::new(game.to_string(), result, message, Vec::new())
     }
 
     // ---- Saves ------------------------------------------------------------------
@@ -190,7 +190,7 @@ impl OperationReport {
             Err(error @ BasicError::NotInLibrary) => format!("{error}; pull the game first"),
             Err(error) => format!("error: {error}"),
         };
-        Self::new(device_ref(game), result, message, Vec::new())
+        Self::new(game.to_string(), result, message, Vec::new())
     }
 
     pub(crate) fn push_save(
@@ -208,7 +208,7 @@ impl OperationReport {
             Err(PushSaveError::Other(error)) => format!("error: {error}"),
             Err(error) => error.to_string(),
         };
-        Self::new(device_ref(game), result, message, fields)
+        Self::new(game.to_string(), result, message, fields)
     }
 
     /// `from` is the file it was imported from.
@@ -226,7 +226,7 @@ impl OperationReport {
             Ok(ImportSaveOutcome::AlreadyHad) => "the library has this save already".to_string(),
             Err(error) => format!("error: {error}"),
         };
-        Self::new(library_ref(game), result, message, fields)
+        Self::new(game.to_string(), result, message, fields)
     }
 
     pub(crate) fn trash_every_version(
@@ -238,7 +238,7 @@ impl OperationReport {
             Ok(TrashSaveAllOutcome::NoSave) => "no save in the library".to_string(),
             Err(error) => format!("error: {error}"),
         };
-        Self::new(library_ref(game), result, message, Vec::new())
+        Self::new(game.to_string(), result, message, Vec::new())
     }
 
     pub(crate) fn trash_save_version(
@@ -252,7 +252,7 @@ impl OperationReport {
             Err(error) => error.to_string(),
         };
         let fields = vec![("version", version_name.to_string())];
-        Self::new(library_ref(game), result, message, fields)
+        Self::new(game.to_string(), result, message, fields)
     }
 
     pub(crate) fn trash_orphan_save(
@@ -264,7 +264,7 @@ impl OperationReport {
             Err(TrashOrphanSaveError::Other(error)) => format!("error: {error}"),
             Err(error) => error.to_string(),
         };
-        Self::new(library_orphan_ref(orphan), result, message, Vec::new())
+        Self::new(orphan.to_string(), result, message, Vec::new())
     }
 
     pub(crate) fn delete_save(
@@ -276,7 +276,7 @@ impl OperationReport {
             Ok(DeleteSaveOutcome::NoSave) => "no save on the device".to_string(),
             Err(error) => format!("error: {error}"),
         };
-        Self::new(device_ref(game), result, message, Vec::new())
+        Self::new(game.to_string(), result, message, Vec::new())
     }
 
     pub(crate) fn delete_orphan_save(
@@ -288,7 +288,7 @@ impl OperationReport {
             Err(DeleteOrphanSaveError::Other(error)) => format!("error: {error}"),
             Err(error) => error.to_string(),
         };
-        Self::new(device_orphan_ref(orphan), result, message, Vec::new())
+        Self::new(orphan.to_string(), result, message, Vec::new())
     }
 
     // ---- Covers -----------------------------------------------------------------
@@ -303,7 +303,7 @@ impl OperationReport {
             Ok(FetchCoverOutcome::NoCover) => "no cover found for it".to_string(),
             Err(error) => format!("error: {error}"),
         };
-        Self::new(library_ref(game), result, message, Vec::new())
+        Self::new(game.to_string(), result, message, Vec::new())
     }
 
     /// `from` is the file it was imported from.
@@ -318,7 +318,7 @@ impl OperationReport {
             Err(error) => error.to_string(),
         };
         let fields = vec![("from", from.display().to_string())];
-        Self::new(library_ref(game), result, message, fields)
+        Self::new(game.to_string(), result, message, fields)
     }
 
     // ---- Cores and BIOS files ---------------------------------------------------
@@ -359,7 +359,7 @@ impl OperationReport {
             Err(error) => error.to_string(),
         };
         let fields = vec![("from", from.display().to_string())];
-        Self::new(bios_ref(row), result, message, fields)
+        Self::new(row.to_string(), result, message, fields)
     }
 
     // ---- Operations on everything -----------------------------------------------
@@ -461,26 +461,6 @@ impl Logger {
             .open(&self.path)?;
         writeln!(file, "{}", entry.to_json())
     }
-}
-
-pub fn library_ref(entry: &LocalEntry) -> String {
-    format!("{}/{}", entry.game.platform.id(), entry.name)
-}
-
-pub fn device_ref(entry: &DeviceEntry) -> String {
-    format!("{}/{}", entry.game.platform.id(), entry.path.display())
-}
-
-pub fn library_orphan_ref(orphan: &OrphanLocalSave) -> String {
-    format!("{}/{}", orphan.platform.id(), orphan.stem)
-}
-
-pub fn device_orphan_ref(orphan: &OrphanDeviceSave) -> String {
-    format!("{}/{}", orphan.platform.id(), orphan.path.display())
-}
-
-pub fn bios_ref(row: &BiosRow) -> String {
-    format!("{}/{}", row.platform.id(), row.path.display())
 }
 
 #[cfg(test)]

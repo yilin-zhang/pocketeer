@@ -11,10 +11,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{error::BasicError, files::write_atomically, platform::Platform};
 
-/// The formats a cover can be in, in the order a game's cover is looked for.
-pub const COVER_FORMATS: [ImageFormat; 3] =
-    [ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::WebP];
-
 /// A game's cover image, kept as the file it came in. Drawing it is up to the
 /// front end.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,10 +20,13 @@ pub struct Cover {
 }
 
 impl Cover {
+    /// The formats a cover can be in, in the order a game's cover is looked for.
+    pub const FORMATS: [ImageFormat; 3] = [ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::WebP];
+
     /// `bytes` as a cover, if they are a PNG, JPEG or WebP file.
     pub fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
         let format = image::guess_format(&bytes).ok()?;
-        COVER_FORMATS
+        Self::FORMATS
             .contains(&format)
             .then_some(Self { bytes, format })
     }

@@ -3,6 +3,7 @@
 mod tui;
 
 use std::{
+    fmt,
     io::{self, IsTerminal},
     ops::ControlFlow,
     path::{Path, PathBuf},
@@ -15,10 +16,7 @@ use pocketeer_core::{
     cores::{BiosStatus, CoreRow, SUPPORTED},
     device::{Device, DeviceEntry},
     library::{LibrarySave, LocalEntry, OpenLibraryError},
-    log::{
-        FrontEnd, LogEntry, bios_ref, device_orphan_ref, device_ref, library_orphan_ref,
-        library_ref,
-    },
+    log::{FrontEnd, LogEntry},
     platform::Platform,
     pocketeer::{BatchResult, GameRow},
 };
@@ -569,9 +567,8 @@ impl CliSession {
         };
         for duplicate in &session.duplicates {
             eprintln!(
-                "warning: {} is the same game as {}; it is left out and its save isn't synced",
-                device_ref(duplicate),
-                device_ref(session.first_copy(duplicate)),
+                "warning: {duplicate} is the same game as {}; it is left out and its save isn't synced",
+                session.first_copy(duplicate),
             );
         }
         Ok(session)
@@ -611,8 +608,8 @@ impl CliSession {
                 };
                 Row {
                     platform: id.to_string(),
-                    library: row.local_entry().map(library_ref),
-                    device: row.device_entry().map(device_ref),
+                    library: row.local_entry().map(ToString::to_string),
+                    device: row.device_entry().map(ToString::to_string),
                     saves_kept: row.saves_kept(),
                     new_save_on_device: row.has_new_save_on_device(),
                     pulls_as,
@@ -627,8 +624,8 @@ impl CliSession {
                     .iter()
                     .map(|duplicate| {
                         json!({
-                            "device": device_ref(duplicate),
-                            "same_game_as": device_ref(self.first_copy(duplicate)),
+                            "device": duplicate.to_string(),
+                            "same_game_as": self.first_copy(duplicate).to_string(),
                         })
                     })
                     .collect();
@@ -722,7 +719,7 @@ impl CliSession {
             .find_orphan_saves()?
             .into_iter()
             .map(|orphan| Orphan {
-                save: library_orphan_ref(&orphan),
+                save: orphan.to_string(),
                 versions: orphan.save.iter().count(),
                 newest: orphan.save.newest().name.clone(),
             })
@@ -759,7 +756,7 @@ impl CliSession {
             .find_orphan_saves_on_device()?
             .into_iter()
             .map(|orphan| Orphan {
-                save: device_orphan_ref(&orphan),
+                save: orphan.to_string(),
                 size: orphan.save.size,
                 written: orphan.save.timestamp(),
             })
@@ -787,18 +784,18 @@ impl CliSession {
         Ok(())
     }
 
-    fn pull_games(&mut self, game_refs: &[String]) -> CliResult<()> {
-        let games = match game_refs {
+    fn pull_games(&mut self, game_args: &[String]) -> CliResult<()> {
+        let games = match game_args {
             [] => self.pocketeer.games_only_on_device(),
-            game_refs => self.entries_on_device(game_refs)?,
+            game_args => self.entries_on_device(game_args)?,
         };
         self.run_batch(|pocketeer, on_logged| pocketeer.pull_games(&games, on_logged))
     }
 
-    fn pull_saves(&mut self, game_refs: &[String]) -> CliResult<()> {
-        let games = match game_refs {
+    fn pull_saves(&mut self, game_args: &[String]) -> CliResult<()> {
+        let games = match game_args {
             [] => self.games_with_saves_to_pull(),
-            game_refs => self.entries_on_device(game_refs)?,
+            game_args => self.entries_on_device(game_args)?,
         };
         self.run_batch(|pocketeer, on_logged| pocketeer.pull_saves(&games, on_logged))
     }
@@ -811,7 +808,7 @@ impl CliSession {
         let unsaved: Vec<String> = others
             .iter()
             .filter(|game| game.save.is_some())
-            .map(device_ref)
+            .map(ToString::to_string)
             .collect();
         if !unsaved.is_empty() {
             eprintln!(
@@ -822,17 +819,17 @@ impl CliSession {
         self.pocketeer.games_on_device_in_library()
     }
 
-    fn push_games(&mut self, game_refs: &[String]) -> CliResult<()> {
-        let games = self.entries_in_library(game_refs)?;
+    fn push_games(&mut self, game_args: &[String]) -> CliResult<()> {
+        let games = self.entries_in_library(game_args)?;
         self.run_batch(|pocketeer, on_logged| pocketeer.push_games(&games, on_logged))
     }
 
-    fn push_save(&mut self, game_ref: &str, version_name: &str) -> CliResult<()> {
-        let local = self.local_entry(game_ref)?;
-        let version = version_named(game_ref, local, version_name)?;
+    fn push_save(&mut self, game_arg: &str, version_name: &str) -> CliResult<()> {
+        let local = self.local_entry(game_arg)?;
+        let version = version_named(game_arg, local, version_name)?;
         let device = self.pocketeer.device().expect("the device is open");
         let copy = device.entry_for(&local.game).cloned();
-        let copy = copy.ok_or_else(|| not_on_device(game_ref))?;
+        let copy = copy.ok_or_else(|| not_on_device(game_arg))?;
         let versions = [(copy, version)];
         self.run_batch(|pocketeer, on_logged| pocketeer.push_save_versions(&versions, on_logged))
     }
@@ -855,23 +852,23 @@ impl CliSession {
         self.run_batch(|pocketeer, on_logged| pocketeer.import_covers(&covers, on_logged))
     }
 
-    fn trash_games(&mut self, game_refs: &[String]) -> CliResult<()> {
-        let games = self.entries_in_library(game_refs)?;
+    fn trash_games(&mut self, game_args: &[String]) -> CliResult<()> {
+        let games = self.entries_in_library(game_args)?;
         self.run_batch(|pocketeer, on_logged| pocketeer.trash_games_in_library(&games, on_logged))
     }
 
-    fn trash_saves(&mut self, game_refs: &[String], at: Option<&str>) -> CliResult<()> {
-        let games = self.entries_in_library(game_refs)?;
+    fn trash_saves(&mut self, game_args: &[String], at: Option<&str>) -> CliResult<()> {
+        let games = self.entries_in_library(game_args)?;
         let Some(version_name) = at else {
             return self.run_batch(|pocketeer, on_logged| {
                 pocketeer.trash_saves_in_library(&games, on_logged)
             });
         };
-        let versions = game_refs
+        let versions = game_args
             .iter()
             .zip(games)
-            .map(|(game_ref, game)| {
-                let version = version_named(game_ref, &game, version_name)?;
+            .map(|(game_arg, game)| {
+                let version = version_named(game_arg, &game, version_name)?;
                 Ok((game, version))
             })
             .collect::<CliResult<Vec<(LocalEntry, LibrarySave)>>>()?;
@@ -880,36 +877,36 @@ impl CliSession {
         })
     }
 
-    fn trash_orphan_saves(&mut self, orphan_refs: &[String]) -> CliResult<()> {
+    fn trash_orphan_saves(&mut self, orphan_args: &[String]) -> CliResult<()> {
         let orphans = self.pocketeer.library().find_orphan_saves()?;
-        let orphans = pick_orphans(orphan_refs, &orphans, library_orphan_ref)?;
+        let orphans = pick_orphans(orphan_args, &orphans)?;
         self.run_batch(|pocketeer, on_logged| {
             pocketeer.trash_orphan_saves_in_library(&orphans, on_logged)
         })
     }
 
-    fn delete_games(&mut self, game_refs: &[String]) -> CliResult<()> {
-        let games = self.entries_on_device(game_refs)?;
+    fn delete_games(&mut self, game_args: &[String]) -> CliResult<()> {
+        let games = self.entries_on_device(game_args)?;
         self.run_batch(|pocketeer, on_logged| pocketeer.delete_games_on_device(&games, on_logged))
     }
 
-    fn delete_saves(&mut self, game_refs: &[String]) -> CliResult<()> {
-        let games = self.entries_on_device(game_refs)?;
+    fn delete_saves(&mut self, game_args: &[String]) -> CliResult<()> {
+        let games = self.entries_on_device(game_args)?;
         self.run_batch(|pocketeer, on_logged| pocketeer.delete_saves_on_device(&games, on_logged))
     }
 
-    fn delete_orphan_saves(&mut self, orphan_refs: &[String]) -> CliResult<()> {
+    fn delete_orphan_saves(&mut self, orphan_args: &[String]) -> CliResult<()> {
         let orphans = self.pocketeer.find_orphan_saves_on_device()?;
-        let orphans = pick_orphans(orphan_refs, &orphans, device_orphan_ref)?;
+        let orphans = pick_orphans(orphan_args, &orphans)?;
         self.run_batch(|pocketeer, on_logged| {
             pocketeer.delete_orphan_saves_on_device(&orphans, on_logged)
         })
     }
 
-    fn fetch_covers(&mut self, game_refs: &[String]) -> CliResult<()> {
-        let games = match game_refs {
+    fn fetch_covers(&mut self, game_args: &[String]) -> CliResult<()> {
+        let games = match game_args {
             [] => self.pocketeer.games_without_covers(),
-            game_refs => self.entries_in_library(game_refs)?,
+            game_args => self.entries_in_library(game_args)?,
         };
         self.run_batch(|pocketeer, on_logged| pocketeer.fetch_covers(&games, on_logged))
     }
@@ -1062,10 +1059,10 @@ impl CliSession {
         self.run_batch(|pocketeer, on_logged| pocketeer.rename_games_in_library(&games, on_logged))
     }
 
-    fn rename_games_to_dat_names(&mut self, game_refs: &[String]) -> CliResult<()> {
-        let games = match game_refs {
+    fn rename_games_to_dat_names(&mut self, game_args: &[String]) -> CliResult<()> {
+        let games = match game_args {
             [] => self.pocketeer.library().entries().to_vec(),
-            game_refs => self.entries_in_library(game_refs)?,
+            game_args => self.entries_in_library(game_args)?,
         };
         let renames = self.pocketeer.renames_to_dat_names(&games);
         if renames.is_empty() && matches!(self.format, PrintFormat::Text) {
@@ -1148,7 +1145,7 @@ impl CliSession {
                     required: *required,
                 });
                 Row {
-                    file: bios_ref(row),
+                    file: row.to_string(),
                     status,
                     size,
                     size_exact: row.size_exact,
@@ -1189,7 +1186,7 @@ impl CliSession {
 
     fn put_bios(&mut self, file: &str, from: &Path) -> CliResult<()> {
         let rows = self.pocketeer.read_bios_rows()?;
-        let Some(row) = rows.into_iter().find(|row| bios_ref(row) == file) else {
+        let Some(row) = rows.into_iter().find(|row| row.to_string() == file) else {
             let message = format!("{file}: no core on the device loads it, as `bios list` shows");
             return Err(CliError::CouldNotStart(message));
         };
@@ -1240,40 +1237,40 @@ impl CliSession {
         Ok(())
     }
 
-    /// The device's games named in `game_refs`. A copy the scan left out is
+    /// The device's games named in `game_args`. A copy the scan left out is
     /// refused, so that nothing meant for one file happens to another.
-    fn entries_on_device(&self, game_refs: &[String]) -> CliResult<Vec<DeviceEntry>> {
+    fn entries_on_device(&self, game_args: &[String]) -> CliResult<Vec<DeviceEntry>> {
         let device = self.pocketeer.device().expect("the device is open");
-        game_refs
+        game_args
             .iter()
-            .map(|game_ref| {
-                let (platform, path) = split_ref(game_ref)?;
+            .map(|game_arg| {
+                let (platform, path) = split_platform(game_arg)?;
                 let path = Path::new(path);
                 let is_named_copy = |on_device: &&DeviceEntry| {
                     on_device.game.platform == platform && on_device.path == path
                 };
                 if let Some(duplicate) = self.duplicates.iter().find(is_named_copy) {
-                    let first = device_ref(self.first_copy(duplicate));
+                    let first = self.first_copy(duplicate).to_string();
                     let message =
-                        format!("{game_ref}: the same game as {first}, the copy that is used");
+                        format!("{game_arg}: the same game as {first}, the copy that is used");
                     return Err(CliError::CouldNotStart(message));
                 }
                 let found = device.entry_at(&platform, path);
-                found.cloned().ok_or_else(|| not_on_device(game_ref))
+                found.cloned().ok_or_else(|| not_on_device(game_arg))
             })
             .collect()
     }
 
-    fn entries_in_library(&self, game_refs: &[String]) -> CliResult<Vec<LocalEntry>> {
-        game_refs
+    fn entries_in_library(&self, game_args: &[String]) -> CliResult<Vec<LocalEntry>> {
+        game_args
             .iter()
-            .map(|game_ref| self.local_entry(game_ref).cloned())
+            .map(|game_arg| self.local_entry(game_arg).cloned())
             .collect()
     }
 
-    fn local_entry(&self, game_ref: &str) -> CliResult<&LocalEntry> {
-        let (platform, name) = split_ref(game_ref)?;
-        let not_there = || CliError::CouldNotStart(format!("{game_ref}: not in the library"));
+    fn local_entry(&self, game_arg: &str) -> CliResult<&LocalEntry> {
+        let (platform, name) = split_platform(game_arg)?;
+        let not_there = || CliError::CouldNotStart(format!("{game_arg}: not in the library"));
         self.pocketeer
             .library()
             .entry_named(&platform, name)
@@ -1281,37 +1278,36 @@ impl CliSession {
     }
 }
 
-fn not_on_device(game_ref: &str) -> CliError {
-    CliError::CouldNotStart(format!("{game_ref}: not on the device"))
+fn not_on_device(game_arg: &str) -> CliError {
+    CliError::CouldNotStart(format!("{game_arg}: not on the device"))
 }
 
 /// The version of `local`'s save called `version_name`, as `saves` shows it.
-fn version_named(game_ref: &str, local: &LocalEntry, version_name: &str) -> CliResult<LibrarySave> {
+fn version_named(game_arg: &str, local: &LocalEntry, version_name: &str) -> CliResult<LibrarySave> {
     let saves = local.save.as_ref();
     let version = saves.and_then(|saves| saves.version_named(version_name));
     version.cloned().ok_or_else(|| {
-        let message = format!("{game_ref}: no such version, as `pocketeer saves` shows them");
+        let message = format!("{game_arg}: no such version, as `pocketeer saves` shows them");
         CliError::CouldNotStart(message)
     })
 }
 
-/// The orphan saves named in `orphan_refs`, as `orphan-saves` shows them.
+/// The orphan saves named in `orphan_args`, as `orphan-saves` shows them.
 /// Nothing else is accepted, so a game's save can't be taken for an orphan.
-fn pick_orphans<T: Clone>(
-    orphan_refs: &[String],
+fn pick_orphans<T: Clone + fmt::Display>(
+    orphan_args: &[String],
     orphans: &[T],
-    ref_of: fn(&T) -> String,
 ) -> CliResult<Vec<T>> {
-    orphan_refs
+    orphan_args
         .iter()
-        .map(|game_ref| {
+        .map(|orphan_arg| {
             let found = orphans
                 .iter()
-                .find(|orphan| ref_of(orphan) == *game_ref)
+                .find(|orphan| orphan.to_string() == *orphan_arg)
                 .cloned();
             found.ok_or_else(|| {
                 let message =
-                    format!("{game_ref}: not an orphan save, as `orphan-saves` shows them");
+                    format!("{orphan_arg}: not an orphan save, as `orphan-saves` shows them");
                 CliError::CouldNotStart(message)
             })
         })
@@ -1335,10 +1331,10 @@ fn parse_platform(id: &str) -> CliResult<Platform> {
 }
 
 /// Splits `<platform>/<rest>` into the platform and the rest.
-fn split_ref(game_ref: &str) -> CliResult<(Platform, &str)> {
-    let (id, rest) = game_ref.split_once('/').ok_or_else(|| {
+fn split_platform(game_arg: &str) -> CliResult<(Platform, &str)> {
+    let (id, rest) = game_arg.split_once('/').ok_or_else(|| {
         let format_hint = "write a game as <platform>/<name>, as `pocketeer games` shows it";
-        CliError::CouldNotStart(format!("{game_ref}: {format_hint}"))
+        CliError::CouldNotStart(format!("{game_arg}: {format_hint}"))
     })?;
     Ok((Platform::from_id(id), rest))
 }

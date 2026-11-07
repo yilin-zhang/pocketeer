@@ -51,6 +51,28 @@ pub struct Rom {
     pub crc32: u32,
 }
 
+impl Rom {
+    /// Hashes the rest of `file`.
+    fn read(mut file: File) -> io::Result<Self> {
+        let mut crc = crc32fast::Hasher::new();
+        let mut size = 0;
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            match file.read(&mut buf)? {
+                0 => break,
+                read_count => {
+                    crc.update(&buf[..read_count]);
+                    size += read_count as u64;
+                }
+            }
+        }
+        Ok(Self {
+            size,
+            crc32: crc.finalize(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Files {
     Single(Rom),
@@ -73,7 +95,7 @@ impl Game {
         if platform == Platform::Nes && !skip_ines_header(&mut file)? {
             file.rewind()?;
         }
-        let rom = hash_rom(file)?;
+        let rom = Rom::read(file)?;
         Ok(Self {
             platform,
             files: Files::Single(rom),
@@ -94,6 +116,15 @@ impl Save {
     pub fn read(path: &Path) -> io::Result<Self> {
         let bytes = fs::read(path)?;
         Ok(Save::from_bytes(&bytes, fs::metadata(path)?.modified()?))
+    }
+
+    /// Reads the save at `path`, or gives none if there is no file there.
+    pub fn read_if_exists(path: &Path) -> io::Result<Option<Self>> {
+        match Save::read(path) {
+            Ok(save) => Ok(Some(save)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn from_bytes(bytes: &[u8], modified: SystemTime) -> Self {
@@ -123,26 +154,6 @@ fn skip_ines_header(file: &mut File) -> io::Result<bool> {
     let mut start = Vec::new();
     file.take(16).read_to_end(&mut start)?;
     Ok(start.len() == 16 && start.starts_with(b"NES\x1a"))
-}
-
-/// Hashes the rest of `file`.
-fn hash_rom(mut file: File) -> io::Result<Rom> {
-    let mut crc = crc32fast::Hasher::new();
-    let mut size = 0;
-    let mut buf = vec![0u8; 256 * 1024];
-    loop {
-        match file.read(&mut buf)? {
-            0 => break,
-            read_count => {
-                crc.update(&buf[..read_count]);
-                size += read_count as u64;
-            }
-        }
-    }
-    Ok(Rom {
-        size,
-        crc32: crc.finalize(),
-    })
 }
 
 #[cfg(test)]

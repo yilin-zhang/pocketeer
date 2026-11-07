@@ -29,9 +29,6 @@ use ratatui_image::{
 /// value.
 pub const COVER_RESIZE_MODE: Resize = Resize::Fit(None);
 
-/// How many decoded covers to keep. One is a few hundred KB to a few MB.
-const DECODED_COVER_LIMIT: usize = 24;
-
 /// A cover file's last write time and size. A cover fetched or imported again
 /// replaces the file in place, so the path alone can't identify it.
 type CoverFileStamp = (Option<SystemTime>, u64);
@@ -56,6 +53,53 @@ impl CoverWork {
     fn path(&self) -> &Path {
         match self {
             CoverWork::Decode { path, .. } | CoverWork::Resize { path, .. } => path,
+        }
+    }
+
+    fn done(self, picker: &Picker) -> FinishedCoverWork {
+        let (path, stamp, cover, size) = match self {
+            CoverWork::Decode { path, stamp, size } => {
+                let cover = image::ImageReader::open(&path)
+                    .ok()
+                    .and_then(|reader| reader.with_guessed_format().ok())
+                    .and_then(|reader| reader.decode().ok())
+                    .map(|image| DecodedCover::new(picker, image, size));
+                (path, stamp, cover, size)
+            }
+            CoverWork::Resize {
+                path,
+                stamp,
+                cover,
+                size,
+            } => (path, stamp, Some(cover), size),
+        };
+        let cover = cover.map(|mut cover| {
+            cover.resize(size);
+            cover
+        });
+        FinishedCoverWork {
+            path,
+            stamp,
+            outcome: cover.map_or(CoverWorkOutcome::Unreadable, CoverWorkOutcome::Ready),
+        }
+    }
+
+    /// Returns unwanted work without doing it. A cover that only needed a new
+    /// size is already decoded, so it is kept.
+    fn dropped(self) -> FinishedCoverWork {
+        match self {
+            CoverWork::Decode { path, stamp, .. } => FinishedCoverWork {
+                path,
+                stamp,
+                outcome: CoverWorkOutcome::Dropped,
+            },
+            CoverWork::Resize {
+                path, stamp, cover, ..
+            } => FinishedCoverWork {
+                path,
+                stamp,
+                outcome: CoverWorkOutcome::Ready(cover),
+            },
         }
     }
 }
@@ -133,6 +177,9 @@ pub struct CoverLoader {
 }
 
 impl CoverLoader {
+    /// How many decoded covers to keep. One is a few hundred KB to a few MB.
+    const DECODED_COVER_LIMIT: usize = 24;
+
     /// Starts the thread that decodes, scales and encodes covers, which takes
     /// far longer than a frame. `wake` is called when a cover is ready.
     pub fn spawn(picker: Picker, wake: impl Fn() + Send + 'static) -> Self {
@@ -158,9 +205,9 @@ impl CoverLoader {
                     .iter()
                     .find_map(|path| queue.iter().position(|work_item| work_item.path() == path));
                 let results: Vec<FinishedCoverWork> = match next {
-                    Some(i) => vec![do_work(&picker, queue.swap_remove(i))],
+                    Some(i) => vec![queue.swap_remove(i).done(&picker)],
                     // Everything queued is for rows the user has left.
-                    None => queue.drain(..).map(drop_work).collect(),
+                    None => queue.drain(..).map(CoverWork::dropped).collect(),
                 };
                 for result in results {
                     if finished_tx.send(result).is_err() {
@@ -271,7 +318,7 @@ impl CoverLoader {
         {
             return false;
         }
-        if self.cache.len() >= DECODED_COVER_LIMIT {
+        if self.cache.len() >= Self::DECODED_COVER_LIMIT {
             // Covers being worked on are what's on screen or next to it.
             self.cache
                 .retain(|_, (_, state)| matches!(state, CachedCoverState::Working));
@@ -290,53 +337,6 @@ impl CoverLoader {
 fn file_stamp(path: &Path) -> Option<CoverFileStamp> {
     let metadata = fs::metadata(path).ok()?;
     Some((metadata.modified().ok(), metadata.len()))
-}
-
-/// Returns unwanted work without doing it. A cover that only needed a new size
-/// is already decoded, so it is kept.
-fn drop_work(work: CoverWork) -> FinishedCoverWork {
-    match work {
-        CoverWork::Decode { path, stamp, .. } => FinishedCoverWork {
-            path,
-            stamp,
-            outcome: CoverWorkOutcome::Dropped,
-        },
-        CoverWork::Resize {
-            path, stamp, cover, ..
-        } => FinishedCoverWork {
-            path,
-            stamp,
-            outcome: CoverWorkOutcome::Ready(cover),
-        },
-    }
-}
-
-fn do_work(picker: &Picker, work: CoverWork) -> FinishedCoverWork {
-    let (path, stamp, cover, size) = match work {
-        CoverWork::Decode { path, stamp, size } => {
-            let cover = image::ImageReader::open(&path)
-                .ok()
-                .and_then(|reader| reader.with_guessed_format().ok())
-                .and_then(|reader| reader.decode().ok())
-                .map(|image| DecodedCover::new(picker, image, size));
-            (path, stamp, cover, size)
-        }
-        CoverWork::Resize {
-            path,
-            stamp,
-            cover,
-            size,
-        } => (path, stamp, Some(cover), size),
-    };
-    let cover = cover.map(|mut cover| {
-        cover.resize(size);
-        cover
-    });
-    FinishedCoverWork {
-        path,
-        stamp,
-        outcome: cover.map_or(CoverWorkOutcome::Unreadable, CoverWorkOutcome::Ready),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -368,13 +368,6 @@ impl BrailleCover {
     }
 }
 
-/// Dots per cell, across and down.
-const DOTS_X: u32 = 2;
-const DOTS_Y: u32 = 4;
-
-/// The braille bit for the dot at (x, y) in a cell.
-const BITS: [[u8; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
-
 /// Fits `source` into `size` cells, dithers its brightness and encodes it as
 /// braille.
 ///
@@ -383,6 +376,11 @@ const BITS: [[u8; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
 /// dots are lit carries the brightness, and each cell is drawn in the average
 /// color of its lit dots, so the color carries the hue.
 fn render_dots(source: &DynamicImage, size: Size) -> Vec<Line<'static>> {
+    // Dots per cell, across and down.
+    const DOTS_X: u32 = 2;
+    const DOTS_Y: u32 = 4;
+    // The braille bit for the dot at (x, y) in a cell.
+    const BITS: [[u8; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
     let (column_count, row_count) = (u32::from(size.width), u32::from(size.height));
     if column_count == 0 || row_count == 0 || source.width() == 0 || source.height() == 0 {
         return Vec::new();

@@ -24,9 +24,6 @@ use crate::{
     platform::Platform,
 };
 
-/// What a folder must have at its root to be a Pocket.
-const MARKERS: [&str; 3] = ["Analogue_Pocket.json", "Assets", "Cores"];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceEntry {
     /// Its path under `Assets/<platform>/common/`, e.g. `RPG/Pokemon.gba`. Its
@@ -40,6 +37,14 @@ pub struct DeviceEntry {
 impl DeviceEntry {
     fn is_at(&self, platform: &Platform, path: &Path) -> bool {
         &self.game.platform == platform && self.path == path
+    }
+}
+
+/// As `<platform>/<path>`, the way the command line, the log and messages
+/// name it.
+impl fmt::Display for DeviceEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.game.platform.id(), self.path.display())
     }
 }
 
@@ -156,6 +161,14 @@ pub struct OrphanDeviceSave {
     pub save: Save,
 }
 
+/// As `<platform>/<path>`, the way the command line, the log and messages
+/// name it.
+impl fmt::Display for OrphanDeviceSave {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.platform.id(), self.path.display())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeleteSaveOutcome {
     Deleted,
@@ -266,6 +279,9 @@ pub struct Device {
 }
 
 impl Device {
+    /// What a folder must have at its root to be a Pocket.
+    const MARKERS: [&str; 3] = ["Analogue_Pocket.json", "Assets", "Cores"];
+
     /// The roots of the mounted devices, sorted.
     pub fn find_mounted() -> Vec<PathBuf> {
         devices_among(mounted_volumes())
@@ -390,7 +406,7 @@ impl Device {
                 }
                 let game = self.cache.read_game(&platform, &full)?;
                 seen.insert(full);
-                let save = read_save(&layout.save(&platform, &path))?;
+                let save = Save::read_if_exists(&layout.save(&platform, &path))?;
                 let entry = DeviceEntry { path, game, save };
                 if games.insert(entry.game.clone()) {
                     entries.push(entry);
@@ -427,7 +443,7 @@ impl Device {
         let entry = DeviceEntry {
             path: path.to_path_buf(),
             game: game.clone(),
-            save: read_save(&self.layout.save(&game.platform, path))?,
+            save: Save::read_if_exists(&self.layout.save(&game.platform, path))?,
         };
         self.insert(entry.clone());
         Ok(entry)
@@ -568,7 +584,7 @@ impl Device {
     /// `entry`'s save as it is now, which may differ from what the scan saw, or
     /// none if it has none.
     pub fn read_save(&self, entry: &DeviceEntry) -> Result<Option<Save>, BasicError> {
-        read_save(&self.save_path(entry))
+        Ok(Save::read_if_exists(&self.save_path(entry))?)
     }
 
     /// Makes the file at `from` into `entry`'s save, keeping `from`'s write
@@ -839,7 +855,7 @@ fn devices_among(volumes: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 fn missing_markers(root: &Path) -> Vec<&'static str> {
-    MARKERS
+    Device::MARKERS
         .into_iter()
         .filter(|marker| !root.join(marker).exists())
         .collect()
@@ -858,14 +874,6 @@ fn run_command(command: &mut Command) -> Result<String, EjectDeviceError> {
         ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-fn read_save(path: &Path) -> Result<Option<Save>, BasicError> {
-    match Save::read(path) {
-        Ok(save) => Ok(Some(save)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
 }
 
 #[cfg(test)]

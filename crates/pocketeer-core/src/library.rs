@@ -3,6 +3,7 @@
 
 use std::{
     collections::{HashMap, HashSet, hash_map},
+    fmt,
     path::{Path, PathBuf},
 };
 
@@ -10,7 +11,7 @@ use fs_err as fs;
 use image::ImageFormat;
 
 use crate::{
-    cover::{COVER_FORMATS, Cover},
+    cover::Cover,
     error::BasicError,
     files::{Cache, copy_atomically, list_dir, safe_rename_all, write_atomically},
     game::{Game, Save, is_valid_fat_name, is_valid_file_name, renamed_file_name},
@@ -96,6 +97,14 @@ impl LocalEntry {
     }
 }
 
+/// As `<platform>/<name>`, the way the command line, the log and messages
+/// name it.
+impl fmt::Display for LocalEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.game.platform.id(), self.name)
+    }
+}
+
 /// Saves in the library with no game of that name. Trashing a game leaves them
 /// behind, and adding a game under that name picks them up again.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +113,14 @@ pub struct OrphanLocalSave {
     /// The name its game had, without the extension.
     pub stem: String,
     pub save: LibrarySaves,
+}
+
+/// As `<platform>/<name>`, the way the command line, the log and messages
+/// name it.
+impl fmt::Display for OrphanLocalSave {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.platform.id(), self.stem)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -689,7 +706,7 @@ impl Library {
     }
 
     fn cover_path(&self, platform: &Platform, stem: &str) -> Option<PathBuf> {
-        COVER_FORMATS
+        Cover::FORMATS
             .into_iter()
             .map(|format| self.layout.cover(platform, stem, format))
             .find(|path| path.is_file())

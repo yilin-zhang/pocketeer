@@ -19,7 +19,7 @@ use pocketeer_core::{
     cores::{BiosRow, CoreList},
     device::{Device, DeviceEntry, DiskSpace, Firmware, OrphanDeviceSave},
     library::{LibrarySave, LocalEntry, OrphanLocalSave},
-    log::{FrontEnd, LogEntry, OperationReport, device_ref},
+    log::{FrontEnd, LogEntry, OperationReport},
     platform::Platform,
     pocketeer::GameRow,
 };
@@ -196,6 +196,34 @@ impl GamesTableRow {
 pub struct GamesPageData {
     pub rows: Vec<GamesTableRow>,
     pub device_root: Option<PathBuf>,
+}
+
+impl GamesPageData {
+    fn new(pocketeer: &Pocketeer, orphan_saves: &OrphanSaves) -> Self {
+        let mut rows: Vec<GamesTableRow> = pocketeer
+            .game_rows()
+            .into_iter()
+            .map(GamesTableRow::Game)
+            .collect();
+        rows.extend(
+            orphan_saves
+                .in_library
+                .iter()
+                .cloned()
+                .map(GamesTableRow::OrphanSaveInLibrary),
+        );
+        rows.extend(
+            orphan_saves
+                .on_device
+                .iter()
+                .cloned()
+                .map(GamesTableRow::OrphanSaveOnDevice),
+        );
+        Self {
+            rows,
+            device_root: pocketeer.device().map(|device| device.root().to_path_buf()),
+        }
+    }
 }
 
 /// What the Device page draws, as the worker last read it. A value that can't
@@ -384,7 +412,7 @@ struct WorkerState<'a> {
 
 impl WorkerState<'_> {
     fn send_games_page_data(&self, pocketeer: &Pocketeer) {
-        (self.send_message)(WorkerMessage::GamesPageChanged(games_page_data(
+        (self.send_message)(WorkerMessage::GamesPageChanged(GamesPageData::new(
             pocketeer,
             &self.orphan_saves,
         )));
@@ -645,7 +673,7 @@ impl CommandProgress<'_> {
     ) -> ControlFlow<()> {
         let target = report.subject.clone();
         self.reports.push(report);
-        (self.send_message)(WorkerMessage::GamesPageChanged(games_page_data(
+        (self.send_message)(WorkerMessage::GamesPageChanged(GamesPageData::new(
             pocketeer,
             self.orphan_saves,
         )));
@@ -686,32 +714,6 @@ fn command_summary(
     (summary, failed > 0)
 }
 
-fn games_page_data(pocketeer: &Pocketeer, orphan_saves: &OrphanSaves) -> GamesPageData {
-    let mut rows: Vec<GamesTableRow> = pocketeer
-        .game_rows()
-        .into_iter()
-        .map(GamesTableRow::Game)
-        .collect();
-    rows.extend(
-        orphan_saves
-            .in_library
-            .iter()
-            .cloned()
-            .map(GamesTableRow::OrphanSaveInLibrary),
-    );
-    rows.extend(
-        orphan_saves
-            .on_device
-            .iter()
-            .cloned()
-            .map(GamesTableRow::OrphanSaveOnDevice),
-    );
-    GamesPageData {
-        rows,
-        device_root: pocketeer.device().map(|device| device.root().to_path_buf()),
-    }
-}
-
 /// Tells the UI about `duplicates`, the copies a scan left out, if there are
 /// any.
 fn send_duplicates(
@@ -726,8 +728,8 @@ fn send_duplicates(
         let first = pocketeer
             .device()
             .and_then(|device| device.entry_for(&on_device.game));
-        let first = first.map_or(String::new(), device_ref);
-        format!("{} is the same game as {first}", device_ref(on_device))
+        let first = first.map_or(String::new(), ToString::to_string);
+        format!("{on_device} is the same game as {first}")
     });
     send_message(WorkerMessage::DuplicateGamesSkipped(lines.collect()));
 }

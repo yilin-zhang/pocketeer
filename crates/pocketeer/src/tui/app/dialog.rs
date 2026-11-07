@@ -3,7 +3,6 @@
 use pocketeer_core::{
     device::{DeviceEntry, OrphanDeviceSave},
     library::{LibrarySave, LocalEntry, OrphanLocalSave},
-    log::{device_orphan_ref, library_orphan_ref},
 };
 
 use super::keymap::{Binding, Group, Keymap};
@@ -140,7 +139,7 @@ impl Dialog {
             String::new(),
         ];
         lines.extend(Self::cut_short(
-            orphans.iter().map(library_orphan_ref).collect(),
+            orphans.iter().map(ToString::to_string).collect(),
         ));
         Self::removal(
             format!("Trash {}", Self::pluralized(orphans.len(), "orphan save")),
@@ -204,7 +203,7 @@ impl Dialog {
             String::new(),
         ];
         lines.extend(Self::cut_short(
-            orphans.iter().map(device_orphan_ref).collect(),
+            orphans.iter().map(ToString::to_string).collect(),
         ));
         Self::removal(
             format!(

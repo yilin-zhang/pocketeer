@@ -3,6 +3,7 @@
 
 use std::{
     collections::HashMap,
+    fmt,
     io::{self, Cursor, Read},
     path::{Component, Path, PathBuf},
     time::{Duration, SystemTime},
@@ -35,13 +36,6 @@ pub const SUPPORTED: &[&str] = &[
     "agg23.PC Engine",
     "agg23.SNES",
 ];
-
-/// The largest zip Pocketeer accepts. The cores above take a few MB, and the
-/// zips are hosted by third parties.
-const MOST_IN_A_ZIP: u64 = 64 * 1024 * 1024;
-
-/// How long a fetched index is used before it is fetched again.
-const INDEX_AGE: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledCore {
@@ -212,6 +206,14 @@ impl BiosRow {
     }
 }
 
+/// As `<platform>/<path>`, the way the command line, the log and messages
+/// name it.
+impl fmt::Display for BiosRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.platform.id(), self.path.display())
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PutBiosError {
     #[error("no core on the device loads this file")]
@@ -244,6 +246,9 @@ pub struct CoreIndex<S> {
 }
 
 impl<S: RemoteCoreSource> CoreIndex<S> {
+    /// How long a fetched index is used before it is fetched again.
+    const MAX_AGE: Duration = Duration::from_secs(60 * 60);
+
     /// The index kept at `path`, without going online.
     pub fn open(path: &Path, source: S) -> Self {
         let cores: Option<Vec<RemoteCore>> = fs::read(path)
@@ -266,7 +271,7 @@ impl<S: RemoteCoreSource> CoreIndex<S> {
     /// An old index is fetched again. If that fails, the cached copy is
     /// used, and if there is none the error is returned.
     pub fn supported_cores(&mut self) -> Result<Vec<RemoteCore>, BasicError> {
-        let fresh = |asked: SystemTime| asked.elapsed().is_ok_and(|age| age < INDEX_AGE);
+        let fresh = |asked: SystemTime| asked.elapsed().is_ok_and(|age| age < Self::MAX_AGE);
         if !self.asked.is_some_and(fresh) {
             self.asked = Some(SystemTime::now());
             match self.source.index() {
@@ -312,6 +317,10 @@ pub struct CoreZip {
 }
 
 impl CoreZip {
+    /// The largest zip Pocketeer accepts. The cores in [`SUPPORTED`] take a few
+    /// MB, and the zips are hosted by third parties.
+    const MOST_BYTES: u64 = 64 * 1024 * 1024;
+
     pub fn parse(bytes: Vec<u8>, id: &str) -> Result<Self, InstallCoreError> {
         let bad = |why: String| InstallCoreError::NotACoreZip(why);
         let mut archive =
@@ -340,7 +349,7 @@ impl CoreZip {
                 files.push((path, name));
             }
         }
-        if total > MOST_IN_A_ZIP {
+        if total > Self::MOST_BYTES {
             return Err(bad(format!("it holds {total} bytes")));
         }
         let Some((json_path, json_name)) = json_name else {
