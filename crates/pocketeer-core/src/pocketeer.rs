@@ -29,8 +29,8 @@ use crate::{
     platform::Platform,
     sources::{libretro::Libretro, openfpga::OpenFpga},
     transfer::{
-        self, PullGameOutcome, PullSaveError, PullSaveOutcome, PushGameError, PushGameOutcome,
-        PushSaveError, PushSaveOutcome,
+        self, PullGameOutcome, PullSaveOutcome, PushGameError, PushGameOutcome, PushSaveError,
+        PushSaveOutcome,
     },
 };
 
@@ -647,7 +647,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         )
     }
 
-    fn pull_save(&mut self, on_device: &DeviceEntry) -> Result<PullSaveOutcome, PullSaveError> {
+    fn pull_save(&mut self, on_device: &DeviceEntry) -> Result<PullSaveOutcome, BasicError> {
         let on_device = self.current_device_entry(on_device)?;
         let device = self.device.as_ref().ok_or(BasicError::NoDevice)?;
         transfer::pull_save(&mut self.library, device, &on_device)
@@ -1405,7 +1405,7 @@ mod tests {
             setup.pocketeer.scan_device().unwrap();
             assert!(matches!(
                 setup.pocketeer.pull_save(&on_device),
-                Err(PullSaveError::Other(BasicError::NotOnDevice))
+                Err(BasicError::NotOnDevice)
             ));
             fs::remove_file(setup.pocketeer.library().game_path(&local)).unwrap();
             setup.pocketeer.reload_library().unwrap();

@@ -41,14 +41,6 @@ pub enum PullSaveOutcome {
     NoSave,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum PullSaveError {
-    #[error("not in the library; pull the game first")]
-    NotInLibrary,
-    #[error(transparent)]
-    Other(#[from] BasicError),
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PushSaveOutcome {
     /// The version pushed.
@@ -59,8 +51,6 @@ pub enum PushSaveOutcome {
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PushSaveError {
-    #[error("not in the library")]
-    NotInLibrary,
     /// The device's save isn't in the library, so it was left alone.
     #[error("not pushed: the device's save isn't in the library")]
     NotBackedUp,
@@ -113,14 +103,14 @@ pub(crate) fn pull_save(
     library: &mut Library,
     device: &Device,
     on_device: &DeviceEntry,
-) -> Result<PullSaveOutcome, PullSaveError> {
+) -> Result<PullSaveOutcome, BasicError> {
     let from = device.save_path(on_device);
     if !from.is_file() {
         return Ok(PullSaveOutcome::NoSave);
     }
-    let Some(entry) = library.entry_for(&on_device.game) else {
-        return Err(PullSaveError::NotInLibrary);
-    };
+    let entry = library
+        .entry_for(&on_device.game)
+        .ok_or(BasicError::NotInLibrary)?;
     let (platform, name) = (entry.game.platform.clone(), entry.name.clone());
     Ok(match library.add_save(&platform, &name, &from)? {
         Some(_) => PullSaveOutcome::Pulled,
@@ -136,9 +126,9 @@ pub(crate) fn push_save(
     on_device: &DeviceEntry,
     version: &LibrarySave,
 ) -> Result<PushSaveOutcome, PushSaveError> {
-    let Some(entry) = library.entry_for(&on_device.game) else {
-        return Err(PushSaveError::NotInLibrary);
-    };
+    let entry = library
+        .entry_for(&on_device.game)
+        .ok_or(BasicError::NotInLibrary)?;
     let Some(file) = library.file_of_version(entry, version) else {
         return Err(PushSaveError::NoSuchVersion);
     };
@@ -176,7 +166,7 @@ mod tests {
     }
 
     impl Setup {
-        fn pull_save(&mut self) -> Result<PullSaveOutcome, PullSaveError> {
+        fn pull_save(&mut self) -> Result<PullSaveOutcome, BasicError> {
             pull_save(&mut self.library, &self.device, &self.on_device)
         }
 
@@ -262,7 +252,7 @@ mod tests {
                 &without_game.device,
                 &without_game.on_device,
             );
-            assert!(matches!(pulled, Err(PullSaveError::NotInLibrary)));
+            assert!(matches!(pulled, Err(BasicError::NotInLibrary)));
         }
 
         #[test]
@@ -317,7 +307,10 @@ mod tests {
             fs::remove_file(setup.library.root().join("roms/gba/Tetris.gba")).unwrap();
             setup.library.reload().unwrap();
             let pushed = setup.push_save(&kept);
-            assert!(matches!(pushed, Err(PushSaveError::NotInLibrary)));
+            assert!(matches!(
+                pushed,
+                Err(PushSaveError::Other(BasicError::NotInLibrary))
+            ));
         }
 
         #[test]

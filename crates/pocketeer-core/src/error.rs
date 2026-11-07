@@ -22,7 +22,7 @@ pub enum BasicError {
     /// The device no longer has the given game.
     #[error("the device doesn't have the game")]
     NotOnDevice,
-    /// The library no longer has the given game.
+    /// The library doesn't have the given game.
     #[error("the library doesn't have the game")]
     NotInLibrary,
     #[error("{url}: {source}")]

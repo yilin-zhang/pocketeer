@@ -28,15 +28,15 @@ use crate::{
         FetchCoverOutcome, ImportCoverError, ImportGameError, ImportGameOutcome, ImportSaveOutcome,
     },
     transfer::{
-        PullGameOutcome, PullSaveError, PullSaveOutcome, PushGameError, PushGameOutcome,
-        PushSaveError, PushSaveOutcome,
+        PullGameOutcome, PullSaveOutcome, PushGameError, PushGameOutcome, PushSaveError,
+        PushSaveOutcome,
     },
 };
 
 /// What was done, to what, and how it went.
 pub enum OperationReport {
     PullGame(DeviceEntry, Result<PullGameOutcome, AddGameError>),
-    PullSave(DeviceEntry, Result<PullSaveOutcome, PullSaveError>),
+    PullSave(DeviceEntry, Result<PullSaveOutcome, BasicError>),
     PushGame(LocalEntry, Result<PushGameOutcome, PushGameError>),
     PushSave(DeviceEntry, Result<PushSaveOutcome, PushSaveError>),
     FetchCover(LocalEntry, Result<FetchCoverOutcome, BasicError>),
@@ -164,10 +164,10 @@ impl fmt::Display for OperationReport {
             OperationReport::PullSave(_, Ok(PullSaveOutcome::NoSave)) => {
                 write!(f, "no save on the device")
             }
-            OperationReport::PullSave(_, Err(PullSaveError::Other(error))) => {
-                write!(f, "error: {error}")
+            OperationReport::PullSave(_, Err(error @ BasicError::NotInLibrary)) => {
+                write!(f, "{error}; pull the game first")
             }
-            OperationReport::PullSave(_, Err(error)) => write!(f, "{error}"),
+            OperationReport::PullSave(_, Err(error)) => write!(f, "error: {error}"),
 
             OperationReport::PushGame(_, Ok(PushGameOutcome::Pushed(entry))) => {
                 write!(f, "pushed to {}", device_ref(entry))
