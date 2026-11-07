@@ -842,7 +842,6 @@ impl App {
             KeyCode::Char('p') => self.send_for_device_rows(WorkerCommand::PullGames),
             KeyCode::Char('P') => self.send_for_library_rows(WorkerCommand::PushGames),
             KeyCode::Char('s') => self.send_for_device_rows(WorkerCommand::PullSaves),
-            KeyCode::Char('S') => self.push_saves(),
             KeyCode::Char('n') => self.prompt_for_name_in_library(),
             KeyCode::Char('N') => self.prompt_for_name_on_device(),
             KeyCode::Char('t') => self.propose_renames_to_standard_names(),
@@ -1496,21 +1495,6 @@ impl App {
         self.worker_handle.send(command(entries));
     }
 
-    /// Pushes the newest versions onto the target copies whose game is in the
-    /// library.
-    fn push_saves(&mut self) {
-        let targets = self.games.rows_to_act_on();
-        let entries: Vec<DeviceEntry> = targets
-            .iter()
-            .filter_map(|row| match row {
-                GamesTableRow::Game(GameRow::Both { on_device, .. }) => Some(on_device.clone()),
-                _ => None,
-            })
-            .collect();
-        let inapplicable = targets.len() - entries.len();
-        self.send_for_entries(entries, inapplicable, WorkerCommand::PushSaves, NOT_ON_BOTH);
-    }
-
     /// Pushes the version selected in the saves panel onto the selected row's
     /// copy.
     fn push_save_version(&mut self, selected: usize) {
@@ -1652,7 +1636,7 @@ fn help_dialog() -> Dialog {
         "Library   i import a game from a file; p pull the game; s back up the save",
         "          n rename; t rename to what the DATs call it; it asks",
         "          x game and cover to the system's trash",
-        "Device    P push the game; S push the newest save; N rename; E eject",
+        "Device    P push the game; N rename; E eject",
         "          X delete from the device: for good, it asks",
         "          On an orphan save, x and X remove the save.",
         "Covers    a download; c choose a file; d update the DATs, which name games",
@@ -2120,11 +2104,6 @@ mod tests {
             let (mut app, rx) = app();
             press(&mut app, "jp");
             let [WorkerCommand::PullGames(games)] = &sent(&rx)[..] else {
-                panic!()
-            };
-            assert_eq!(paths(games), [Path::new("Both.gba")]);
-            press(&mut app, "S");
-            let [WorkerCommand::PushSaves(games)] = &sent(&rx)[..] else {
                 panic!()
             };
             assert_eq!(paths(games), [Path::new("Both.gba")]);
@@ -2855,7 +2834,7 @@ mod tests {
                 last_lines(&terminal, 3),
                 [
                     " LIBRARY  i  import   p  pull   s  save   n  rename   t  standard   x  trash",
-                    " DEVICE               P  push   S  save   N  rename   E  eject      X  delete",
+                    " DEVICE               P  push             N  rename   E  eject      X  delete",
                     " GENERAL  ↵  saves    m  mark   d  DATs   r  reload   ?  help       q  quit",
                 ]
             );

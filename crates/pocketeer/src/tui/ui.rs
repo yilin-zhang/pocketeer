@@ -928,7 +928,7 @@ fn legend(app: &App) -> Legend {
             device: vec![
                 NO_KEY,
                 ("P", "push"),
-                ("S", "save"),
+                NO_KEY,
                 ("N", "rename"),
                 ("E", "eject"),
                 ("X", "delete"),

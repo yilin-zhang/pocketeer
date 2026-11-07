@@ -14,7 +14,7 @@ use pocketeer_core::{
     Pocketeer,
     cores::{BiosStatus, CoreRow, SUPPORTED},
     device::{Device, DeviceEntry},
-    library::{LocalEntry, OpenLibraryError},
+    library::{LibrarySave, LocalEntry, OpenLibraryError},
     log::{
         FrontEnd, LogEntry, bios_ref, device_orphan_ref, device_ref, library_orphan_ref,
         library_ref,
@@ -223,15 +223,13 @@ enum PushCommand {
         #[arg(required = true)]
         games: Vec<String>,
     },
-    /// Saves in the library, onto their games on the device. Pushes the newest
-    /// version, or the one given
+    /// A version of a save in the library, onto its game on the device
     Save {
-        /// Games in the library, as <platform>/<name>
-        #[arg(required = true)]
-        games: Vec<String>,
+        /// The game in the library, as <platform>/<name>
+        game: String,
         /// The version to push, as `pocketeer saves` shows it
         #[arg(long, value_name = "VERSION")]
-        at: Option<String>,
+        at: String,
     },
 }
 
@@ -436,9 +434,7 @@ fn run_command(cli: &Cli, command: &Command, format: PrintFormat) -> CliResult<(
         },
         Command::Push { what } => match what {
             PushCommand::Game { games } => open(DeviceUse::ScannedRequired)?.push_games(games),
-            PushCommand::Save { games, at } => {
-                open(DeviceUse::ScannedRequired)?.push_saves(games, at.as_deref())
-            }
+            PushCommand::Save { game, at } => open(DeviceUse::ScannedRequired)?.push_save(game, at),
         },
         Command::Import { what } => match what {
             ImportCommand::Game { paths, platform } => {
@@ -830,21 +826,14 @@ impl CliSession {
         self.run_batch(|pocketeer, on_logged| pocketeer.push_games(&games, on_logged))
     }
 
-    fn push_saves(&mut self, game_refs: &[String], at: Option<&str>) -> CliResult<()> {
-        let games = self.entries_in_library(game_refs)?;
+    fn push_save(&mut self, game_ref: &str, version_name: &str) -> CliResult<()> {
+        let local = self.local_entry(game_ref)?;
+        let version = version_named(game_ref, local, version_name)?;
         let device = self.pocketeer.device().expect("the device is open");
-        let copies = game_refs
-            .iter()
-            .zip(&games)
-            .map(|(game_ref, game)| {
-                let copy = device.entry_for(&game.game).cloned();
-                copy.ok_or_else(|| not_on_device(game_ref))
-            })
-            .collect::<CliResult<Vec<DeviceEntry>>>()?;
-        self.run_batch(|pocketeer, on_logged| match at {
-            Some(at) => pocketeer.push_saves_named(&copies, at, on_logged),
-            None => pocketeer.push_saves(&copies, on_logged),
-        })
+        let copy = device.entry_for(&local.game).cloned();
+        let copy = copy.ok_or_else(|| not_on_device(game_ref))?;
+        let versions = [(copy, version)];
+        self.run_batch(|pocketeer, on_logged| pocketeer.push_save_versions(&versions, on_logged))
     }
 
     fn import_games(&mut self, paths: &[PathBuf], platform: Option<&str>) -> CliResult<()> {
@@ -872,9 +861,21 @@ impl CliSession {
 
     fn trash_saves(&mut self, game_refs: &[String], at: Option<&str>) -> CliResult<()> {
         let games = self.entries_in_library(game_refs)?;
-        self.run_batch(|pocketeer, on_logged| match at {
-            Some(at) => pocketeer.trash_saves_named(&games, at, on_logged),
-            None => pocketeer.trash_saves_in_library(&games, on_logged),
+        let Some(version_name) = at else {
+            return self.run_batch(|pocketeer, on_logged| {
+                pocketeer.trash_saves_in_library(&games, on_logged)
+            });
+        };
+        let versions = game_refs
+            .iter()
+            .zip(games)
+            .map(|(game_ref, game)| {
+                let version = version_named(game_ref, &game, version_name)?;
+                Ok((game, version))
+            })
+            .collect::<CliResult<Vec<(LocalEntry, LibrarySave)>>>()?;
+        self.run_batch(|pocketeer, on_logged| {
+            pocketeer.trash_save_versions_in_library(&versions, on_logged)
         })
     }
 
@@ -1280,6 +1281,16 @@ impl CliSession {
 
 fn not_on_device(game_ref: &str) -> CliError {
     CliError::CouldNotStart(format!("{game_ref}: not on the device"))
+}
+
+/// The version of `local`'s save called `version_name`, as `saves` shows it.
+fn version_named(game_ref: &str, local: &LocalEntry, version_name: &str) -> CliResult<LibrarySave> {
+    let saves = local.save.as_ref();
+    let version = saves.and_then(|saves| saves.version_named(version_name));
+    version.cloned().ok_or_else(|| {
+        let message = format!("{game_ref}: no such version, as `pocketeer saves` shows them");
+        CliError::CouldNotStart(message)
+    })
 }
 
 /// The orphan saves named in `orphan_refs`, as `orphan-saves` shows them.

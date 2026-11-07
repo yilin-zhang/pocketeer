@@ -299,12 +299,12 @@ mod batches {
     #[test]
     fn continues_after_failure_and_exits_1() {
         let setup = Setup::new();
-        setup.in_library("roms/gba/None.gba", b"none");
         setup.in_library("roms/gba/Mine.gba", b"mine");
-        setup.in_library("saves/gba/Mine/a.sav", b"kept");
         setup.on_device("Assets/gba/common/None.gba", b"none");
+        setup.on_device("Saves/gba/common/None.sav", b"save");
         setup.on_device("Assets/gba/common/Mine.gba", b"mine");
-        let ran = setup.run(&["--json", "push", "save", "gba/None.gba", "gba/Mine.gba"]);
+        setup.on_device("Saves/gba/common/Mine.sav", b"save");
+        let ran = setup.run(&["--json", "pull", "save", "gba/None.gba", "gba/Mine.gba"]);
         assert_eq!(ran.code, 1);
         let value = ran.json();
         assert_eq!(value["ok"], false);
@@ -547,14 +547,33 @@ mod versions {
     }
 
     #[test]
-    fn exits_1_when_no_version_at_given_time() {
+    fn exits_2_without_version_or_with_unknown_one() {
         let setup = with_a_version();
+        let ran = setup.run(&["push", "save", "gba/Mine.gba"]);
+        assert_eq!(ran.code, 2);
+        assert_eq!(ran.stdout, "");
         let ran = setup.run(&["push", "save", "gba/Mine.gba", "--at", "never"]);
-        assert_eq!(ran.code, 1);
-        assert_eq!(ran.stdout, "gba/Mine.gba: the library has no such save\n");
+        assert_eq!(ran.code, 2);
+        assert_eq!(
+            ran.stderr,
+            "error: gba/Mine.gba: no such version, as `pocketeer saves` shows them\n"
+        );
         let ran = setup.run(&["--json", "trash", "save", "gba/Mine.gba", "--at", "never"]);
-        assert_eq!(ran.code, 1);
-        assert_eq!(ran.json()["data"][0]["version"], "never");
+        assert_eq!(ran.code, 2);
+        assert_eq!(ran.json()["ok"], false);
+        assert!(setup.library().join("saves/gba/Mine/a.sav").exists());
+    }
+
+    #[test]
+    fn pushes_version_by_name() {
+        let setup = with_a_version();
+        let ran = setup.run(&["push", "save", "gba/Mine.gba", "--at", "a"]);
+        assert_eq!(ran.code, 0);
+        assert_eq!(ran.stdout, "gba/Mine.gba: save a pushed\n");
+        assert_eq!(
+            fs::read(setup.device().join("Saves/gba/common/Mine.sav")).unwrap(),
+            b"kept"
+        );
     }
 
     #[test]

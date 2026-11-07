@@ -653,65 +653,6 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         transfer::pull_save(&mut self.library, device, &on_device)
     }
 
-    /// Pushes the newest version of each game's save.
-    pub fn push_saves(
-        &mut self,
-        games: &[DeviceEntry],
-        on_logged: impl FnMut(&Self, LogEntry) -> ControlFlow<()>,
-    ) -> BatchResult {
-        self.for_each_item(
-            games,
-            |pocketeer, game| {
-                OperationReport::PushSave(game.clone(), pocketeer.push_newest_save(game))
-            },
-            on_logged,
-        )
-    }
-
-    fn push_newest_save(&mut self, game: &DeviceEntry) -> Result<PushSaveOutcome, PushSaveError> {
-        let version = self.newest_save(&game.game)?;
-        self.push_save(game, &version)
-    }
-
-    fn newest_save(&self, game: &Game) -> Result<LibrarySave, PushSaveError> {
-        let entry = self.library.entry_for(game);
-        let entry = entry.ok_or(PushSaveError::NotInLibrary)?;
-        let saves = entry.save.as_ref().ok_or(PushSaveError::NoSuchVersion)?;
-        Ok(saves.newest().clone())
-    }
-
-    /// Pushes the version called `version_name` of each game's save.
-    pub fn push_saves_named(
-        &mut self,
-        games: &[DeviceEntry],
-        version_name: &str,
-        on_logged: impl FnMut(&Self, LogEntry) -> ControlFlow<()>,
-    ) -> BatchResult {
-        self.for_each_item(
-            games,
-            |pocketeer, game| {
-                OperationReport::PushSave(
-                    game.clone(),
-                    pocketeer.push_save_named(game, version_name),
-                )
-            },
-            on_logged,
-        )
-    }
-
-    fn push_save_named(
-        &mut self,
-        game: &DeviceEntry,
-        version_name: &str,
-    ) -> Result<PushSaveOutcome, PushSaveError> {
-        let local = self.library.entry_for(&game.game);
-        let local = local.ok_or(PushSaveError::NotInLibrary)?;
-        let saves = local.save.as_ref().ok_or(PushSaveError::NoSuchVersion)?;
-        let version = saves.version_named(version_name);
-        let version = version.ok_or(PushSaveError::NoSuchVersion)?.clone();
-        self.push_save(game, &version)
-    }
-
     /// Pushes each version to the game paired with it.
     pub fn push_save_versions(
         &mut self,
@@ -793,23 +734,6 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     ) -> Result<TrashSaveAllOutcome, BasicError> {
         let local = self.current_local_entry(local)?;
         self.library.trash_all_saves(&local)
-    }
-
-    /// Trashes the version called `version_name` of each game's save.
-    pub fn trash_saves_named(
-        &mut self,
-        games: &[LocalEntry],
-        version_name: &str,
-        on_logged: impl FnMut(&Self, LogEntry) -> ControlFlow<()>,
-    ) -> BatchResult {
-        self.for_each_item(
-            games,
-            |pocketeer, game| {
-                let result = pocketeer.trash_save_version(game, version_name);
-                OperationReport::TrashSaveVersion(game.clone(), version_name.to_string(), result)
-            },
-            on_logged,
-        )
     }
 
     /// Trashes each version of the save of the game paired with it.
@@ -1490,17 +1414,6 @@ mod tests {
                 Err(BasicError::NotInLibrary)
             ));
         }
-
-        #[test]
-        fn logs_missing_version_when_pushing() {
-            let mut setup = setup(
-                &[("Assets/gba/common/Tetris.gba", b"hello")],
-                &[("roms/gba/Tetris (World).gba", b"hello")],
-            );
-            let on_device = setup.first_on_device();
-            let lines = lines_of(|on_logged| setup.pocketeer.push_saves(&[on_device], on_logged));
-            assert_eq!(lines, ["gba/Tetris.gba: the library has no such save"]);
-        }
     }
 
     mod batches {
@@ -1605,44 +1518,20 @@ mod tests {
         }
 
         #[test]
-        fn pushes_newest_by_default() {
-            let (mut setup, on_device, _) = with_versions();
-            let root = setup.pocketeer.library().root().to_path_buf();
-            put_at(&root, "saves/gba/A/two.sav", b"two", 2_000);
-            setup.pocketeer.reload_library().unwrap();
-            let lines =
-                lines_of(|on_logged| setup.pocketeer.push_saves(&on_device[..1], on_logged));
-            assert_eq!(lines, ["gba/A.gba: save two pushed"]);
-        }
-
-        #[test]
-        fn pushes_version_by_name() {
-            let (mut setup, on_device, _) = with_versions();
-            let lines = lines_of(|on_logged| {
-                setup
-                    .pocketeer
-                    .push_saves_named(&on_device[..1], "one", on_logged)
-            });
-            assert_eq!(lines, ["gba/A.gba: save one pushed"]);
-        }
-
-        #[test]
-        fn logs_missing_version_when_trashing() {
+        fn logs_version_gone_since_it_was_listed() {
             let (mut setup, _, local) = with_versions();
+            let version = local[0].save.as_ref().unwrap().newest().clone();
+            let root = setup.pocketeer.library().root().to_path_buf();
+            fs::remove_file(root.join("saves/gba/A/one.sav")).unwrap();
+            let versions = [(local[0].clone(), version)];
             let lines = lines_of(|on_logged| {
                 setup
                     .pocketeer
-                    .trash_saves_named(&local, "never", on_logged)
+                    .trash_save_versions_in_library(&versions, on_logged)
             });
-            assert_eq!(
-                lines,
-                [
-                    "gba/A.gba: the library has no such save",
-                    "gba/B.gba: the library has no such save"
-                ]
-            );
+            assert_eq!(lines, ["gba/A.gba: the library has no such save"]);
             let logged = log_lines(&setup);
-            assert_eq!(logged[0]["version"], "never");
+            assert_eq!(logged[0]["version"], "one");
             assert_eq!(logged[0]["ok"], false);
         }
 
@@ -1652,12 +1541,12 @@ mod tests {
             let root = setup.pocketeer.library().root().to_path_buf();
             put_at(&root, "saves/gba/A/two.sav", b"two", 1_000);
             setup.pocketeer.reload_library().unwrap();
+            let local = setup.pocketeer.library().entries()[0].clone();
             for name in ["two", "one"] {
-                let lines = lines_of(|on_logged| {
-                    setup
-                        .pocketeer
-                        .push_saves_named(&on_device[..1], name, on_logged)
-                });
+                let version = local.save.as_ref().unwrap().version_named(name).unwrap();
+                let versions = [(on_device[0].clone(), version.clone())];
+                let lines =
+                    lines_of(|on_logged| setup.pocketeer.push_save_versions(&versions, on_logged));
                 assert_eq!(lines, [format!("gba/A.gba: save {name} pushed")]);
             }
         }

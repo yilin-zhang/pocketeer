@@ -31,8 +31,6 @@ pub enum WorkerCommand {
     PullGames(Vec<DeviceEntry>),
     PullSaves(Vec<DeviceEntry>),
     PushGames(Vec<LocalEntry>),
-    /// The newest version of each game's save.
-    PushSaves(Vec<DeviceEntry>),
     PushSaveVersion(DeviceEntry, LibrarySave),
     FetchCovers(Vec<LocalEntry>),
     TrashGames(Vec<LocalEntry>),
@@ -70,7 +68,6 @@ impl WorkerCommand {
             WorkerCommand::PullGames(_) => "pulling games",
             WorkerCommand::PullSaves(_) => "backing up saves",
             WorkerCommand::PushGames(_) => "pushing games",
-            WorkerCommand::PushSaves(_) => "pushing saves",
             WorkerCommand::PushSaveVersion(..) => "pushing a save",
             WorkerCommand::FetchCovers(_) => "downloading covers",
             WorkerCommand::ImportGame(..) => "importing games",
@@ -100,7 +97,6 @@ impl WorkerCommand {
             // arms only because the lists hold different types.
             WorkerCommand::PullGames(games)
             | WorkerCommand::PullSaves(games)
-            | WorkerCommand::PushSaves(games)
             | WorkerCommand::DeleteGames(games)
             | WorkerCommand::DeleteSaves(games) => games.len(),
             WorkerCommand::PushGames(games)
@@ -533,11 +529,6 @@ impl WorkerState<'_> {
             }
             WorkerCommand::PushGames(games) => {
                 pocketeer.push_games(&games, |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                })
-            }
-            WorkerCommand::PushSaves(games) => {
-                pocketeer.push_saves(&games, |pocketeer, log_entry| {
                     command_progress.record_finished_target(pocketeer, log_entry.report)
                 })
             }
