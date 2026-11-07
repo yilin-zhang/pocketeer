@@ -1225,12 +1225,7 @@ fn draw_dialog(frame: &mut Frame, app: &App) {
     let longest = dialog.lines.iter().map(|line| line.chars().count()).max();
     let width = longest.unwrap_or(0).max(40) as u16 + 6;
     let height = dialog.lines.len() as u16 + 5;
-    let border = if dialog.is_irreversible {
-        Palette::Bad
-    } else {
-        Palette::Muted
-    };
-    let inner = draw_window(frame, width, height, &dialog.title, border);
+    let inner = draw_window(frame, width, height, &dialog.title, Palette::Muted);
     let [text, buttons] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
     let lines: Vec<Line> = dialog
@@ -1244,10 +1239,12 @@ fn draw_dialog(frame: &mut Frame, app: &App) {
         if i > 0 {
             spans.push(Span::raw("  "));
         }
-        let style = if i == dialog.focused_button {
-            selected_style()
-        } else {
-            Palette::Muted.style().bg(Palette::Keycap.color())
+        // A button that removes something is red, like the keys that open it.
+        let style = match (i == dialog.focused_button, button.is_removal) {
+            (true, false) => selected_style(),
+            (true, true) => selected_style().bg(Palette::Bad.color()),
+            (false, false) => Palette::Muted.style().bg(Palette::Keycap.color()),
+            (false, true) => Palette::Ink.style().bg(Palette::KeyRemove.color()),
         };
         spans.push(Span::styled(format!(" {} ", button.label), style));
     }

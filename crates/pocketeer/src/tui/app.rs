@@ -65,11 +65,26 @@ pub enum DeviceStatus {
 pub struct DialogButton {
     pub label: &'static str,
     pub command: Option<WorkerCommand>,
+    /// Whether it removes something, to the trash or for good. Such a button
+    /// is drawn in red, and a dialog with one starts on Cancel.
+    pub is_removal: bool,
 }
 
 impl DialogButton {
     fn new(label: &'static str, command: Option<WorkerCommand>) -> Self {
-        Self { label, command }
+        Self {
+            label,
+            command,
+            is_removal: false,
+        }
+    }
+
+    fn removal(label: &'static str, command: WorkerCommand) -> Self {
+        Self {
+            label,
+            command: Some(command),
+            is_removal: true,
+        }
     }
 }
 
@@ -80,8 +95,6 @@ pub struct Dialog {
     /// The last button has no command and cancels.
     pub buttons: Vec<DialogButton>,
     pub focused_button: usize,
-    /// Whether the action can't be undone.
-    pub is_irreversible: bool,
 }
 
 // ============================================================================
@@ -972,11 +985,10 @@ impl App {
                 "Its settings and saves stay on the device.".to_string(),
             ],
             buttons: vec![
-                DialogButton::new("Delete", Some(WorkerCommand::RemoveCores(vec![id]))),
+                DialogButton::removal("Delete", WorkerCommand::RemoveCores(vec![id])),
                 DialogButton::new("Cancel", None),
             ],
             focused_button: 1,
-            is_irreversible: true,
         });
     }
 
@@ -1264,11 +1276,10 @@ impl App {
             title: format!("Trash {}", pluralized(entries.len(), "game")),
             lines,
             buttons: vec![
-                DialogButton::new("Trash", Some(WorkerCommand::TrashGames(entries))),
+                DialogButton::removal("Trash", WorkerCommand::TrashGames(entries)),
                 DialogButton::new("Cancel", None),
             ],
-            focused_button: 0,
-            is_irreversible: false,
+            focused_button: 1,
         });
     }
 
@@ -1309,11 +1320,10 @@ impl App {
             title: format!("Trash {}", pluralized(orphans.len(), "orphan save")),
             lines,
             buttons: vec![
-                DialogButton::new("Trash", Some(WorkerCommand::TrashOrphanSaves(orphans))),
+                DialogButton::removal("Trash", WorkerCommand::TrashOrphanSaves(orphans)),
                 DialogButton::new("Cancel", None),
             ],
             focused_button: 1,
-            is_irreversible: false,
         });
     }
 
@@ -1336,14 +1346,10 @@ impl App {
                 version.timestamp()
             )],
             buttons: vec![
-                DialogButton::new(
-                    "Trash",
-                    Some(WorkerCommand::TrashSaveVersion(local, version)),
-                ),
+                DialogButton::removal("Trash", WorkerCommand::TrashSaveVersion(local, version)),
                 DialogButton::new("Cancel", None),
             ],
-            focused_button: 0,
-            is_irreversible: false,
+            focused_button: 1,
         });
     }
 
@@ -1389,11 +1395,10 @@ impl App {
             ),
             lines,
             buttons: vec![
-                DialogButton::new("Delete", Some(WorkerCommand::DeleteGames(entries))),
+                DialogButton::removal("Delete", WorkerCommand::DeleteGames(entries)),
                 DialogButton::new("Cancel", None),
             ],
-            focused_button: 0,
-            is_irreversible: true,
+            focused_button: 1,
         });
     }
 
@@ -1419,11 +1424,10 @@ impl App {
             ),
             lines,
             buttons: vec![
-                DialogButton::new("Delete", Some(WorkerCommand::DeleteOrphanSaves(orphans))),
+                DialogButton::removal("Delete", WorkerCommand::DeleteOrphanSaves(orphans)),
                 DialogButton::new("Cancel", None),
             ],
             focused_button: 1,
-            is_irreversible: true,
         });
     }
 
@@ -1447,11 +1451,10 @@ impl App {
             title: "Delete a save from the device".to_string(),
             lines,
             buttons: vec![
-                DialogButton::new("Delete", Some(WorkerCommand::DeleteSaves(entries))),
+                DialogButton::removal("Delete", WorkerCommand::DeleteSaves(entries)),
                 DialogButton::new("Cancel", None),
             ],
             focused_button: 1,
-            is_irreversible: true,
         });
     }
 
@@ -1601,7 +1604,6 @@ fn renames_dialog(renames: Vec<(LocalEntry, String)>) -> Dialog {
             DialogButton::new("Cancel", None),
         ],
         focused_button: 0,
-        is_irreversible: false,
     }
 }
 
@@ -1617,7 +1619,6 @@ fn duplicates_dialog(duplicates: Vec<String>) -> Dialog {
         lines,
         buttons: vec![DialogButton::new("Close", None)],
         focused_button: 0,
-        is_irreversible: false,
     }
 }
 
@@ -1673,7 +1674,6 @@ fn help_dialog() -> Dialog {
         lines: lines.iter().map(ToString::to_string).collect(),
         buttons: vec![DialogButton::new("Close", None)],
         focused_button: 0,
-        is_irreversible: false,
     }
 }
 
@@ -1901,8 +1901,7 @@ mod tests {
             };
             assert_eq!(game.path, Path::new("Both.gba"));
             assert_eq!(version, &app.games.selected_save_versions()[1]);
-            press(&mut app, "x");
-            press(&mut app, "y");
+            press(&mut app, "xh\n");
             let [WorkerCommand::TrashSaveVersion(game, version)] = &sent(&rx)[..] else {
                 panic!()
             };
@@ -2092,7 +2091,7 @@ mod tests {
             press(&mut app, "mff");
             assert_eq!(visible_names(&app), ["Both.gba", "Hack.gba", "Gone.sav"]);
             assert_eq!(app.games.marked_count(), 1);
-            press(&mut app, "x\n");
+            press(&mut app, "xh\n");
             let [WorkerCommand::TrashGames(games)] = &sent(&rx)[..] else {
                 panic!("expected the marked game to be trashed");
             };
@@ -2226,15 +2225,19 @@ mod tests {
         }
 
         #[test]
-        fn shift_x_confirms_before_deleting_game() {
+        fn shift_x_confirms_before_deleting_game_and_defaults_to_cancel() {
             let (mut app, rx) = app();
             press(&mut app, "jjX");
-            assert!(app.dialog().unwrap().is_irreversible);
-            assert!(sent(&rx).is_empty());
-            press(&mut app, "\x1b");
+            let dialog = app.dialog().unwrap();
+            assert!(dialog.buttons[0].is_removal);
+            assert_eq!(dialog.focused_button, 1);
+            press(&mut app, "\n");
             assert!(app.dialog().is_none());
             assert!(sent(&rx).is_empty());
-            press(&mut app, "X\n");
+            press(&mut app, "X\x1b");
+            assert!(app.dialog().is_none());
+            assert!(sent(&rx).is_empty());
+            press(&mut app, "Xh\n");
             assert!(matches!(sent(&rx)[..], [WorkerCommand::DeleteGames(_)]));
         }
 
@@ -2243,7 +2246,7 @@ mod tests {
             let (mut app, rx) = app();
             press(&mut app, "jjjX");
             let dialog = app.dialog().unwrap();
-            assert!(dialog.is_irreversible);
+            assert!(dialog.buttons[0].is_removal);
             assert_eq!(dialog.focused_button, 1);
             press(&mut app, "\n");
             assert!(sent(&rx).is_empty());
@@ -2259,7 +2262,7 @@ mod tests {
             let (mut app, rx) = app();
             press(&mut app, "j\nX");
             let dialog = app.dialog().unwrap();
-            assert!(dialog.is_irreversible);
+            assert!(dialog.buttons[0].is_removal);
             assert_eq!(dialog.focused_button, 1);
             press(&mut app, "\n");
             assert!(sent(&rx).is_empty());
@@ -2268,12 +2271,16 @@ mod tests {
         }
 
         #[test]
-        fn x_lists_games_before_trashing() {
+        fn x_lists_games_before_trashing_and_defaults_to_cancel() {
             let (mut app, rx) = app();
             press(&mut app, "x");
             let dialog = app.dialog().unwrap();
             assert!(dialog.lines.iter().any(|line| line == "Alpha.gba"));
+            assert!(dialog.buttons[0].is_removal);
+            assert_eq!(dialog.focused_button, 1);
             press(&mut app, "y");
+            assert!(sent(&rx).is_empty());
+            press(&mut app, "xhy");
             assert!(matches!(sent(&rx)[..], [WorkerCommand::TrashGames(_)]));
         }
     }
@@ -2662,7 +2669,7 @@ mod tests {
             let (mut app, rx) = on_cores_page();
             press(&mut app, "jX");
             let dialog = app.dialog().unwrap();
-            assert!(dialog.is_irreversible);
+            assert!(dialog.buttons[0].is_removal);
             assert_eq!(dialog.focused_button, 1);
             press(&mut app, "\n");
             assert_eq!(sent(&rx), []);
