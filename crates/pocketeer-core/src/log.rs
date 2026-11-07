@@ -20,10 +20,12 @@ use crate::{
         RenameOnDeviceError,
     },
     error::BasicError,
-    library::{AddGameError, LocalEntry, OrphanLocalSave, RenameInLibraryError},
+    library::{
+        AddGameError, LocalEntry, OrphanLocalSave, RenameInLibraryError, TrashOrphanSaveError,
+        TrashSaveAllOutcome, TrashSaveError,
+    },
     pocketeer::{
         FetchCoverOutcome, ImportCoverError, ImportGameError, ImportGameOutcome, ImportSaveOutcome,
-        TrashOrphanSaveError, TrashSaveAllOutcome, TrashSaveError,
     },
     transfer::{
         PullGameOutcome, PullSaveError, PullSaveOutcome, PushGameError, PushGameOutcome,
@@ -181,7 +183,7 @@ impl fmt::Display for OperationReport {
             }
 
             OperationReport::PushSave(_, Ok(PushSaveOutcome::Pushed(save))) => {
-                write!(f, "save {} pushed", save.timestamp())
+                write!(f, "save {} pushed", save.name)
             }
             OperationReport::PushSave(_, Ok(PushSaveOutcome::AlreadyThere)) => {
                 write!(f, "the device has this save already")
@@ -189,10 +191,9 @@ impl fmt::Display for OperationReport {
             OperationReport::PushSave(_, Err(error @ PushSaveError::NotBackedUp)) => {
                 write!(f, "{error}; back it up first")
             }
-            OperationReport::PushSave(
-                _,
-                Err(error @ (PushSaveError::Other(_) | PushSaveError::AmbiguousVersion { .. })),
-            ) => write!(f, "error: {error}"),
+            OperationReport::PushSave(_, Err(PushSaveError::Other(error))) => {
+                write!(f, "error: {error}")
+            }
             OperationReport::PushSave(_, Err(error)) => write!(f, "{error}"),
 
             OperationReport::FetchCover(_, Ok(FetchCoverOutcome::Fetched)) => {
@@ -231,7 +232,7 @@ impl fmt::Display for OperationReport {
             }
 
             OperationReport::ImportSave(_, _, Ok(ImportSaveOutcome::Imported(save))) => {
-                write!(f, "save {} imported", save.timestamp())
+                write!(f, "save {} imported", save.name)
             }
             OperationReport::ImportSave(_, _, Ok(ImportSaveOutcome::AlreadyHad)) => {
                 write!(f, "the library has this save already")
@@ -253,11 +254,9 @@ impl fmt::Display for OperationReport {
             OperationReport::TrashSaveAll(_, Ok(TrashSaveAllOutcome::NoSave)) => {
                 write!(f, "no save in the library")
             }
-            OperationReport::TrashSaveVersion(
-                _,
-                _,
-                Err(error @ (TrashSaveError::Other(_) | TrashSaveError::AmbiguousVersion { .. })),
-            ) => write!(f, "error: {error}"),
+            OperationReport::TrashSaveVersion(_, _, Err(TrashSaveError::Other(error))) => {
+                write!(f, "error: {error}")
+            }
             OperationReport::TrashSaveVersion(_, _, Err(error)) => write!(f, "{error}"),
             OperationReport::TrashOrphanSave(_, Err(TrashOrphanSaveError::Other(error))) => {
                 write!(f, "error: {error}")
@@ -370,7 +369,7 @@ impl LogEntry {
                 json["device"] = json!(device_ref(entry));
             }
             OperationReport::PushSave(_, Ok(PushSaveOutcome::Pushed(save))) => {
-                json["version"] = json!(save.timestamp());
+                json["version"] = json!(save.name);
             }
             OperationReport::TrashSaveVersion(_, version, _) => {
                 json["version"] = json!(version);
@@ -402,7 +401,7 @@ impl LogEntry {
             OperationReport::ImportSave(_, from, done) => {
                 json["from"] = json!(from.display().to_string());
                 if let Ok(ImportSaveOutcome::Imported(save)) = done {
-                    json["version"] = json!(save.timestamp());
+                    json["version"] = json!(save.name);
                 }
             }
             _ => {}

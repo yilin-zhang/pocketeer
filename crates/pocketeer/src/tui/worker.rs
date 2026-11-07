@@ -17,8 +17,7 @@ use pocketeer_core::{
     Pocketeer,
     cores::{BiosRow, CoreRow},
     device::{Device, DeviceEntry, DiskSpace, Firmware, OrphanDeviceSave},
-    game::Save,
-    library::{LocalEntry, OrphanLocalSave},
+    library::{LibrarySave, LocalEntry, OrphanLocalSave},
     log::{FrontEnd, OperationReport, device_ref},
     platform::Platform,
     pocketeer::GameRow,
@@ -34,7 +33,7 @@ pub enum WorkerCommand {
     PushGames(Vec<LocalEntry>),
     /// The newest version of each game's save.
     PushSaves(Vec<DeviceEntry>),
-    PushSaveVersion(DeviceEntry, Save),
+    PushSaveVersion(DeviceEntry, LibrarySave),
     FetchCovers(Vec<LocalEntry>),
     TrashGames(Vec<LocalEntry>),
     /// The file, and the platform if one was chosen. Otherwise its extension
@@ -42,7 +41,7 @@ pub enum WorkerCommand {
     ImportGame(PathBuf, Option<Platform>),
     ImportSave(LocalEntry, PathBuf),
     ImportCover(LocalEntry, PathBuf),
-    TrashSaveVersion(LocalEntry, Save),
+    TrashSaveVersion(LocalEntry, LibrarySave),
     TrashOrphanSaves(Vec<OrphanLocalSave>),
     DeleteGames(Vec<DeviceEntry>),
     DeleteSaves(Vec<DeviceEntry>),

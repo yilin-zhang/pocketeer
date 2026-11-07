@@ -704,7 +704,7 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
         Some(GamesTableRow::OrphanSaveInLibrary(orphan)) => {
             lines.push(labeled_text("Saves of", orphan.stem.clone()));
             lines.push(labeled_text("Kept", orphan.save.iter().count().to_string()));
-            lines.push(labeled_text("Newest", orphan.save.current.timestamp()));
+            lines.push(labeled_text("Newest", orphan.save.newest().name.clone()));
             lines.push(Line::default());
             lines.push(Line::from(Palette::Muted.span(
                 "The library has no game of this name. A game put there under it has them again.",
@@ -747,7 +747,7 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version_index: 
         Some(save) => {
             let kept = versions
                 .iter()
-                .any(|version| version.has_same_contents_as(save));
+                .any(|version| version.save.has_same_contents_as(save));
             let state = if kept {
                 Palette::Good.span("  backed up")
             } else {
@@ -775,7 +775,7 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version_index: 
         .map(|(i, version)| {
             let is_on_device = on_device
                 .as_ref()
-                .is_some_and(|device_save| device_save.has_same_contents_as(version));
+                .is_some_and(|device_save| device_save.has_same_contents_as(&version.save));
             let note = match (i, is_on_device) {
                 (0, true) => "newest, on the device",
                 (0, false) => "newest",
@@ -783,18 +783,20 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version_index: 
                 _ => "",
             };
             TableRow::new(vec![
-                Cell::from(version.timestamp()),
-                Cell::from(Text::from(format!("{} bytes", version.size)).right_aligned()),
+                Cell::from(version.name.clone()),
+                Cell::from(Text::from(format!("{} bytes", version.save.size)).right_aligned()),
                 Cell::from(note).style(Palette::Muted.style()),
             ])
         })
         .collect();
+    // The name is what tells versions apart, so it is never cut; the note
+    // gives way first in a narrow panel.
     let table = Table::new(
         rows,
         [
-            Constraint::Length(20),
-            Constraint::Length(13),
-            Constraint::Min(6),
+            Constraint::Min(21),
+            Constraint::Length(12),
+            Constraint::Min(0),
         ],
     )
     .header(

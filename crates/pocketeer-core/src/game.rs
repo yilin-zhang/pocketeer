@@ -117,46 +117,6 @@ impl Save {
     }
 }
 
-/// A save as the library keeps it, with the current backup and the ones it
-/// replaced.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SaveHistory {
-    pub current: Save,
-    /// Newest first.
-    pub versions: Vec<Save>,
-}
-
-impl SaveHistory {
-    /// Sorts `saves` newest first. Returns none if there are none.
-    pub fn from_saves(mut saves: Vec<Save>) -> Option<Self> {
-        saves.sort_by_key(|save| std::cmp::Reverse(save.modified));
-        let mut saves = saves.into_iter();
-        Some(Self {
-            current: saves.next()?,
-            versions: saves.collect(),
-        })
-    }
-
-    /// Every version, newest first.
-    pub fn iter(&self) -> impl Iterator<Item = &Save> {
-        std::iter::once(&self.current).chain(&self.versions)
-    }
-
-    /// The versions written at `timestamp`, in the format of
-    /// [`Save::timestamp`]. That is usually one or none, and rarely several
-    /// written in the same second.
-    pub fn written_at(&self, timestamp: &str) -> Vec<&Save> {
-        self.iter()
-            .filter(|save| save.timestamp() == timestamp)
-            .collect()
-    }
-
-    pub fn contains(&self, save: &Save) -> bool {
-        self.iter()
-            .any(|version| version.has_same_contents_as(save))
-    }
-}
-
 /// Skips the 16 bytes of an iNES header and returns whether that is what they
 /// were.
 fn skip_ines_header(file: &mut File) -> io::Result<bool> {
@@ -188,7 +148,6 @@ fn hash_rom(mut file: File) -> io::Result<Rom> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::files::testing::at;
 
     mod renaming {
         use super::*;
@@ -274,39 +233,5 @@ mod tests {
         // Without a header, all of it is the ROM.
         let bare = file(b"hello");
         assert_eq!(rom(&Game::read(Platform::Nes, bare.path()).unwrap()), hello);
-    }
-
-    #[test]
-    fn finds_versions_by_write_time() {
-        let history = SaveHistory::from_saves(vec![
-            Save::from_bytes(b"a", at(1)),
-            Save::from_bytes(b"b", at(2)),
-            Save::from_bytes(b"c", at(2)),
-        ])
-        .unwrap();
-        assert_eq!(
-            history.written_at("1970-01-01T00-00-01"),
-            [&Save::from_bytes(b"a", at(1))]
-        );
-        assert_eq!(history.written_at("1970-01-01T00-00-02").len(), 2);
-        assert_eq!(
-            history.written_at("1970-01-01T00-00-09"),
-            Vec::<&Save>::new()
-        );
-    }
-
-    #[test]
-    fn sorts_history_newest_first() {
-        let history = SaveHistory::from_saves(vec![
-            Save::from_bytes(b"a", at(1)),
-            Save::from_bytes(b"b", at(3)),
-            Save::from_bytes(b"c", at(2)),
-        ])
-        .unwrap();
-        let times: Vec<_> = history.iter().map(|save| save.modified).collect();
-        assert_eq!(times, [at(3), at(2), at(1)]);
-        assert!(history.contains(&Save::from_bytes(b"c", at(9))));
-        assert!(!history.contains(&Save::from_bytes(b"d", at(2))));
-        assert_eq!(SaveHistory::from_saves(Vec::new()), None);
     }
 }

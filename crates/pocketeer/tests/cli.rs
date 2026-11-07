@@ -231,8 +231,8 @@ mod printing {
         assert_eq!(
             ran.json()["data"],
             json!([
-                { "version": "2022-04-15T05-20-00", "size": 5, "newest": true },
-                { "version": "2020-09-13T12-26-40", "size": 3, "newest": false },
+                { "version": "new", "size": 5, "newest": true },
+                { "version": "old", "size": 3, "newest": false },
             ])
         );
     }
@@ -257,7 +257,7 @@ mod printing {
             json!([{
                 "save": "gba/Gone",
                 "versions": 1,
-                "newest": "2020-09-13T12-26-40",
+                "newest": "a",
             }])
         );
     }
@@ -555,6 +555,42 @@ mod versions {
         let ran = setup.run(&["--json", "trash", "save", "gba/Mine.gba", "--at", "never"]);
         assert_eq!(ran.code, 1);
         assert_eq!(ran.json()["data"][0]["version"], "never");
+    }
+
+    #[test]
+    fn names_versions_of_same_second_apart_and_takes_either() {
+        let setup = Setup::new();
+        setup.in_library("roms/gba/Mine.gba", b"mine");
+        setup.on_device("Assets/gba/common/Mine.gba", b"mine");
+        let first = setup.elsewhere("first.sav", b"first");
+        let second = setup.elsewhere("second.sav", b"second");
+        set_written_at(&first, 1_600_000_000);
+        set_written_at(&second, 1_600_000_000);
+        for file in [&first, &second] {
+            let imported = setup.run(&["import", "save", "gba/Mine.gba", &file.to_string_lossy()]);
+            assert_eq!(imported.code, 0);
+        }
+        let ran = setup.run(&["saves", "gba/Mine.gba"]);
+        assert_eq!(
+            ran.stdout,
+            "VERSION                   SIZE\n\
+             2020-09-13T12-26-40-2  6 bytes  newest\n\
+             2020-09-13T12-26-40    5 bytes\n"
+        );
+        let ran = setup.run(&[
+            "trash",
+            "save",
+            "gba/Mine.gba",
+            "--at",
+            "2020-09-13T12-26-40-2",
+        ]);
+        assert_eq!(ran.code, 0);
+        assert_eq!(ran.stdout, "gba/Mine.gba: save put in the trash\n");
+        let ran = setup.run(&["saves", "gba/Mine.gba"]);
+        assert_eq!(
+            ran.stdout,
+            "VERSION                 SIZE\n2020-09-13T12-26-40  5 bytes  newest\n"
+        );
     }
 }
 

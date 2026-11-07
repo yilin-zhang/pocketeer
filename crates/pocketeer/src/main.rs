@@ -678,14 +678,14 @@ impl CliSession {
             size: u64,
             newest: bool,
         }
-        let history = self.local_entry(game)?.save.as_ref();
-        let versions: Vec<Version> = history
+        let saves = self.local_entry(game)?.save.as_ref();
+        let versions: Vec<Version> = saves
             .into_iter()
-            .flat_map(|history| history.iter())
+            .flat_map(|saves| saves.iter())
             .enumerate()
-            .map(|(i, save)| Version {
-                version: save.timestamp(),
-                size: save.size,
+            .map(|(i, version)| Version {
+                version: version.name.clone(),
+                size: version.save.size,
                 newest: i == 0,
             })
             .collect();
@@ -727,7 +727,7 @@ impl CliSession {
             .map(|orphan| Orphan {
                 save: library_orphan_ref(&orphan),
                 versions: orphan.save.iter().count(),
-                newest: orphan.save.current.timestamp(),
+                newest: orphan.save.newest().name.clone(),
             })
             .collect();
         match self.format {
@@ -842,7 +842,7 @@ impl CliSession {
             })
             .collect::<CliResult<Vec<DeviceEntry>>>()?;
         self.run_batch(|pocketeer, on_logged| match at {
-            Some(at) => pocketeer.push_saves_at(&copies, at, on_logged),
+            Some(at) => pocketeer.push_saves_named(&copies, at, on_logged),
             None => pocketeer.push_saves(&copies, on_logged),
         })
     }
@@ -873,7 +873,7 @@ impl CliSession {
     fn trash_saves(&mut self, game_refs: &[String], at: Option<&str>) -> CliResult<()> {
         let games = self.entries_in_library(game_refs)?;
         self.run_batch(|pocketeer, on_logged| match at {
-            Some(at) => pocketeer.trash_saves_at(&games, at, on_logged),
+            Some(at) => pocketeer.trash_saves_named(&games, at, on_logged),
             None => pocketeer.trash_saves_in_library(&games, on_logged),
         })
     }

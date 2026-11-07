@@ -20,9 +20,10 @@ use crate::{
     },
     error::BasicError,
     files::list_files_recursive,
-    game::{Game, Save},
+    game::Game,
     library::{
-        AddGameError, Library, LocalEntry, OpenLibraryError, OrphanLocalSave, RenameInLibraryError,
+        AddGameError, Library, LibrarySave, LocalEntry, OpenLibraryError, OrphanLocalSave,
+        RenameInLibraryError, TrashOrphanSaveError, TrashSaveAllOutcome, TrashSaveError,
     },
     log::{FrontEnd, LogEntry, Logger, OperationReport},
     platform::Platform,
@@ -45,35 +46,6 @@ pub type BatchResult = Result<ControlFlow<()>, BasicError>;
 // What operations return
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrashSaveAllOutcome {
-    Trashed,
-    /// The library has no save of the game.
-    NoSave,
-}
-
-/// Why a version of a save wasn't trashed.
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum TrashSaveError {
-    /// The save has no version written at that time.
-    #[error("the library has no such save")]
-    NoSuchVersion,
-    /// Several versions of the save were written in the requested second.
-    #[error("more than one version of the save was written at {at}")]
-    AmbiguousVersion { at: String },
-    #[error(transparent)]
-    Other(#[from] BasicError),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum TrashOrphanSaveError {
-    /// The orphan save is gone, or a game has taken it.
-    #[error("the library has no such orphan save")]
-    NoOrphanSave,
-    #[error(transparent)]
-    Other(#[from] BasicError),
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum ImportCoverError {
     #[error("not a PNG, JPEG or WebP file")]
@@ -93,7 +65,7 @@ pub enum FetchCoverOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportSaveOutcome {
     /// The version it was kept as.
-    Imported(Save),
+    Imported(LibrarySave),
     /// The library already has a version with the same contents.
     AlreadyHad,
 }
@@ -157,17 +129,17 @@ impl GameRow {
 
     /// How many versions of its save the library has.
     pub fn saves_kept(&self) -> usize {
-        let history = self.local_entry().and_then(|local| local.save.as_ref());
-        history.map_or(0, |history| history.iter().count())
+        let saves = self.local_entry().and_then(|local| local.save.as_ref());
+        saves.map_or(0, |saves| saves.iter().count())
     }
 
     /// Whether the device has a save the library doesn't.
     pub fn has_new_save_on_device(&self) -> bool {
-        let history = self.local_entry().and_then(|local| local.save.as_ref());
+        let saves = self.local_entry().and_then(|local| local.save.as_ref());
         let on_device = self
             .device_entry()
             .and_then(|on_device| on_device.save.as_ref());
-        on_device.is_some_and(|save| !history.is_some_and(|history| history.contains(save)))
+        on_device.is_some_and(|save| !saves.is_some_and(|saves| saves.contains(save)))
     }
 }
 
@@ -585,7 +557,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         let Some(cover) = self.covers.fetch(platform, &name)? else {
             return Ok(FetchCoverOutcome::NoCover);
         };
-        self.library.add_cover(platform, &local.name, &cover)?;
+        self.library.set_cover(platform, &local.name, &cover)?;
         Ok(FetchCoverOutcome::Fetched)
     }
 
@@ -608,26 +580,12 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         )
     }
 
-    /// A cover of another format is trashed after the new one is written, so
-    /// the game keeps a cover if writing fails. One of the same format has the
-    /// same file name, so it has to go first.
     fn import_cover(&mut self, local: &LocalEntry, from: &Path) -> Result<(), ImportCoverError> {
         let local = self.current_local_entry(local)?;
         let bytes = fs::read(from).map_err(BasicError::from)?;
         let cover = Cover::from_bytes(bytes).ok_or(ImportCoverError::NotAnImage)?;
-        let platform = &local.game.platform;
-        let new_path = self
-            .library
-            .layout()
-            .cover(platform, local.stem(), cover.format());
-        let old_path = local.cover_path.as_ref();
-        if old_path == Some(&new_path) {
-            trash::delete(&new_path).map_err(BasicError::from)?;
-        }
-        self.library.add_cover(platform, &local.name, &cover)?;
-        if let Some(old_path) = old_path.filter(|path| **path != new_path) {
-            trash::delete(old_path).map_err(BasicError::from)?;
-        }
+        self.library
+            .set_cover(&local.game.platform, &local.name, &cover)?;
         Ok(())
     }
 
@@ -645,14 +603,9 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         )
     }
 
-    /// Moves `local`'s file and cover to the system's trash, where they can be
-    /// restored. Its saves stay, in case a game is added under that name again.
     fn trash_game_in_library(&mut self, local: &LocalEntry) -> Result<(), BasicError> {
         let local = self.current_local_entry(local)?;
-        let files = self.library.files_of(&local);
-        trash::delete_all(&files)?;
-        self.library.forget_game(&local.game.platform, &local.name);
-        Ok(())
+        self.library.trash_game(&local)
     }
 
     /// Once the first copy of a game is deleted the next one takes its place,
@@ -720,48 +673,49 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         self.push_save(game, &version)
     }
 
-    fn newest_save(&self, game: &Game) -> Result<Save, PushSaveError> {
+    fn newest_save(&self, game: &Game) -> Result<LibrarySave, PushSaveError> {
         let entry = self.library.entry_for(game);
         let entry = entry.ok_or(PushSaveError::NotInLibrary)?;
-        let history = entry.save.as_ref().ok_or(PushSaveError::NoSuchVersion)?;
-        Ok(history.current.clone())
+        let saves = entry.save.as_ref().ok_or(PushSaveError::NoSuchVersion)?;
+        Ok(saves.newest().clone())
     }
 
-    /// Pushes the version of each game's save written at `at`, in the format of
-    /// [`Save::timestamp`].
-    pub fn push_saves_at(
+    /// Pushes the version called `version_name` of each game's save.
+    pub fn push_saves_named(
         &mut self,
         games: &[DeviceEntry],
-        at: &str,
+        version_name: &str,
         on_logged: impl FnMut(&Self, LogEntry) -> ControlFlow<()>,
     ) -> BatchResult {
         self.for_each_item(
             games,
             |pocketeer, game| {
-                OperationReport::PushSave(game.clone(), pocketeer.push_save_written_at(game, at))
+                OperationReport::PushSave(
+                    game.clone(),
+                    pocketeer.push_save_named(game, version_name),
+                )
             },
             on_logged,
         )
     }
 
-    fn push_save_written_at(
+    fn push_save_named(
         &mut self,
         game: &DeviceEntry,
-        at: &str,
+        version_name: &str,
     ) -> Result<PushSaveOutcome, PushSaveError> {
         let local = self.library.entry_for(&game.game);
         let local = local.ok_or(PushSaveError::NotInLibrary)?;
-        match &saves_written_at(local, at)[..] {
-            [] => Err(PushSaveError::NoSuchVersion),
-            [version] => self.push_save(game, version),
-            _ => Err(PushSaveError::AmbiguousVersion { at: at.to_string() }),
-        }
+        let saves = local.save.as_ref().ok_or(PushSaveError::NoSuchVersion)?;
+        let version = saves.version_named(version_name);
+        let version = version.ok_or(PushSaveError::NoSuchVersion)?.clone();
+        self.push_save(game, &version)
     }
 
     /// Pushes each version to the game paired with it.
     pub fn push_save_versions(
         &mut self,
-        versions: &[(DeviceEntry, Save)],
+        versions: &[(DeviceEntry, LibrarySave)],
         on_logged: impl FnMut(&Self, LogEntry) -> ControlFlow<()>,
     ) -> BatchResult {
         self.for_each_item(
@@ -776,7 +730,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     fn push_save(
         &mut self,
         on_device: &DeviceEntry,
-        version: &Save,
+        version: &LibrarySave,
     ) -> Result<PushSaveOutcome, PushSaveError> {
         let on_device = self.current_device_entry(on_device)?;
         let device = self.device.as_mut().ok_or(BasicError::NoDevice)?;
@@ -838,52 +792,37 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         local: &LocalEntry,
     ) -> Result<TrashSaveAllOutcome, BasicError> {
         let local = self.current_local_entry(local)?;
-        let files = self.library.files_of_all_saves(&local)?;
-        if files.is_empty() {
-            return Ok(TrashSaveAllOutcome::NoSave);
-        }
-        self.trash_save_files(&local, &files)?;
-        Ok(TrashSaveAllOutcome::Trashed)
+        self.library.trash_all_saves(&local)
     }
 
-    /// Trashes the version of each game's save written at `at`, in the format
-    /// of [`Save::timestamp`].
-    pub fn trash_saves_at(
+    /// Trashes the version called `version_name` of each game's save.
+    pub fn trash_saves_named(
         &mut self,
         games: &[LocalEntry],
-        at: &str,
+        version_name: &str,
         on_logged: impl FnMut(&Self, LogEntry) -> ControlFlow<()>,
     ) -> BatchResult {
         self.for_each_item(
             games,
             |pocketeer, game| {
-                let result = pocketeer.trash_save_written_at(game, at);
-                OperationReport::TrashSaveVersion(game.clone(), at.to_string(), result)
+                let result = pocketeer.trash_save_version(game, version_name);
+                OperationReport::TrashSaveVersion(game.clone(), version_name.to_string(), result)
             },
             on_logged,
         )
     }
 
-    fn trash_save_written_at(&mut self, game: &LocalEntry, at: &str) -> Result<(), TrashSaveError> {
-        let local = self.current_local_entry(game)?;
-        match &saves_written_at(&local, at)[..] {
-            [] => Err(TrashSaveError::NoSuchVersion),
-            [version] => self.trash_save_version(&local, version),
-            _ => Err(TrashSaveError::AmbiguousVersion { at: at.to_string() }),
-        }
-    }
-
     /// Trashes each version of the save of the game paired with it.
     pub fn trash_save_versions_in_library(
         &mut self,
-        versions: &[(LocalEntry, Save)],
+        versions: &[(LocalEntry, LibrarySave)],
         on_logged: impl FnMut(&Self, LogEntry) -> ControlFlow<()>,
     ) -> BatchResult {
         self.for_each_item(
             versions,
             |pocketeer, (game, version)| {
-                let result = pocketeer.trash_save_version(game, version);
-                OperationReport::TrashSaveVersion(game.clone(), version.timestamp(), result)
+                let result = pocketeer.trash_save_version(game, &version.name);
+                OperationReport::TrashSaveVersion(game.clone(), version.name.clone(), result)
             },
             on_logged,
         )
@@ -892,22 +831,10 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     fn trash_save_version(
         &mut self,
         local: &LocalEntry,
-        version: &Save,
+        version_name: &str,
     ) -> Result<(), TrashSaveError> {
         let local = self.current_local_entry(local)?;
-        let Some(file) = self.library.file_of_save(&local, version)? else {
-            return Err(TrashSaveError::NoSuchVersion);
-        };
-        Ok(self.trash_save_files(&local, &[file])?)
-    }
-
-    fn trash_save_files(
-        &mut self,
-        local: &LocalEntry,
-        files: &[PathBuf],
-    ) -> Result<(), BasicError> {
-        trash::delete_all(files)?;
-        self.library.reread_saves(&local.game.platform, &local.name)
+        self.library.trash_save_version(&local, version_name)
     }
 
     pub fn delete_saves_on_device(
@@ -970,12 +897,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         &mut self,
         orphan: &OrphanLocalSave,
     ) -> Result<(), TrashOrphanSaveError> {
-        let files = self.library.files_of_orphan_save(orphan)?;
-        if files.is_empty() {
-            return Err(TrashOrphanSaveError::NoOrphanSave);
-        }
-        trash::delete_all(&files).map_err(BasicError::from)?;
-        Ok(())
+        self.library.trash_orphan_save(orphan)
     }
 
     pub fn delete_orphan_saves_on_device(
@@ -1220,11 +1142,6 @@ pub fn expand_import_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, BasicError
         }
     }
     Ok(files)
-}
-
-fn saves_written_at(local: &LocalEntry, at: &str) -> Vec<Save> {
-    let written = local.save.iter().flat_map(|history| history.written_at(at));
-    written.cloned().collect()
 }
 
 #[cfg(test)]
@@ -1575,22 +1492,12 @@ mod tests {
         }
 
         #[test]
-        fn reports_no_save_and_rejects_missing_version() {
+        fn logs_missing_version_when_pushing() {
             let mut setup = setup(
                 &[("Assets/gba/common/Tetris.gba", b"hello")],
                 &[("roms/gba/Tetris (World).gba", b"hello")],
             );
             let on_device = setup.first_on_device();
-            let local = setup.first_local();
-            assert!(matches!(
-                setup.pocketeer.trash_every_version_in_library(&local),
-                Ok(TrashSaveAllOutcome::NoSave)
-            ));
-            let gone = Save::from_bytes(b"gone", std::time::UNIX_EPOCH);
-            assert!(matches!(
-                setup.pocketeer.trash_save_version(&local, &gone),
-                Err(TrashSaveError::NoSuchVersion)
-            ));
             let lines = lines_of(|on_logged| setup.pocketeer.push_saves(&[on_device], on_logged));
             assert_eq!(lines, ["gba/Tetris.gba: the library has no such save"]);
         }
@@ -1690,11 +1597,11 @@ mod tests {
         #[test]
         fn pushes_given_version() {
             let (mut setup, on_device, local) = with_versions();
-            let version = local[0].save.as_ref().unwrap().current.clone();
+            let version = local[0].save.as_ref().unwrap().newest().clone();
             let versions = [(on_device[0].clone(), version)];
             let lines =
                 lines_of(|on_logged| setup.pocketeer.push_save_versions(&versions, on_logged));
-            assert_eq!(lines, ["gba/A.gba: save 1970-01-01T00-16-40 pushed"]);
+            assert_eq!(lines, ["gba/A.gba: save one pushed"]);
         }
 
         #[test]
@@ -1705,26 +1612,28 @@ mod tests {
             setup.pocketeer.reload_library().unwrap();
             let lines =
                 lines_of(|on_logged| setup.pocketeer.push_saves(&on_device[..1], on_logged));
-            assert_eq!(lines, ["gba/A.gba: save 1970-01-01T00-33-20 pushed"]);
+            assert_eq!(lines, ["gba/A.gba: save two pushed"]);
         }
 
         #[test]
-        fn pushes_version_written_at_given_time() {
+        fn pushes_version_by_name() {
             let (mut setup, on_device, _) = with_versions();
-            let at = "1970-01-01T00-16-40";
             let lines = lines_of(|on_logged| {
                 setup
                     .pocketeer
-                    .push_saves_at(&on_device[..1], at, on_logged)
+                    .push_saves_named(&on_device[..1], "one", on_logged)
             });
-            assert_eq!(lines, ["gba/A.gba: save 1970-01-01T00-16-40 pushed"]);
+            assert_eq!(lines, ["gba/A.gba: save one pushed"]);
         }
 
         #[test]
         fn logs_missing_version_when_trashing() {
             let (mut setup, _, local) = with_versions();
-            let lines =
-                lines_of(|on_logged| setup.pocketeer.trash_saves_at(&local, "never", on_logged));
+            let lines = lines_of(|on_logged| {
+                setup
+                    .pocketeer
+                    .trash_saves_named(&local, "never", on_logged)
+            });
             assert_eq!(
                 lines,
                 [
@@ -1738,27 +1647,19 @@ mod tests {
         }
 
         #[test]
-        fn acts_on_neither_when_two_versions_share_time() {
-            let (mut setup, on_device, local) = with_versions();
+        fn tells_versions_written_in_same_second_apart_by_name() {
+            let (mut setup, on_device, _) = with_versions();
             let root = setup.pocketeer.library().root().to_path_buf();
-            let file = put_at(&root, "saves/gba/A/two.sav", b"two", 1_000);
-            let first = root.join("saves/gba/A/one.sav");
+            put_at(&root, "saves/gba/A/two.sav", b"two", 1_000);
             setup.pocketeer.reload_library().unwrap();
-            let at = "1970-01-01T00-16-40";
-            let refused = [
-                "gba/A.gba: error: more than one version of the save was written \
-                            at 1970-01-01T00-16-40",
-            ];
-            let lines = lines_of(|on_logged| {
-                setup
-                    .pocketeer
-                    .push_saves_at(&on_device[..1], at, on_logged)
-            });
-            assert_eq!(lines, refused);
-            let lines =
-                lines_of(|on_logged| setup.pocketeer.trash_saves_at(&local[..1], at, on_logged));
-            assert_eq!(lines, refused);
-            assert!(file.exists() && first.exists());
+            for name in ["two", "one"] {
+                let lines = lines_of(|on_logged| {
+                    setup
+                        .pocketeer
+                        .push_saves_named(&on_device[..1], name, on_logged)
+                });
+                assert_eq!(lines, [format!("gba/A.gba: save {name} pushed")]);
+            }
         }
     }
 

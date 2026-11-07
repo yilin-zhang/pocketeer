@@ -14,8 +14,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pocketeer_core::{
     cores::{BiosRow, BiosStatus, CoreRow},
     device::{DeviceEntry, OrphanDeviceSave},
-    game::{Game, Save},
-    library::{LocalEntry, OrphanLocalSave},
+    game::Game,
+    library::{LibrarySave, LocalEntry, OrphanLocalSave},
     log::{device_orphan_ref, library_orphan_ref},
     platform::Platform,
     pocketeer::GameRow,
@@ -312,12 +312,12 @@ impl GamesPage {
     }
 
     /// The versions of the selected game's save in the library, newest first.
-    pub fn selected_save_versions(&self) -> Vec<Save> {
+    pub fn selected_save_versions(&self) -> Vec<LibrarySave> {
         let local = self.selected_row().and_then(GamesTableRow::local_entry);
-        let history = local.and_then(|local| local.save.as_ref());
-        history
+        let saves = local.and_then(|local| local.save.as_ref());
+        saves
             .iter()
-            .flat_map(|history| history.iter().cloned())
+            .flat_map(|saves| saves.iter().cloned())
             .collect()
     }
 
@@ -1343,7 +1343,7 @@ impl App {
             title: "Trash a save".to_string(),
             lines: vec![format!(
                 "Version {} goes to the system's trash.",
-                version.timestamp()
+                version.name
             )],
             buttons: vec![
                 DialogButton::removal("Trash", WorkerCommand::TrashSaveVersion(local, version)),
@@ -1685,7 +1685,8 @@ mod tests {
         cores::{BiosRow, BiosStatus, InstalledCore, InventoryCore},
         device::OrphanDeviceSave,
         device::{DiskSpace, Firmware},
-        game::{Files, Game, Rom, SaveHistory},
+        game::{Files, Game, Rom, Save},
+        library::LibrarySaves,
         platform::Platform,
     };
     use ratatui::{Terminal, backend::TestBackend};
@@ -1705,15 +1706,15 @@ mod tests {
 
     fn local(name: &str, crc32: u32, saves: &[&[u8]]) -> LocalEntry {
         let at = |i: usize| UNIX_EPOCH + Duration::from_secs(1_000 * (i as u64 + 1));
-        let saves = saves
-            .iter()
-            .enumerate()
-            .map(|(i, save_bytes)| Save::from_bytes(save_bytes, at(i)));
+        let saves = saves.iter().enumerate().map(|(i, save_bytes)| LibrarySave {
+            name: format!("v{i}"),
+            save: Save::from_bytes(save_bytes, at(i)),
+        });
         LocalEntry {
             name: name.into(),
             game: game(crc32),
             cover_path: None,
-            save: SaveHistory::from_saves(saves.collect()),
+            save: LibrarySaves::from_saves(saves.collect()),
         }
     }
 
@@ -2033,7 +2034,11 @@ mod tests {
             rows.push(GamesTableRow::OrphanSaveInLibrary(OrphanLocalSave {
                 platform: Platform::Gba,
                 stem: "Lost".to_string(),
-                save: SaveHistory::from_saves(vec![Save::from_bytes(b"x", UNIX_EPOCH)]).unwrap(),
+                save: LibrarySaves::from_saves(vec![LibrarySave {
+                    name: "x".to_string(),
+                    save: Save::from_bytes(b"x", UNIX_EPOCH),
+                }])
+                .unwrap(),
             }));
             app.handle_worker_message(WorkerMessage::GamesPageChanged(GamesPageData {
                 rows,

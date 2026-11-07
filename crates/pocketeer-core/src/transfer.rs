@@ -5,8 +5,7 @@ use std::path::Path;
 use crate::{
     device::{Device, DeviceEntry},
     error::BasicError,
-    game::Save,
-    library::{AddGameError, Library, LocalEntry},
+    library::{AddGameError, Library, LibrarySave, LocalEntry},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +52,7 @@ pub enum PullSaveError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PushSaveOutcome {
     /// The version pushed.
-    Pushed(Save),
+    Pushed(LibrarySave),
     /// The device's save already has the same contents.
     AlreadyThere,
 }
@@ -67,9 +66,6 @@ pub enum PushSaveError {
     NotBackedUp,
     #[error("the library has no such save")]
     NoSuchVersion,
-    /// Several versions of the save were written in the requested second.
-    #[error("more than one version of the save was written at {at}")]
-    AmbiguousVersion { at: String },
     #[error(transparent)]
     Other(#[from] BasicError),
 }
@@ -138,22 +134,22 @@ pub(crate) fn push_save(
     library: &Library,
     device: &mut Device,
     on_device: &DeviceEntry,
-    version: &Save,
+    version: &LibrarySave,
 ) -> Result<PushSaveOutcome, PushSaveError> {
     let Some(entry) = library.entry_for(&on_device.game) else {
         return Err(PushSaveError::NotInLibrary);
     };
-    let Some(file) = library.file_of_save(entry, version)? else {
+    let Some(file) = library.file_of_version(entry, version) else {
         return Err(PushSaveError::NoSuchVersion);
     };
     if let Some(there) = device.read_save(on_device)? {
-        if there.has_same_contents_as(version) {
+        if there.has_same_contents_as(&version.save) {
             return Ok(PushSaveOutcome::AlreadyThere);
         }
         if !entry
             .save
             .as_ref()
-            .is_some_and(|history| history.contains(&there))
+            .is_some_and(|saves| saves.contains(&there))
         {
             return Err(PushSaveError::NotBackedUp);
         }
@@ -168,6 +164,7 @@ mod tests {
 
     use super::*;
     use crate::files::testing::{at, put_at};
+    use crate::game::Save;
 
     /// Tetris on a device and in a library. The library has `kept` as its save
     /// and the device has `save_there`, each if given.
@@ -183,7 +180,7 @@ mod tests {
             pull_save(&mut self.library, &self.device, &self.on_device)
         }
 
-        fn push_save(&mut self, version: &Save) -> Result<PushSaveOutcome, PushSaveError> {
+        fn push_save(&mut self, version: &LibrarySave) -> Result<PushSaveOutcome, PushSaveError> {
             push_save(&self.library, &mut self.device, &self.on_device, version)
         }
     }
@@ -219,12 +216,12 @@ mod tests {
     }
 
     /// The library's newest version of Tetris's save.
-    fn current(setup: &Setup) -> Save {
+    fn current(setup: &Setup) -> LibrarySave {
         setup.library.entries()[0]
             .save
             .as_ref()
             .unwrap()
-            .current
+            .newest()
             .clone()
     }
 
@@ -233,7 +230,7 @@ mod tests {
         entry
             .save
             .iter()
-            .flat_map(|history| history.iter().map(|version| version.size))
+            .flat_map(|saves| saves.iter().map(|version| version.save.size))
             .collect()
     }
 
@@ -272,11 +269,12 @@ mod tests {
         fn pushes_kept_version_over_backed_up_save() {
             let mut setup = setup(Some(b"a"), Some(b"bb"));
             setup.pull_save().unwrap();
-            let old = setup.library.entries()[0].save.as_ref().unwrap().versions[0].clone();
+            let saves = setup.library.entries()[0].save.clone().unwrap();
+            let old = saves.iter().nth(1).unwrap().clone();
             let pushed = setup.push_save(&old).unwrap();
             assert_eq!(pushed, PushSaveOutcome::Pushed(old.clone()));
             let now = setup.device.read_save(&setup.on_device).unwrap().unwrap();
-            assert_eq!(now, old);
+            assert_eq!(now, old.save);
             // The device now holds a version the library has.
             let pulled = setup.pull_save().unwrap();
             assert_eq!(pulled, PullSaveOutcome::AlreadyHad);
@@ -300,7 +298,7 @@ mod tests {
             assert_eq!(pushed, PushSaveOutcome::Pushed(kept.clone()));
             assert_eq!(
                 setup.device.read_save(&setup.on_device).unwrap(),
-                Some(kept)
+                Some(kept.save)
             );
         }
 
@@ -325,7 +323,10 @@ mod tests {
         #[test]
         fn rejects_version_not_in_library() {
             let mut setup = setup(Some(b"a"), None);
-            let unknown = Save::from_bytes(b"zzz", at(5));
+            let unknown = LibrarySave {
+                name: "zzz".to_string(),
+                save: Save::from_bytes(b"zzz", at(5)),
+            };
             let pushed = setup.push_save(&unknown);
             assert!(matches!(pushed, Err(PushSaveError::NoSuchVersion)));
         }

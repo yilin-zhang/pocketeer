@@ -13,9 +13,59 @@ use crate::{
     cover::{COVER_FORMATS, Cover},
     error::BasicError,
     files::{Cache, copy_atomically, list_dir, safe_rename_all, write_atomically},
-    game::{Game, Save, SaveHistory, is_valid_fat_name, is_valid_file_name, renamed_file_name},
+    game::{Game, Save, is_valid_fat_name, is_valid_file_name, renamed_file_name},
     platform::Platform,
 };
+
+/// One version of a game's save in the library. Its name is its file name
+/// without `.sav`, which the front ends show and take to pick a version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibrarySave {
+    pub name: String,
+    pub save: Save,
+}
+
+/// Every version of a game's save in the library, of which there is at least
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibrarySaves {
+    /// Newest first.
+    versions: Vec<LibrarySave>,
+}
+
+impl LibrarySaves {
+    /// Sorts `saves` newest first. Of versions written in the same second the
+    /// one with the higher number was added later, so it counts as newer.
+    /// Returns none if there are none.
+    pub fn from_saves(mut saves: Vec<LibrarySave>) -> Option<Self> {
+        if saves.is_empty() {
+            return None;
+        }
+        saves.sort_by(|a, b| {
+            let newest_first = b.save.modified.cmp(&a.save.modified);
+            newest_first.then_with(|| b.name.cmp(&a.name))
+        });
+        Some(Self { versions: saves })
+    }
+
+    pub fn newest(&self) -> &LibrarySave {
+        &self.versions[0]
+    }
+
+    /// Every version, newest first.
+    pub fn iter(&self) -> impl Iterator<Item = &LibrarySave> {
+        self.versions.iter()
+    }
+
+    pub fn version_named(&self, name: &str) -> Option<&LibrarySave> {
+        self.iter().find(|version| version.name == name)
+    }
+
+    pub fn contains(&self, save: &Save) -> bool {
+        self.iter()
+            .any(|version| version.save.has_same_contents_as(save))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalEntry {
@@ -29,7 +79,7 @@ pub struct LocalEntry {
     /// few are shown at a time. Whoever needs one reads it when needed, without
     /// going through the library.
     pub cover_path: Option<PathBuf>,
-    pub save: Option<SaveHistory>,
+    pub save: Option<LibrarySaves>,
 }
 
 impl LocalEntry {
@@ -49,7 +99,7 @@ pub struct OrphanLocalSave {
     pub platform: Platform,
     /// The name its game had, without the extension.
     pub stem: String,
-    pub save: SaveHistory,
+    pub save: LibrarySaves,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -96,6 +146,32 @@ pub enum RenameInLibraryError {
     Other(#[from] BasicError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrashSaveAllOutcome {
+    Trashed,
+    /// The library has no save of the game.
+    NoSave,
+}
+
+/// Why a version of a save wasn't trashed.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum TrashSaveError {
+    /// The save has no version of that name.
+    #[error("the library has no such save")]
+    NoSuchVersion,
+    #[error(transparent)]
+    Other(#[from] BasicError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TrashOrphanSaveError {
+    /// The orphan save is gone, or a game has taken it.
+    #[error("the library has no such orphan save")]
+    NoOrphanSave,
+    #[error(transparent)]
+    Other(#[from] BasicError),
+}
+
 /// Every path in a library folder is spelled out here.
 #[derive(Debug, Clone)]
 pub(crate) struct LibraryLayout {
@@ -129,7 +205,7 @@ impl LibraryLayout {
         self.platform_roms(platform).join(name)
     }
 
-    pub(crate) fn cover(&self, platform: &Platform, stem: &str, format: ImageFormat) -> PathBuf {
+    fn cover(&self, platform: &Platform, stem: &str, format: ImageFormat) -> PathBuf {
         let file = format!("{stem}.{}", format.extensions_str()[0]);
         self.root.join("covers").join(platform.id()).join(file)
     }
@@ -148,21 +224,10 @@ impl LibraryLayout {
         self.platform_saves(platform).join(stem)
     }
 
-    /// The file for version number `version_number` of `save`. Files are named
-    /// after when the Pocket wrote them, and a second one from the same second
-    /// gets `-2`.
-    fn save_version(
-        &self,
-        platform: &Platform,
-        stem: &str,
-        save: &Save,
-        version_number: u32,
-    ) -> PathBuf {
-        let file = match version_number {
-            1 => format!("{}.sav", save.timestamp()),
-            version_number => format!("{}-{version_number}.sav", save.timestamp()),
-        };
-        self.saves(platform, stem).join(file)
+    /// The file of the version called `version_name` of the game's save.
+    fn save_version(&self, platform: &Platform, stem: &str, version_name: &str) -> PathBuf {
+        self.saves(platform, stem)
+            .join(format!("{version_name}.sav"))
     }
 
     pub(crate) fn log(&self) -> PathBuf {
@@ -240,9 +305,18 @@ impl Library {
         self.layout.rom(&entry.game.platform, &entry.name)
     }
 
+    /// Moves `entry`'s file and cover to the system's trash, where they can be
+    /// restored, and forgets the game. Its saves stay, in case a game is added
+    /// under that name again.
+    pub(crate) fn trash_game(&mut self, entry: &LocalEntry) -> Result<(), BasicError> {
+        trash::delete_all(self.files_of(entry))?;
+        self.forget_game(&entry.game.platform, &entry.name);
+        Ok(())
+    }
+
     /// The files of `entry` as a game, which are its file and its cover if it
     /// has one. Its saves are kept apart under its name.
-    pub fn files_of(&self, entry: &LocalEntry) -> Vec<PathBuf> {
+    fn files_of(&self, entry: &LocalEntry) -> Vec<PathBuf> {
         let mut files = vec![self.game_path(entry)];
         files.extend(entry.cover_path.clone());
         files
@@ -273,17 +347,60 @@ impl Library {
         Ok(orphans)
     }
 
-    pub fn files_of_all_saves(&self, entry: &LocalEntry) -> Result<Vec<PathBuf>, BasicError> {
+    /// Moves every version of `entry`'s save to the system's trash.
+    pub(crate) fn trash_all_saves(
+        &mut self,
+        entry: &LocalEntry,
+    ) -> Result<TrashSaveAllOutcome, BasicError> {
+        let files = self.files_of_all_saves(entry)?;
+        if files.is_empty() {
+            return Ok(TrashSaveAllOutcome::NoSave);
+        }
+        trash::delete_all(&files)?;
+        self.reread_saves(&entry.game.platform, &entry.name)?;
+        Ok(TrashSaveAllOutcome::Trashed)
+    }
+
+    /// Moves the version called `version_name` of `entry`'s save to the
+    /// system's trash.
+    pub(crate) fn trash_save_version(
+        &mut self,
+        entry: &LocalEntry,
+        version_name: &str,
+    ) -> Result<(), TrashSaveError> {
+        let path = self
+            .layout
+            .save_version(&entry.game.platform, entry.stem(), version_name);
+        if !path.is_file() {
+            return Err(TrashSaveError::NoSuchVersion);
+        }
+        trash::delete(&path).map_err(BasicError::from)?;
+        self.reread_saves(&entry.game.platform, &entry.name)?;
+        Ok(())
+    }
+
+    /// Moves every version of `orphan`'s save to the system's trash, unless it
+    /// is no longer an orphan because a game has been put under its name.
+    pub(crate) fn trash_orphan_save(
+        &self,
+        orphan: &OrphanLocalSave,
+    ) -> Result<(), TrashOrphanSaveError> {
+        let files = self.files_of_orphan_save(orphan)?;
+        if files.is_empty() {
+            return Err(TrashOrphanSaveError::NoOrphanSave);
+        }
+        trash::delete_all(&files).map_err(BasicError::from)?;
+        Ok(())
+    }
+
+    fn files_of_all_saves(&self, entry: &LocalEntry) -> Result<Vec<PathBuf>, BasicError> {
         let files = self.files_of_saves(&entry.game.platform, entry.stem())?;
         Ok(files.into_iter().map(|(path, _)| path).collect())
     }
 
     /// The files of every version of `orphan`'s save, or none if it is no
     /// longer an orphan because a game has been put under its name.
-    pub(crate) fn files_of_orphan_save(
-        &self,
-        orphan: &OrphanLocalSave,
-    ) -> Result<Vec<PathBuf>, BasicError> {
+    fn files_of_orphan_save(&self, orphan: &OrphanLocalSave) -> Result<Vec<PathBuf>, BasicError> {
         let is_it = |candidate: &OrphanLocalSave| {
             candidate.platform == orphan.platform && candidate.stem == orphan.stem
         };
@@ -295,11 +412,7 @@ impl Library {
     }
 
     /// Reads the saves of the game called `name` again, once some are gone.
-    pub(crate) fn reread_saves(
-        &mut self,
-        platform: &Platform,
-        name: &str,
-    ) -> Result<(), BasicError> {
+    fn reread_saves(&mut self, platform: &Platform, name: &str) -> Result<(), BasicError> {
         let saves = self.read_save_history(platform, stem(name))?;
         let i = self.index_of(platform, name)?;
         self.entries[i].save = saves;
@@ -419,12 +532,15 @@ impl Library {
 
     /// Adds the save at `from` to the game called `name`, unless it already has
     /// one with the same contents. Returns the new version if one was added.
+    ///
+    /// The version is named after when the save was written, and a second one
+    /// from the same second gets `-2`, and so on.
     pub(crate) fn add_save(
         &mut self,
         platform: &Platform,
         name: &str,
         from: &Path,
-    ) -> Result<Option<Save>, BasicError> {
+    ) -> Result<Option<LibrarySave>, BasicError> {
         let i = self.index_of(platform, name)?;
         let modified = fs::metadata(from).and_then(|metadata| metadata.modified())?;
         let bytes = fs::read(from)?;
@@ -432,65 +548,85 @@ impl Library {
         if self.entries[i]
             .save
             .as_ref()
-            .is_some_and(|history| history.contains(&save))
+            .is_some_and(|saves| saves.contains(&save))
         {
             return Ok(None);
         }
-        let path = (1..)
-            .map(|version_number| {
-                self.layout
-                    .save_version(platform, stem(name), &save, version_number)
+        let timestamp = save.timestamp();
+        let (version_name, path) = (1..)
+            .map(|version_number| match version_number {
+                1 => timestamp.clone(),
+                version_number => format!("{timestamp}-{version_number}"),
             })
-            .find(|path| !path.exists())
+            .map(|version_name| {
+                let path = self
+                    .layout
+                    .save_version(platform, stem(name), &version_name);
+                (version_name, path)
+            })
+            .find(|(_, path)| !path.exists())
             .expect("some name is free");
         write_atomically(&path, &bytes, Some(modified))?;
+        let version = LibrarySave {
+            name: version_name,
+            save,
+        };
         let entry = &mut self.entries[i];
-        let mut saves: Vec<Save> = entry
+        let mut saves: Vec<LibrarySave> = entry
             .save
             .iter()
-            .flat_map(|history| history.iter().cloned())
+            .flat_map(|saves| saves.iter().cloned())
             .collect();
-        saves.push(save.clone());
-        entry.save = SaveHistory::from_saves(saves);
-        Ok(Some(save))
+        saves.push(version.clone());
+        entry.save = LibrarySaves::from_saves(saves);
+        Ok(Some(version))
     }
 
     /// Removes the game called `name` from the entries and the cache, once its
     /// files are gone.
-    pub(crate) fn forget_game(&mut self, platform: &Platform, name: &str) {
+    fn forget_game(&mut self, platform: &Platform, name: &str) {
         self.cache.forget(&self.layout.rom(platform, name));
         self.cache.save();
         self.entries
             .retain(|entry| !entry.is_called(platform, name));
     }
 
-    /// Makes `cover` the cover of the game called `name`, replacing a cover of
-    /// the same format.
-    pub(crate) fn add_cover(
+    /// Makes `cover` the cover of the game called `name`. Any cover it had goes
+    /// to the system's trash.
+    ///
+    /// One of another format is trashed after the new one is written, so the
+    /// game keeps a cover if writing fails. One of the same format has the same
+    /// file name, so it has to go first.
+    pub(crate) fn set_cover(
         &mut self,
         platform: &Platform,
         name: &str,
         cover: &Cover,
     ) -> Result<(), BasicError> {
         let i = self.index_of(platform, name)?;
-        let path = self.layout.cover(platform, stem(name), cover.format());
-        write_atomically(&path, cover.bytes(), None)?;
-        self.entries[i].cover_path = Some(path);
+        let new_path = self.layout.cover(platform, stem(name), cover.format());
+        let old_path = self.entries[i].cover_path.clone();
+        if old_path.as_ref() == Some(&new_path) {
+            trash::delete(&new_path)?;
+        }
+        write_atomically(&new_path, cover.bytes(), None)?;
+        self.entries[i].cover_path = Some(new_path.clone());
+        if let Some(old_path) = old_path.filter(|path| *path != new_path) {
+            trash::delete(&old_path)?;
+        }
         Ok(())
     }
 
-    /// The file of a version of `entry`'s save, or none if it has no such
-    /// version.
-    pub fn file_of_save(
+    /// The file of `version`, or none if `entry`'s save no longer has it.
+    pub(crate) fn file_of_version(
         &self,
         entry: &LocalEntry,
-        save: &Save,
-    ) -> Result<Option<PathBuf>, BasicError> {
-        Ok(self
-            .files_of_saves(&entry.game.platform, entry.stem())?
-            .into_iter()
-            .find(|(_, version)| version == save)
-            .map(|(path, _)| path))
+        version: &LibrarySave,
+    ) -> Option<PathBuf> {
+        let path = self
+            .layout
+            .save_version(&entry.game.platform, entry.stem(), &version.name);
+        path.is_file().then_some(path)
     }
 
     fn index_of(&self, platform: &Platform, name: &str) -> Result<usize, BasicError> {
@@ -560,31 +696,32 @@ impl Library {
         &self,
         platform: &Platform,
         stem: &str,
-    ) -> Result<Option<SaveHistory>, BasicError> {
+    ) -> Result<Option<LibrarySaves>, BasicError> {
         let saves = self
             .files_of_saves(platform, stem)?
             .into_iter()
-            .map(|(_, save)| save);
-        Ok(SaveHistory::from_saves(saves.collect()))
+            .map(|(_, version)| version);
+        Ok(LibrarySaves::from_saves(saves.collect()))
     }
 
-    /// The game's save files, each with its parsed save.
+    /// The game's save files, each with the version it holds.
     fn files_of_saves(
         &self,
         platform: &Platform,
         stem: &str,
-    ) -> Result<Vec<(PathBuf, Save)>, BasicError> {
+    ) -> Result<Vec<(PathBuf, LibrarySave)>, BasicError> {
         let dir = self.layout.saves(platform, stem);
         let mut files = Vec::new();
-        for name in list_dir(&dir)?.files {
-            if Path::new(&name)
-                .extension()
-                .is_some_and(|extension| extension == "sav")
-            {
-                let path = dir.join(&name);
-                let save = Save::read(&path)?;
-                files.push((path, save));
-            }
+        for file_name in list_dir(&dir)?.files {
+            let Some(name) = file_name.strip_suffix(".sav") else {
+                continue;
+            };
+            let path = dir.join(&file_name);
+            let version = LibrarySave {
+                name: name.to_string(),
+                save: Save::read(&path)?,
+            };
+            files.push((path, version));
         }
         Ok(files)
     }
@@ -862,10 +999,9 @@ mod tests {
             let cover_path = entry.cover_path.as_ref().unwrap();
             assert_eq!(cover_path, &library.root().join("covers/gba/Tetris.png"));
             assert_eq!(fs::read(cover_path).unwrap(), PNG);
-            let history = entry.save.as_ref().unwrap();
-            assert_eq!(history.current.size, 2);
-            assert_eq!(history.versions.len(), 1);
-            assert_eq!(history.versions[0].size, 1);
+            let sizes: Vec<_> = entry.save.iter().flat_map(LibrarySaves::iter).collect();
+            let sizes: Vec<_> = sizes.iter().map(|version| version.save.size).collect();
+            assert_eq!(sizes, [2, 1]);
         }
 
         #[test]
@@ -1017,7 +1153,7 @@ mod tests {
             library: &mut Library,
             bytes: &[u8],
             secs: u64,
-        ) -> Result<Option<Save>, BasicError> {
+        ) -> Result<Option<LibrarySave>, BasicError> {
             let elsewhere = tempfile::tempdir().unwrap();
             let from = put_at(elsewhere.path(), "Tetris.sav", bytes, secs);
             library.add_save(&Platform::Gba, "Tetris.gba", &from)
@@ -1027,7 +1163,7 @@ mod tests {
         fn names_version_file_after_modified_time() {
             let (_dir, mut library) = with_tetris();
             let added = add_save(&mut library, b"save", 1_762_179_605).unwrap();
-            assert_eq!(added.unwrap().size, 4);
+            assert_eq!(added.unwrap().save.size, 4);
             let file = library
                 .root()
                 .join("saves/gba/Tetris/2025-11-03T14-20-05.sav");
@@ -1040,7 +1176,7 @@ mod tests {
             let in_memory = library.entries()[0].save.clone();
             library.reload().unwrap();
             assert_eq!(library.entries()[0].save, in_memory);
-            assert_eq!(in_memory.unwrap().current.size, 4);
+            assert_eq!(in_memory.unwrap().newest().save.size, 4);
         }
 
         #[test]
@@ -1069,20 +1205,55 @@ mod tests {
         }
 
         #[test]
-        fn finds_version_file_by_contents() {
+        fn finds_version_file_by_name() {
             let (_dir, mut library) = with_tetris();
-            let save = add_save(&mut library, b"save", 1_000).unwrap().unwrap();
+            let version = add_save(&mut library, b"save", 1_000).unwrap().unwrap();
+            assert_eq!(version.name, "1970-01-01T00-16-40");
             let entry = &library.entries()[0];
             assert_eq!(
-                library.file_of_save(entry, &save).unwrap(),
+                library.file_of_version(entry, &version),
                 Some(
                     library
                         .root()
                         .join("saves/gba/Tetris/1970-01-01T00-16-40.sav")
                 )
             );
-            let other = Save::from_bytes(b"other", at(0));
-            assert_eq!(library.file_of_save(entry, &other).unwrap(), None);
+            let other = LibrarySave {
+                name: "other".to_string(),
+                save: version.save.clone(),
+            };
+            assert_eq!(library.file_of_version(entry, &other), None);
+        }
+
+        #[test]
+        fn names_second_version_of_same_second_with_a_number() {
+            let (_dir, mut library) = with_tetris();
+            add_save(&mut library, b"one", 1_000).unwrap();
+            let second = add_save(&mut library, b"two", 1_000).unwrap().unwrap();
+            assert_eq!(second.name, "1970-01-01T00-16-40-2");
+            let saves = library.entries()[0].save.as_ref().unwrap();
+            assert_eq!(saves.version_named("1970-01-01T00-16-40-2"), Some(&second));
+            assert_eq!(saves.version_named("never"), None);
+        }
+
+        #[test]
+        fn sorts_history_newest_first() {
+            let version = |name: &str, bytes: &[u8], secs: u64| LibrarySave {
+                name: name.to_string(),
+                save: Save::from_bytes(bytes, at(secs)),
+            };
+            let saves = LibrarySaves::from_saves(vec![
+                version("a", b"a", 1),
+                version("b", b"b", 3),
+                version("c", b"c", 2),
+            ])
+            .unwrap();
+            let names: Vec<_> = saves.iter().map(|version| version.name.as_str()).collect();
+            assert_eq!(names, ["b", "c", "a"]);
+            assert_eq!(saves.newest().name, "b");
+            assert!(saves.contains(&Save::from_bytes(b"c", at(9))));
+            assert!(!saves.contains(&Save::from_bytes(b"d", at(2))));
+            assert_eq!(LibrarySaves::from_saves(Vec::new()), None);
         }
     }
 
@@ -1094,7 +1265,7 @@ mod tests {
             let (_dir, mut library) = library_with(&[("roms/gba/Tetris.gba", b"hello")]);
             let cover = Cover::from_bytes(PNG.to_vec()).unwrap();
             library
-                .add_cover(&Platform::Gba, "Tetris.gba", &cover)
+                .set_cover(&Platform::Gba, "Tetris.gba", &cover)
                 .unwrap();
             let path = library.root().join("covers/gba/Tetris.png");
             assert_eq!(library.entries()[0].cover_path, Some(path.clone()));
@@ -1137,6 +1308,20 @@ mod tests {
         }
 
         #[test]
+        fn reports_no_save_and_rejects_missing_version_without_trashing() {
+            let (_dir, mut library) = library_with(&[("roms/gba/Tetris.gba", b"hello")]);
+            let entry = library.entries()[0].clone();
+            assert!(matches!(
+                library.trash_all_saves(&entry),
+                Ok(TrashSaveAllOutcome::NoSave)
+            ));
+            assert!(matches!(
+                library.trash_save_version(&entry, "never"),
+                Err(TrashSaveError::NoSuchVersion)
+            ));
+        }
+
+        #[test]
         fn rereads_remaining_saves() {
             let (_dir, mut library) = library();
             put(library.root(), "roms/gba/Tetris.gba", b"hello");
@@ -1145,9 +1330,9 @@ mod tests {
             library.reload().unwrap();
             fs::remove_file(&new).unwrap();
             library.reread_saves(&Platform::Gba, "Tetris.gba").unwrap();
-            let history = library.entries()[0].save.clone().unwrap();
-            assert_eq!(history.current.size, 1);
-            assert_eq!(history.versions, []);
+            let saves = library.entries()[0].save.clone().unwrap();
+            assert_eq!(saves.iter().count(), 1);
+            assert_eq!(saves.newest().save.size, 1);
         }
     }
 
@@ -1182,17 +1367,18 @@ mod tests {
         }
 
         #[test]
-        fn returns_no_files_after_game_comes_back() {
+        fn refuses_to_trash_orphan_after_game_comes_back() {
             let (_dir, mut library) = library();
-            put_at(library.root(), "saves/gba/Gone/old.sav", b"a", 1_000);
+            let save = put_at(library.root(), "saves/gba/Gone/old.sav", b"a", 1_000);
             library.reload().unwrap();
             let orphan = library.find_orphan_saves().unwrap().remove(0);
             put(library.root(), "roms/gba/Gone.gba", b"hello");
             library.reload().unwrap();
-            assert_eq!(
-                library.files_of_orphan_save(&orphan).unwrap(),
-                Vec::<PathBuf>::new()
-            );
+            assert!(matches!(
+                library.trash_orphan_save(&orphan),
+                Err(TrashOrphanSaveError::NoOrphanSave)
+            ));
+            assert!(save.exists());
         }
     }
 }
