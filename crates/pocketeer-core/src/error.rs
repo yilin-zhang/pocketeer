@@ -41,14 +41,6 @@ pub enum SharedError {
     TrashFailed { source: Arc<trash::Error> },
 }
 
-fn copies_text(copies: &[(PathBuf, PathBuf)]) -> String {
-    let copies: Vec<_> = copies
-        .iter()
-        .map(|(a, b)| format!("{} and {}", a.display(), b.display()))
-        .collect();
-    copies.join("; ")
-}
-
 impl From<io::Error> for SharedError {
     fn from(source: io::Error) -> Self {
         SharedError::Io(Arc::new(source))
@@ -61,6 +53,14 @@ impl From<trash::Error> for SharedError {
             source: Arc::new(source),
         }
     }
+}
+
+fn copies_text(copies: &[(PathBuf, PathBuf)]) -> String {
+    let copies: Vec<_> = copies
+        .iter()
+        .map(|(a, b)| format!("{} and {}", a.display(), b.display()))
+        .collect();
+    copies.join("; ")
 }
 
 #[cfg(test)]

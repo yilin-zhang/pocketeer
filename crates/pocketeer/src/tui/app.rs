@@ -6,6 +6,7 @@
 
 use std::{
     collections::HashSet,
+    fmt,
     path::{Path, PathBuf},
 };
 
@@ -26,7 +27,9 @@ use tui_input::Input;
 use super::{
     covers::CoverLoader,
     path_input::{self, DirReader, PathInput},
-    worker::{DevicePageData, GamesPageData, GamesTableRow, Worker, WorkerCommand, WorkerMessage},
+    worker::{
+        DevicePageData, GamesPageData, GamesTableRow, WorkerCommand, WorkerHandle, WorkerMessage,
+    },
 };
 
 // ============================================================================
@@ -215,14 +218,6 @@ pub enum GamesFilter {
 }
 
 impl GamesFilter {
-    pub fn label(self) -> &'static str {
-        match self {
-            GamesFilter::All => "all",
-            GamesFilter::InLibrary => "in library",
-            GamesFilter::OnDevice => "on device",
-        }
-    }
-
     fn next(self) -> Self {
         match self {
             GamesFilter::All => GamesFilter::InLibrary,
@@ -241,6 +236,16 @@ impl GamesFilter {
                 row.device_entry().is_some() || matches!(row, GamesTableRow::OrphanSaveOnDevice(_))
             }
         }
+    }
+}
+
+impl fmt::Display for GamesFilter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            GamesFilter::All => "all",
+            GamesFilter::InLibrary => "in library",
+            GamesFilter::OnDevice => "on device",
+        })
     }
 }
 
@@ -552,7 +557,7 @@ const NOT_ON_BOTH: &str = "nothing here is both in the library and on the device
 
 pub struct App {
     // Threads.
-    worker: Worker,
+    worker_handle: WorkerHandle,
     pub cover_loader: CoverLoader,
     dir_reader: DirReader,
     // Pages.
@@ -578,9 +583,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(worker: Worker, cover_loader: CoverLoader, dir_reader: DirReader) -> Self {
+    pub fn new(
+        worker_handle: WorkerHandle,
+        cover_loader: CoverLoader,
+        dir_reader: DirReader,
+    ) -> Self {
         Self {
-            worker,
+            worker_handle,
             cover_loader,
             dir_reader,
             current_page: Page::Games,
@@ -779,7 +788,7 @@ impl App {
             self.games.refresh_visible_rows(selected_key);
         } else if let Some(command_status) = &mut self.command_status {
             command_status.is_canceling = true;
-            self.worker.cancel();
+            self.worker_handle.cancel();
         }
     }
 
@@ -828,9 +837,9 @@ impl App {
             KeyCode::Char('c') => self.prompt_for_cover_to_import(),
             KeyCode::Char('x') => self.confirm_trash_games(),
             KeyCode::Char('X') => self.confirm_delete_games(),
-            KeyCode::Char('d') => self.worker.send(WorkerCommand::SyncDats),
+            KeyCode::Char('d') => self.worker_handle.send(WorkerCommand::SyncDats),
             KeyCode::Char('E') => self.eject(),
-            KeyCode::Char('r') => self.worker.send(WorkerCommand::Reload),
+            KeyCode::Char('r') => self.worker_handle.send(WorkerCommand::Reload),
             KeyCode::Enter | KeyCode::Right => self.open_saves_panel(),
             KeyCode::Tab | KeyCode::Char('2') => self.show_cores(),
             KeyCode::Char('3') => self.current_page = Page::Bios,
@@ -877,7 +886,7 @@ impl App {
 
     fn eject(&mut self) {
         match self.device_root() {
-            Some(_) => self.worker.send(WorkerCommand::Eject),
+            Some(_) => self.worker_handle.send(WorkerCommand::Eject),
             None => self.show_status_message("no device is open"),
         }
     }
@@ -889,7 +898,7 @@ impl App {
     fn show_cores(&mut self) {
         self.current_page = Page::Cores;
         if self.cores.core_list.is_none() {
-            self.worker.send(WorkerCommand::ShowCores);
+            self.worker_handle.send(WorkerCommand::ShowCores);
         }
     }
 
@@ -904,7 +913,7 @@ impl App {
             KeyCode::Char('U') => self.install_selected_core(),
             KeyCode::Char('A') => self.update_every_core(),
             KeyCode::Char('X') => self.confirm_remove_core(),
-            KeyCode::Char('r') => self.worker.send(WorkerCommand::Reload),
+            KeyCode::Char('r') => self.worker_handle.send(WorkerCommand::Reload),
             KeyCode::Char('?') => self.dialog = Some(help_dialog()),
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => self.handle_escape(),
@@ -925,7 +934,9 @@ impl App {
         };
         match why_not {
             Some(why) => self.show_status_message(why),
-            None => self.worker.send(WorkerCommand::InstallCores(vec![id])),
+            None => self
+                .worker_handle
+                .send(WorkerCommand::InstallCores(vec![id])),
         }
     }
 
@@ -940,7 +951,7 @@ impl App {
         if ids.is_empty() {
             self.show_status_message("every core is up to date");
         } else {
-            self.worker.send(WorkerCommand::InstallCores(ids));
+            self.worker_handle.send(WorkerCommand::InstallCores(ids));
         }
     }
 
@@ -976,7 +987,7 @@ impl App {
             KeyCode::Tab | KeyCode::Char('1') => self.current_page = Page::Games,
             KeyCode::Char('2') => self.show_cores(),
             KeyCode::Char('3') => self.current_page = Page::Bios,
-            KeyCode::Char('r') => self.worker.send(WorkerCommand::Reload),
+            KeyCode::Char('r') => self.worker_handle.send(WorkerCommand::Reload),
             KeyCode::Char('?') => self.dialog = Some(help_dialog()),
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => self.handle_escape(),
@@ -993,7 +1004,7 @@ impl App {
             KeyCode::Char('1') => self.current_page = Page::Games,
             KeyCode::Char('2') => self.show_cores(),
             KeyCode::Char('I') => self.prompt_for_bios_file(),
-            KeyCode::Char('r') => self.worker.send(WorkerCommand::Reload),
+            KeyCode::Char('r') => self.worker_handle.send(WorkerCommand::Reload),
             KeyCode::Char('?') => self.dialog = Some(help_dialog()),
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => self.handle_escape(),
@@ -1033,14 +1044,19 @@ impl App {
         };
         let path = import.input.path();
         match import.target {
-            ImportTarget::Save(local) => self.worker.send(WorkerCommand::ImportSave(local, path)),
-            ImportTarget::Cover(local) => self.worker.send(WorkerCommand::ImportCover(local, path)),
-            ImportTarget::Bios(row) => self.worker.send(WorkerCommand::PutBios(row, path)),
+            ImportTarget::Save(local) => self
+                .worker_handle
+                .send(WorkerCommand::ImportSave(local, path)),
+            ImportTarget::Cover(local) => self
+                .worker_handle
+                .send(WorkerCommand::ImportCover(local, path)),
+            ImportTarget::Bios(row) => self.worker_handle.send(WorkerCommand::PutBios(row, path)),
             ImportTarget::Game => {
                 let extension = path.extension().and_then(|extension| extension.to_str());
                 let tells_platform = extension.and_then(Platform::from_extension).is_some();
                 if tells_platform || import.input.names_dir() {
-                    self.worker.send(WorkerCommand::ImportGame(path, None));
+                    self.worker_handle
+                        .send(WorkerCommand::ImportGame(path, None));
                 } else {
                     self.prompt = Some(Prompt::Platform(PlatformPrompt {
                         file_to_import: path,
@@ -1065,7 +1081,7 @@ impl App {
                 };
                 let new = rename.input.value().trim().to_string();
                 if new != rename.stem() {
-                    self.worker.send(match rename.target {
+                    self.worker_handle.send(match rename.target {
                         RenameTarget::InLibrary(local) => {
                             WorkerCommand::RenameGamesInLibrary(vec![(local, new)])
                         }
@@ -1132,7 +1148,8 @@ impl App {
                 let platform = Platform::iter().nth(choice.selected_platform_index);
                 let file = choice.file_to_import.clone();
                 self.prompt = None;
-                self.worker.send(WorkerCommand::ImportGame(file, platform));
+                self.worker_handle
+                    .send(WorkerCommand::ImportGame(file, platform));
             }
             KeyCode::Esc => self.prompt = None,
             _ => {}
@@ -1216,7 +1233,7 @@ impl App {
                 match command {
                     Some(command) => {
                         self.games.marked_rows.clear();
-                        self.worker.send(command);
+                        self.worker_handle.send(command);
                     }
                     None => self.inapplicable_row_count = 0,
                 }
@@ -1269,7 +1286,8 @@ impl App {
             return;
         }
         self.inapplicable_row_count += inapplicable;
-        self.worker.send(WorkerCommand::ProposeRenames(entries));
+        self.worker_handle
+            .send(WorkerCommand::ProposeRenames(entries));
     }
 
     fn confirm_trash_orphans(&mut self) {
@@ -1472,7 +1490,7 @@ impl App {
         }
         self.inapplicable_row_count += inapplicable;
         self.games.marked_rows.clear();
-        self.worker.send(command(entries));
+        self.worker_handle.send(command(entries));
     }
 
     /// Pushes the newest versions onto the target copies whose game is in the
@@ -1501,7 +1519,7 @@ impl App {
             .cloned();
         match (on_device, version) {
             (Some(on_device), Some(version)) => {
-                self.worker
+                self.worker_handle
                     .send(WorkerCommand::PushSaveVersion(on_device, version));
             }
             _ => self.show_status_message(NOT_ON_BOTH),
@@ -1726,10 +1744,10 @@ mod tests {
     }
 
     fn app() -> (App, Receiver<QueuedCommand>) {
-        let (worker, rx) = Worker::recording();
+        let (worker_handle, rx) = WorkerHandle::recording();
         let cover_loader = CoverLoader::spawn(Picker::halfblocks(), || {});
         let paths = DirReader::spawn(|| {});
-        let mut app = App::new(worker, cover_loader, paths);
+        let mut app = App::new(worker_handle, cover_loader, paths);
         app.handle_worker_message(WorkerMessage::GamesPageChanged(GamesPageData {
             rows: rows(),
             device_root: Some(PathBuf::from("/Volumes/POCKET")),

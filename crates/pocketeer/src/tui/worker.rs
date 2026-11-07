@@ -65,6 +65,76 @@ pub enum WorkerCommand {
     RenameOnDevice(DeviceEntry, String),
 }
 
+impl WorkerCommand {
+    fn label(&self) -> &'static str {
+        match self {
+            WorkerCommand::PullGames(_) => "pulling games",
+            WorkerCommand::PullSaves(_) => "backing up saves",
+            WorkerCommand::PushGames(_) => "pushing games",
+            WorkerCommand::PushSaves(_) => "pushing saves",
+            WorkerCommand::PushSaveVersion(..) => "pushing a save",
+            WorkerCommand::FetchCovers(_) => "downloading covers",
+            WorkerCommand::ImportGame(..) => "importing games",
+            WorkerCommand::ImportSave(..) => "importing a save",
+            WorkerCommand::ImportCover(..) => "importing a cover",
+            WorkerCommand::TrashGames(_) => "putting games in the trash",
+            WorkerCommand::TrashSaveVersion(..) => "putting a save in the trash",
+            WorkerCommand::TrashOrphanSaves(_) => "putting saves in the trash",
+            WorkerCommand::DeleteGames(_) => "deleting games",
+            WorkerCommand::DeleteSaves(_) | WorkerCommand::DeleteOrphanSaves(_) => "deleting saves",
+            WorkerCommand::SyncDats => "updating the DATs",
+            WorkerCommand::Reload => "reading everything again",
+            WorkerCommand::Eject => "ejecting the device",
+            WorkerCommand::ShowCores => "reading the cores",
+            WorkerCommand::ProposeRenames(_) => "finding standard names",
+            WorkerCommand::InstallCores(_) => "installing cores",
+            WorkerCommand::RemoveCores(_) => "removing cores",
+            WorkerCommand::PutBios(..) => "putting a file on the device",
+            WorkerCommand::RenameGamesInLibrary(_) => "renaming games",
+            WorkerCommand::RenameOnDevice(..) => "renaming a game",
+        }
+    }
+
+    fn target_count(&self) -> usize {
+        match self {
+            // These hold a list, and each item is one target. They take several
+            // arms only because the lists hold different types.
+            WorkerCommand::PullGames(games)
+            | WorkerCommand::PullSaves(games)
+            | WorkerCommand::PushSaves(games)
+            | WorkerCommand::DeleteGames(games)
+            | WorkerCommand::DeleteSaves(games) => games.len(),
+            WorkerCommand::PushGames(games)
+            | WorkerCommand::FetchCovers(games)
+            | WorkerCommand::TrashGames(games) => games.len(),
+            WorkerCommand::TrashOrphanSaves(orphan_saves) => orphan_saves.len(),
+            WorkerCommand::DeleteOrphanSaves(orphan_saves) => orphan_saves.len(),
+            WorkerCommand::InstallCores(ids) | WorkerCommand::RemoveCores(ids) => ids.len(),
+            WorkerCommand::RenameGamesInLibrary(games) => games.len(),
+
+            // A folder can hold many games, but that isn't known until it is
+            // read. `run_command` replaces this count after reading it.
+            WorkerCommand::ImportGame(..) => 1,
+
+            // These act on one thing, so they report one step.
+            WorkerCommand::PushSaveVersion(..)
+            | WorkerCommand::PutBios(..)
+            | WorkerCommand::RenameOnDevice(..)
+            | WorkerCommand::ImportSave(..)
+            | WorkerCommand::ImportCover(..)
+            | WorkerCommand::TrashSaveVersion(..)
+            | WorkerCommand::Eject => 1,
+
+            // These go through many files or platforms, but report one result
+            // when they end.
+            WorkerCommand::SyncDats | WorkerCommand::Reload => 1,
+
+            // `run_command` returns before it needs a count for these.
+            WorkerCommand::ShowCores | WorkerCommand::ProposeRenames(_) => 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum GamesTableRow {
     Game(GameRow),
@@ -172,9 +242,10 @@ pub struct QueuedCommand {
     pub command: WorkerCommand,
 }
 
-/// The UI's end of the worker. Dropping it cancels as [`Worker::cancel`] does
-/// and waits for the thread, so that what it writes gets finished and logged.
-pub struct Worker {
+/// The UI's end of the worker. Dropping it cancels as [`WorkerHandle::cancel`]
+/// does and waits for the thread, so that what it writes gets finished and
+/// logged.
+pub struct WorkerHandle {
     /// None once it is dropped.
     tx: Option<mpsc::Sender<QueuedCommand>>,
     /// The flag every command sent until the next cancel carries. Once true it
@@ -184,7 +255,7 @@ pub struct Worker {
     thread: Option<JoinHandle<()>>,
 }
 
-impl Worker {
+impl WorkerHandle {
     /// Starts the thread, which opens the library at `library` and the device
     /// at `device`, or else any device mounted now or later.
     pub fn spawn(
@@ -203,14 +274,14 @@ impl Worker {
 
     /// A worker with no thread, whose commands can be read back.
     #[cfg(test)]
-    pub fn recording() -> (Worker, mpsc::Receiver<QueuedCommand>) {
+    pub fn recording() -> (WorkerHandle, mpsc::Receiver<QueuedCommand>) {
         let (tx, rx) = mpsc::channel();
-        let worker = Worker {
+        let worker_handle = WorkerHandle {
             tx: Some(tx),
             is_canceled: Arc::default(),
             thread: None,
         };
-        (worker, rx)
+        (worker_handle, rx)
     }
 
     pub fn send(&mut self, command: WorkerCommand) {
@@ -230,7 +301,7 @@ impl Worker {
     }
 }
 
-impl Drop for Worker {
+impl Drop for WorkerHandle {
     fn drop(&mut self) {
         self.cancel();
         // With nothing left to come, the thread returns.
@@ -440,10 +511,10 @@ impl WorkerState<'_> {
             send_message: self.send_message,
             orphan_saves: &self.orphan_saves,
             is_canceled,
-            target_count: target_count(&command),
+            target_count: command.target_count(),
             reports: Vec::new(),
         };
-        let label = command_label(&command);
+        let label = command.label();
         (self.send_message)(WorkerMessage::CommandStarted {
             label: label.to_string(),
             target_count: command_progress.target_count,
@@ -693,63 +764,6 @@ fn send_duplicates(
     send_message(WorkerMessage::DuplicateGamesSkipped(lines.collect()));
 }
 
-fn command_label(command: &WorkerCommand) -> &'static str {
-    match command {
-        WorkerCommand::PullGames(_) => "pulling games",
-        WorkerCommand::PullSaves(_) => "backing up saves",
-        WorkerCommand::PushGames(_) => "pushing games",
-        WorkerCommand::PushSaves(_) => "pushing saves",
-        WorkerCommand::PushSaveVersion(..) => "pushing a save",
-        WorkerCommand::FetchCovers(_) => "downloading covers",
-        WorkerCommand::ImportGame(..) => "importing games",
-        WorkerCommand::ImportSave(..) => "importing a save",
-        WorkerCommand::ImportCover(..) => "importing a cover",
-        WorkerCommand::TrashGames(_) => "putting games in the trash",
-        WorkerCommand::TrashSaveVersion(..) => "putting a save in the trash",
-        WorkerCommand::TrashOrphanSaves(_) => "putting saves in the trash",
-        WorkerCommand::DeleteGames(_) => "deleting games",
-        WorkerCommand::DeleteSaves(_) | WorkerCommand::DeleteOrphanSaves(_) => "deleting saves",
-        WorkerCommand::SyncDats => "updating the DATs",
-        WorkerCommand::Reload => "reading everything again",
-        WorkerCommand::Eject => "ejecting the device",
-        WorkerCommand::ShowCores => "reading the cores",
-        WorkerCommand::ProposeRenames(_) => "finding standard names",
-        WorkerCommand::InstallCores(_) => "installing cores",
-        WorkerCommand::RemoveCores(_) => "removing cores",
-        WorkerCommand::PutBios(..) => "putting a file on the device",
-        WorkerCommand::RenameGamesInLibrary(_) => "renaming games",
-        WorkerCommand::RenameOnDevice(..) => "renaming a game",
-    }
-}
-
-fn target_count(command: &WorkerCommand) -> usize {
-    match command {
-        WorkerCommand::PullGames(games)
-        | WorkerCommand::PullSaves(games)
-        | WorkerCommand::PushSaves(games)
-        | WorkerCommand::DeleteGames(games)
-        | WorkerCommand::DeleteSaves(games) => games.len(),
-        WorkerCommand::PushGames(games)
-        | WorkerCommand::FetchCovers(games)
-        | WorkerCommand::TrashGames(games) => games.len(),
-        WorkerCommand::TrashOrphanSaves(orphan_saves) => orphan_saves.len(),
-        WorkerCommand::InstallCores(ids) | WorkerCommand::RemoveCores(ids) => ids.len(),
-        WorkerCommand::ShowCores | WorkerCommand::ProposeRenames(_) => 0,
-        WorkerCommand::DeleteOrphanSaves(orphan_saves) => orphan_saves.len(),
-        WorkerCommand::RenameGamesInLibrary(games) => games.len(),
-        WorkerCommand::PushSaveVersion(..)
-        | WorkerCommand::PutBios(..)
-        | WorkerCommand::RenameOnDevice(..)
-        | WorkerCommand::ImportGame(..)
-        | WorkerCommand::ImportSave(..)
-        | WorkerCommand::ImportCover(..)
-        | WorkerCommand::TrashSaveVersion(..)
-        | WorkerCommand::SyncDats
-        | WorkerCommand::Reload
-        | WorkerCommand::Eject => 1,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{fs, sync::mpsc::Receiver};
@@ -766,12 +780,15 @@ mod tests {
     }
 
     /// The worker on `library` and `device`, and the receiver of its messages.
-    fn worker_on(library: PathBuf, device: Option<PathBuf>) -> (Worker, Receiver<WorkerMessage>) {
+    fn worker_on(
+        library: PathBuf,
+        device: Option<PathBuf>,
+    ) -> (WorkerHandle, Receiver<WorkerMessage>) {
         let (tx, rx) = mpsc::channel();
-        let worker = Worker::spawn(library, device, move |message| {
+        let worker_handle = WorkerHandle::spawn(library, device, move |message| {
             let _ = tx.send(message);
         });
-        (worker, rx)
+        (worker_handle, rx)
     }
 
     /// The summary, and whether it failed, of the command `messages` end with.
@@ -794,14 +811,14 @@ mod tests {
     }
 
     /// A library with two games and a device with one, the worker on them.
-    fn started() -> (tempfile::TempDir, Worker, Receiver<WorkerMessage>) {
+    fn started() -> (tempfile::TempDir, WorkerHandle, Receiver<WorkerMessage>) {
         let (dir, library, device) = empty_library_and_device();
         put(&library, "roms/gba/A.gba", b"a");
         put(&library, "roms/gba/B.gba", b"b");
         put(&device, "Assets/gba/common/C.gba", b"c");
         put(&device, "Saves/gba/common/Gone.sav", b"orphan");
-        let (worker, rx) = worker_on(library, Some(device));
-        (dir, worker, rx)
+        let (worker_handle, rx) = worker_on(library, Some(device));
+        (dir, worker_handle, rx)
     }
 
     /// Every message up to the first that `is_last`.
@@ -853,17 +870,17 @@ mod tests {
     }
 
     /// A device with two copies of a game, the worker on it.
-    fn started_with_two_copies() -> (tempfile::TempDir, Worker, Receiver<WorkerMessage>) {
+    fn started_with_two_copies() -> (tempfile::TempDir, WorkerHandle, Receiver<WorkerMessage>) {
         let (dir, library, device) = empty_library_and_device();
         put(&device, "Assets/gba/common/One.gba", b"c");
         put(&device, "Assets/gba/common/RPG/Two.gba", b"c");
-        let (worker, rx) = worker_on(library, Some(device));
-        (dir, worker, rx)
+        let (worker_handle, rx) = worker_on(library, Some(device));
+        (dir, worker_handle, rx)
     }
 
     /// A device with the core `a.B` and a freshly written inventory, so it
     /// isn't fetched again, that offers `Spiritualized.GB`.
-    fn started_with_cores() -> (tempfile::TempDir, Worker, Receiver<WorkerMessage>) {
+    fn started_with_cores() -> (tempfile::TempDir, WorkerHandle, Receiver<WorkerMessage>) {
         let (dir, library, device) = empty_library_and_device();
         put(
             &library,
@@ -871,8 +888,8 @@ mod tests {
             br#"[{"id":"Spiritualized.GB","version":"2.0","platforms":["gb"],"download_url":"http://127.0.0.1:1/never"}]"#,
         );
         put(&device, "Cores/a.B/core.json", b"{}");
-        let (worker, rx) = worker_on(library, Some(device));
-        (dir, worker, rx)
+        let (worker_handle, rx) = worker_on(library, Some(device));
+        (dir, worker_handle, rx)
     }
 
     /// The ids of the cores last sent in `messages`.
@@ -894,12 +911,13 @@ mod tests {
 
     /// A device with a game that can't be read because a folder is where its
     /// save goes, and the worker on it.
-    fn started_with_unreadable_device() -> (tempfile::TempDir, Worker, Receiver<WorkerMessage>) {
+    fn started_with_unreadable_device() -> (tempfile::TempDir, WorkerHandle, Receiver<WorkerMessage>)
+    {
         let (dir, library, device) = empty_library_and_device();
         put(&device, "Assets/gba/common/One.gba", b"c");
         put(&device, "Saves/gba/common/One.sav/x", b"");
-        let (worker, rx) = worker_on(library, Some(device));
-        (dir, worker, rx)
+        let (worker_handle, rx) = worker_on(library, Some(device));
+        (dir, worker_handle, rx)
     }
 
     fn duplicates(messages: &[WorkerMessage]) -> Vec<&[String]> {
@@ -914,25 +932,25 @@ mod tests {
 
     #[test]
     fn reports_duplicates_on_open_and_reload() {
-        let (_dir, mut worker, rx) = started_with_two_copies();
+        let (_dir, mut worker_handle, rx) = started_with_two_copies();
         let lines = ["gba/RPG/Two.gba is the same game as gba/One.gba".to_string()];
         let opening = until_device_read(&rx);
         assert_eq!(duplicates(&opening), [&lines[..]]);
         assert_eq!(last_games_page_data(&opening).rows.len(), 1);
-        worker.send(WorkerCommand::Reload);
+        worker_handle.send(WorkerCommand::Reload);
         assert_eq!(duplicates(&until_finished(&rx)), [&lines[..]]);
     }
 
     #[test]
     fn shows_next_copy_without_warning_after_deleting_first() {
-        let (_dir, mut worker, rx) = started_with_two_copies();
+        let (_dir, mut worker_handle, rx) = started_with_two_copies();
         let opening = until_device_read(&rx);
         let first = last_games_page_data(&opening).rows[0]
             .device_entry()
             .unwrap()
             .clone();
         assert_eq!(first.path, Path::new("One.gba"));
-        worker.send(WorkerCommand::DeleteGames(vec![first]));
+        worker_handle.send(WorkerCommand::DeleteGames(vec![first]));
         let messages = until_finished(&rx);
         assert_eq!(duplicates(&messages), Vec::<&[String]>::new());
         let rows = &last_games_page_data(&messages).rows;
@@ -968,10 +986,10 @@ mod tests {
 
     #[test]
     fn sends_device_page_after_command() {
-        let (dir, mut worker, rx) = started();
+        let (dir, mut worker_handle, rx) = started();
         until_device_read(&rx);
         put(&dir.path().join("device"), "Assets/gba/common/D.gba", b"d");
-        worker.send(WorkerCommand::Reload);
+        worker_handle.send(WorkerCommand::Reload);
         let messages = until_finished(&rx);
         assert_eq!(device_page_sent(&messages).unwrap().game_count, 2);
     }
@@ -1028,10 +1046,10 @@ mod tests {
 
     #[test]
     fn reports_progress_for_each_game() {
-        let (_dir, mut worker, rx) = started();
+        let (_dir, mut worker_handle, rx) = started();
         let opening = until_device_read(&rx);
         let games = locals(last_games_page_data(&opening));
-        worker.send(WorkerCommand::PushGames(games));
+        worker_handle.send(WorkerCommand::PushGames(games));
         let messages = until_finished(&rx);
         let progress: Vec<_> = messages
             .iter()
@@ -1084,11 +1102,11 @@ mod tests {
 
     #[test]
     fn adds_row_for_imported_game() {
-        let (dir, mut worker, rx) = started();
+        let (dir, mut worker_handle, rx) = started();
         let opening = until_device_read(&rx);
         let before = locals(last_games_page_data(&opening)).len();
         let from = put(dir.path(), "elsewhere/New.bin", b"new");
-        worker.send(WorkerCommand::ImportGame(from, Some(Platform::Gb)));
+        worker_handle.send(WorkerCommand::ImportGame(from, Some(Platform::Gb)));
         let messages = until_finished(&rx);
         assert!(!finished(&messages).1);
         assert_eq!(locals(last_games_page_data(&messages)).len(), before + 1);
@@ -1096,11 +1114,11 @@ mod tests {
 
     #[test]
     fn counts_games_in_imported_dir() {
-        let (dir, mut worker, rx) = started();
+        let (dir, mut worker_handle, rx) = started();
         until_device_read(&rx);
         put(dir.path(), "elsewhere/New.gb", b"new");
         put(dir.path(), "elsewhere/deep/Other.gb", b"other");
-        worker.send(WorkerCommand::ImportGame(
+        worker_handle.send(WorkerCommand::ImportGame(
             dir.path().join("elsewhere"),
             None,
         ));
@@ -1110,14 +1128,14 @@ mod tests {
 
     #[test]
     fn deletes_orphan_save_from_device() {
-        let (_dir, mut worker, rx) = started();
+        let (_dir, mut worker_handle, rx) = started();
         let opening = until_device_read(&rx);
         let GamesTableRow::OrphanSaveOnDevice(orphan) =
             last_games_page_data(&opening).rows[3].clone()
         else {
             panic!()
         };
-        worker.send(WorkerCommand::DeleteOrphanSaves(vec![orphan]));
+        worker_handle.send(WorkerCommand::DeleteOrphanSaves(vec![orphan]));
         let messages = until_finished(&rx);
         assert_eq!(
             finished(&messages),
@@ -1137,9 +1155,9 @@ game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686
         );
         put(&library, "roms/gba/Old.gba", b"hello");
         put(&library, "roms/gba/Mine.gba", b"unknown");
-        let (mut worker, rx) = worker_on(library, Some(device));
+        let (mut worker_handle, rx) = worker_on(library, Some(device));
         let opening = until_device_read(&rx);
-        worker.send(WorkerCommand::ProposeRenames(locals(last_games_page_data(
+        worker_handle.send(WorkerCommand::ProposeRenames(locals(last_games_page_data(
             &opening,
         ))));
         let messages = messages_until(&rx, |message| {
@@ -1159,10 +1177,10 @@ game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686
 
     #[test]
     fn reports_renamed_game_under_new_name() {
-        let (_dir, mut worker, rx) = started();
+        let (_dir, mut worker_handle, rx) = started();
         let opening = until_device_read(&rx);
         let local = locals(last_games_page_data(&opening)).remove(0);
-        worker.send(WorkerCommand::RenameGamesInLibrary(vec![(
+        worker_handle.send(WorkerCommand::RenameGamesInLibrary(vec![(
             local,
             "Renamed".to_string(),
         )]));
@@ -1180,7 +1198,7 @@ game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686
 
     #[test]
     fn counts_games_renamed_in_library() {
-        let (_dir, mut worker, rx) = started();
+        let (_dir, mut worker_handle, rx) = started();
         let opening = until_device_read(&rx);
         let renames = locals(last_games_page_data(&opening))
             .into_iter()
@@ -1189,7 +1207,7 @@ game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686
                 (local, new)
             })
             .collect();
-        worker.send(WorkerCommand::RenameGamesInLibrary(renames));
+        worker_handle.send(WorkerCommand::RenameGamesInLibrary(renames));
         let messages = until_finished(&rx);
         assert_eq!(finished(&messages), ("renaming games: 2 done", false));
         let names: Vec<String> = locals(last_games_page_data(&messages))
@@ -1201,11 +1219,11 @@ game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686
 
     #[test]
     fn cancels_only_commands_sent_before_cancel() {
-        let (mut worker, rx) = Worker::recording();
-        worker.send(WorkerCommand::Reload);
-        worker.send(WorkerCommand::SyncDats);
-        worker.cancel();
-        worker.send(WorkerCommand::Eject);
+        let (mut worker_handle, rx) = WorkerHandle::recording();
+        worker_handle.send(WorkerCommand::Reload);
+        worker_handle.send(WorkerCommand::SyncDats);
+        worker_handle.cancel();
+        worker_handle.send(WorkerCommand::Eject);
         let flags: Vec<bool> = rx
             .try_iter()
             .map(|queued| queued.is_canceled.load(Ordering::Relaxed))
@@ -1215,9 +1233,9 @@ game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686
 
     #[test]
     fn ends_thread_when_dropped() {
-        let (_dir, worker, rx) = started();
+        let (_dir, worker_handle, rx) = started();
         until_device_read(&rx);
-        drop(worker);
+        drop(worker_handle);
         // The thread held the other end.
         while rx.try_recv().is_ok() {}
         assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
@@ -1225,10 +1243,10 @@ game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686
 
     #[test]
     fn finishes_at_most_current_game_when_dropped() {
-        let (dir, mut worker, rx) = started();
+        let (dir, mut worker_handle, rx) = started();
         let games = locals(last_games_page_data(&until_device_read(&rx)));
-        worker.send(WorkerCommand::PushGames(games));
-        drop(worker);
+        worker_handle.send(WorkerCommand::PushGames(games));
+        drop(worker_handle);
         let on_device = ["A.gba", "B.gba"]
             .iter()
             .filter(|name| {
@@ -1266,11 +1284,11 @@ game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686
             br#"{"data":{"data_slots":[{"filename":"gba_bios.bin","required":true}]}}"#,
         );
         let from = put(dir.path(), "mine.bin", b"bios");
-        let (mut worker, rx) = worker_on(library, Some(device.clone()));
+        let (mut worker_handle, rx) = worker_on(library, Some(device.clone()));
         let opening = until_device_read(&rx);
         let told = bios_sent(&opening);
         assert_eq!(told[0].status, BiosStatus::Missing);
-        worker.send(WorkerCommand::PutBios(told[0].clone(), from));
+        worker_handle.send(WorkerCommand::PutBios(told[0].clone(), from));
         let messages = until_finished(&rx);
         assert_eq!(
             finished(&messages),
@@ -1282,23 +1300,23 @@ game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686
 
     #[test]
     fn sends_cores_only_after_page_opens() {
-        let (_dir, mut worker, rx) = started_with_cores();
+        let (_dir, mut worker_handle, rx) = started_with_cores();
         let opening = until_device_read(&rx);
         assert_eq!(cores_sent(&opening), None);
-        worker.send(WorkerCommand::Reload);
+        worker_handle.send(WorkerCommand::Reload);
         assert_eq!(cores_sent(&until_finished(&rx)), None);
-        worker.send(WorkerCommand::ShowCores);
+        worker_handle.send(WorkerCommand::ShowCores);
         let told = cores_sent(&until_cores(&rx)).unwrap();
         assert_eq!(told, ["Spiritualized.GB", "a.B"]);
     }
 
     #[test]
     fn drops_removed_core_from_cores_update() {
-        let (_dir, mut worker, rx) = started_with_cores();
+        let (_dir, mut worker_handle, rx) = started_with_cores();
         until_device_read(&rx);
-        worker.send(WorkerCommand::ShowCores);
+        worker_handle.send(WorkerCommand::ShowCores);
         until_cores(&rx);
-        worker.send(WorkerCommand::RemoveCores(vec!["a.B".to_string()]));
+        worker_handle.send(WorkerCommand::RemoveCores(vec!["a.B".to_string()]));
         let messages = until_finished(&rx);
         assert_eq!(finished(&messages), ("a.B: removed from the device", false));
         assert_eq!(cores_sent(&messages).unwrap(), ["Spiritualized.GB"]);
@@ -1306,9 +1324,9 @@ game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686
 
     #[test]
     fn reports_failed_core_download() {
-        let (_dir, mut worker, rx) = started_with_cores();
+        let (_dir, mut worker_handle, rx) = started_with_cores();
         until_device_read(&rx);
-        worker.send(WorkerCommand::InstallCores(vec![
+        worker_handle.send(WorkerCommand::InstallCores(vec![
             "Spiritualized.GB".to_string(),
         ]));
         let messages = until_finished(&rx);
@@ -1348,10 +1366,10 @@ game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686
 
     #[test]
     fn logs_commands_with_tui_front_end() {
-        let (dir, mut worker, rx) = started();
+        let (dir, mut worker_handle, rx) = started();
         let opening = until_device_read(&rx);
         let games = locals(last_games_page_data(&opening));
-        worker.send(WorkerCommand::PushGames(games));
+        worker_handle.send(WorkerCommand::PushGames(games));
         until_finished(&rx);
         let log = fs::read_to_string(dir.path().join("library/pocketeer.log")).unwrap();
         assert!(log.contains(r#""front_end":"tui""#), "{log}");
@@ -1359,11 +1377,11 @@ game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686
 
     #[test]
     fn stops_command_and_reports_when_log_cannot_be_written() {
-        let (dir, mut worker, rx) = started();
+        let (dir, mut worker_handle, rx) = started();
         let opening = until_device_read(&rx);
         let games = locals(last_games_page_data(&opening));
         fs::create_dir(dir.path().join("library/pocketeer.log")).unwrap();
-        worker.send(WorkerCommand::PushGames(games));
+        worker_handle.send(WorkerCommand::PushGames(games));
         let messages = until_finished(&rx);
         let done = messages
             .iter()

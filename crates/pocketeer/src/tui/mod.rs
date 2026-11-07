@@ -21,7 +21,7 @@ use ratatui_image::picker::Picker;
 use app::App;
 use covers::CoverLoader;
 use path_input::DirReader;
-use worker::{Worker, WorkerMessage};
+use worker::{WorkerHandle, WorkerMessage};
 
 /// What the loop wakes up for.
 enum Event {
@@ -77,7 +77,7 @@ fn start_threads(
     let input = tx.clone();
     thread::spawn(move || read_input(&input));
     let to_ui = tx.clone();
-    let worker = Worker::spawn(library, device, move |message| {
+    let worker_handle = WorkerHandle::spawn(library, device, move |message| {
         let _ = to_ui.send(Event::Worker(Box::new(message)));
     });
     let to_ui = tx.clone();
@@ -87,7 +87,7 @@ fn start_threads(
     let paths = DirReader::spawn(move || {
         let _ = tx.send(Event::DirRead);
     });
-    (App::new(worker, cover_loader, paths), rx)
+    (App::new(worker_handle, cover_loader, paths), rx)
 }
 
 /// Runs until the user quits, or returns the reason if the library can't be

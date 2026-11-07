@@ -278,7 +278,7 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
             true => Palette::Ink,
             false => Palette::Faint,
         };
-        filters.push_span(palette.span(format!("  {} ", filter.label())));
+        filters.push_span(palette.span(format!("  {filter} ")));
     }
     let [search_area, filter_area] = Layout::horizontal([
         Constraint::Min(0),
