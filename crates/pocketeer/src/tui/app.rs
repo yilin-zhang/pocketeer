@@ -409,13 +409,21 @@ impl App {
     // ---- Keys: where each goes -------------------------------------------------
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        // A message stays until the next key.
+        self.status_message = None;
+        // The terminal is in raw mode, so Ctrl-C arrives as a key rather than
+        // stopping the program. It quits whatever has the focus.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
             return;
         }
+        // A key bound in what has the focus does its action. Any other key is
+        // typed into the input or search, if one is open.
         if !self.keymap().press(key, self) {
             self.type_key(key);
         }
+        // A dialog that came while another was open shows once that one has
+        // closed.
         if self.dialog.is_none() {
             self.dialog = self.next_dialog.take();
         }
