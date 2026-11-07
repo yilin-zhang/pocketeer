@@ -454,7 +454,7 @@ mod could_not_start {
                 .arg("games"),
         );
         let reason = format!(
-            "{} is not a Pocket: no Analogue_Pocket.json, Assets, Cores",
+            "{} is not an Analogue Pocket device",
             setup.library().display()
         );
         assert_json_could_not_start(&ran, &reason);

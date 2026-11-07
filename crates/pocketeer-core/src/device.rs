@@ -88,6 +88,20 @@ struct DeviceLayout {
 }
 
 impl DeviceLayout {
+    fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+        }
+    }
+
+    /// Whether the root has what every Pocket has there. A card gets these the
+    /// first time it is in a Pocket that is turned on.
+    fn is_device(&self) -> bool {
+        [self.pocket_json(), self.assets(), self.cores()]
+            .iter()
+            .all(|path| path.exists())
+    }
+
     fn pocket_json(&self) -> PathBuf {
         self.root.join("Analogue_Pocket.json")
     }
@@ -187,12 +201,8 @@ pub enum DeleteOrphanSaveError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpenDeviceError {
-    /// `path` lacks some of the files and folders every Pocket has.
-    #[error("{} is not a Pocket: no {}", .path.display(), .missing.join(", "))]
-    NotADevice {
-        path: PathBuf,
-        missing: Vec<&'static str>,
-    },
+    #[error("{} is not an Analogue Pocket device", .path.display())]
+    NotADevice { path: PathBuf },
     #[error("more than one device is mounted: {}", joined_paths(.found))]
     ManyDevices { found: Vec<PathBuf> },
 }
@@ -279,32 +289,34 @@ pub struct Device {
 }
 
 impl Device {
-    /// What a folder must have at its root to be a Pocket.
-    const MARKERS: [&str; 3] = ["Analogue_Pocket.json", "Assets", "Cores"];
-
     /// The roots of the mounted devices, sorted.
     pub fn find_mounted() -> Vec<PathBuf> {
-        devices_among(mounted_volumes())
+        Self::roots_among(mounted_volumes())
+    }
+
+    /// The roots of the devices among `volumes`, sorted, each once.
+    fn roots_among(volumes: Vec<PathBuf>) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = volumes
+            .into_iter()
+            .filter(|path| Self::is_device(path))
+            .collect();
+        roots.sort();
+        roots.dedup();
+        roots
     }
 
     /// Whether the folder at `root` looks like a device. Reads no more than
     /// that.
     pub fn is_device(root: &Path) -> bool {
-        missing_markers(root).is_empty()
+        DeviceLayout::new(root).is_device()
     }
 
     /// The device at `root`, if it looks like one. Reads no games.
     pub fn open(root: &Path) -> Result<Self, OpenDeviceError> {
-        let missing = missing_markers(root);
-        if !missing.is_empty() {
-            return Err(OpenDeviceError::NotADevice {
-                path: root.to_path_buf(),
-                missing,
-            });
+        let layout = DeviceLayout::new(root);
+        if !layout.is_device() {
+            return Err(OpenDeviceError::NotADevice { path: layout.root });
         }
-        let layout = DeviceLayout {
-            root: root.to_path_buf(),
-        };
         let cache = Cache::load(&layout.root, &layout.cache());
         Ok(Self {
             layout,
@@ -844,23 +856,6 @@ fn mounted_volumes() -> Vec<PathBuf> {
     }
 }
 
-fn devices_among(volumes: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut devices: Vec<PathBuf> = volumes
-        .into_iter()
-        .filter(|path| missing_markers(path).is_empty())
-        .collect();
-    devices.sort();
-    devices.dedup();
-    devices
-}
-
-fn missing_markers(root: &Path) -> Vec<&'static str> {
-    Device::MARKERS
-        .into_iter()
-        .filter(|marker| !root.join(marker).exists())
-        .collect()
-}
-
 /// Runs `command` and returns what it printed if it succeeded.
 fn run_command(command: &mut Command) -> Result<String, EjectDeviceError> {
     let eject_failed = |message: String| EjectDeviceError::EjectFailed { message };
@@ -913,15 +908,13 @@ mod tests {
         use super::*;
 
         #[test]
-        fn rejects_dir_without_device_markers() {
+        fn rejects_dir_that_is_not_a_pocket() {
             let dir = tempfile::tempdir().unwrap();
             fs::create_dir(dir.path().join("Assets")).unwrap();
-            match Device::open(dir.path()) {
-                Err(OpenDeviceError::NotADevice { missing, .. }) => {
-                    assert_eq!(missing, ["Analogue_Pocket.json", "Cores"])
-                }
-                other => panic!("{other:?}"),
-            }
+            assert!(matches!(
+                Device::open(dir.path()),
+                Err(OpenDeviceError::NotADevice { .. })
+            ));
         }
 
         #[test]
@@ -935,7 +928,7 @@ mod tests {
                 PathBuf::from("/not/mounted"),
                 root.path().to_path_buf(),
             ];
-            assert_eq!(devices_among(volumes), [root.path().to_path_buf()]);
+            assert_eq!(Device::roots_among(volumes), [root.path().to_path_buf()]);
         }
 
         #[test]
