@@ -623,16 +623,32 @@ impl Device {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
             _ => {}
         }
-        let installed = self.stage_and_place(zip, &staging);
+        let installed = self.install_core_files(zip, &staging);
         let _ = fs::remove_dir_all(&staging);
         installed
     }
 
-    fn stage_and_place(&self, zip: &mut CoreZip, staging: &Path) -> Result<(), BasicError> {
+    /// Extracts the files of `zip` to `staging`, then moves each into place.
+    ///
+    /// The zip holds two kinds of files:
+    /// - `Cores/<id>/`: the core itself, such as its bitstream, `core.json`
+    ///   and `data.json`.
+    /// - `Platforms/`: the platforms it runs, such as `gba.json` with the name
+    ///   the menu shows. Other cores of the same platform share these.
+    fn install_core_files(&self, zip: &mut CoreZip, staging: &Path) -> Result<(), BasicError> {
         let files: Vec<_> = zip
             .files()
             .into_iter()
-            .filter(|(path, _)| self.can_install_at(path))
+            .filter(|(path, _)| match path.strip_prefix("Platforms") {
+                // A platform file is written only if the device has none yet,
+                // in `Platforms/` or in `Platforms/_archive/`.
+                Ok(in_platforms) => {
+                    !self.root().join(path).exists()
+                        && !self.layout.archived_platform(in_platforms).exists()
+                }
+                // The core's own files are always written.
+                Err(_) => true,
+            })
             .collect();
         for (path, name) in &files {
             let staged = staging.join(path);
@@ -646,17 +662,6 @@ impl Device {
             fs::rename(staging.join(path), &to)?;
         }
         Ok(())
-    }
-
-    /// Whether a file from a core's zip should be written at `path`. What the
-    /// device already has in `Platforms/` is kept, because cores share it and
-    /// it may have been changed by hand. A platform that was set aside stays
-    /// set aside.
-    fn can_install_at(&self, path: &Path) -> bool {
-        let Ok(in_platforms) = path.strip_prefix("Platforms") else {
-            return true;
-        };
-        !self.root().join(path).exists() && !self.layout.archived_platform(in_platforms).exists()
     }
 
     /// Deletes the core's own folder for good. Anything else it uses stays.

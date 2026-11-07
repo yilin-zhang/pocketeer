@@ -9,7 +9,7 @@ use fs_err as fs;
 
 use crate::{
     cores::{
-        BiosRow, CoreInventory, CoreList, CoreRow, CoreZip, InstallCoreError, InstallCoreOutcome,
+        BiosRow, CoreInventory, CoreList, CoreRow, InstallCoreError, InstallCoreOutcome,
         PutBiosError, RemoteCoreSource, RemoveCoreError, SUPPORTED,
     },
     cover::{Cover, CoverIndex, RemoteCoverSource},
@@ -898,7 +898,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         if on_device.is_some_and(|core| core.is_at_version(&latest.version)) {
             return Ok(InstallCoreOutcome::AlreadyCurrent);
         }
-        let mut zip = CoreZip::parse(self.cores.download(&latest.download_url)?, id)?;
+        let mut zip = self.cores.download(&latest)?;
         device.install_core(&mut zip)?;
         Ok(InstallCoreOutcome::Installed {
             version: zip.version().to_string(),
@@ -1120,9 +1120,9 @@ mod tests {
             }])
         }
 
-        fn download(&self, url: &str) -> Result<Vec<u8>, BasicError> {
+        fn download(&self, core: &InventoryCore) -> Result<Vec<u8>, BasicError> {
             self.downloaded.set(self.downloaded.get() + 1);
-            match url {
+            match core.download_url.as_str() {
                 "core.zip" => Ok(zip_of(&[
                     (
                         "Cores/Spiritualized.GB/core.json",

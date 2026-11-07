@@ -225,7 +225,8 @@ pub trait RemoteCoreSource {
     /// Every core with a release, at its newest.
     fn inventory(&self) -> Result<Vec<InventoryCore>, BasicError>;
 
-    fn download(&self, url: &str) -> Result<Vec<u8>, BasicError>;
+    /// The bytes of `core`'s release zip.
+    fn download(&self, core: &InventoryCore) -> Result<Vec<u8>, BasicError>;
 }
 
 /// The inventory, cached in a file. The file only saves time, so one that can't
@@ -290,8 +291,9 @@ impl<S: RemoteCoreSource> CoreInventory<S> {
             .collect())
     }
 
-    pub fn download(&self, url: &str) -> Result<Vec<u8>, BasicError> {
-        self.source.download(url)
+    /// Downloads the release zip of `core`.
+    pub fn download(&self, core: &InventoryCore) -> Result<CoreZip, InstallCoreError> {
+        CoreZip::parse(self.source.download(core)?, &core.id)
     }
 }
 
@@ -813,7 +815,7 @@ mod tests {
                 }
             }
 
-            fn download(&self, _: &str) -> Result<Vec<u8>, BasicError> {
+            fn download(&self, _: &InventoryCore) -> Result<Vec<u8>, BasicError> {
                 unreachable!()
             }
         }

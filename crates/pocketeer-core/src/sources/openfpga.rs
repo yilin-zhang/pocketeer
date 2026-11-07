@@ -68,8 +68,8 @@ impl RemoteCoreSource for OpenFpga {
         Ok(listing.data.into_iter().filter_map(Entry::newest).collect())
     }
 
-    fn download(&self, url: &str) -> Result<Vec<u8>, BasicError> {
-        get(url)
+    fn download(&self, core: &InventoryCore) -> Result<Vec<u8>, BasicError> {
+        get(&core.download_url)
     }
 }
 
