@@ -249,9 +249,6 @@ pub struct App {
     device_status: DeviceStatus,
     command_status: Option<CommandStatus>,
     status_message: Option<StatusMessage>,
-    /// How many rows the command just sent doesn't apply to, reported with its
-    /// summary.
-    inapplicable_row_count: usize,
     should_quit: bool,
 }
 
@@ -276,7 +273,6 @@ impl App {
             device_status: DeviceStatus::NoDevice,
             command_status: None,
             status_message: None,
-            inapplicable_row_count: 0,
             should_quit: false,
         }
     }
@@ -382,10 +378,6 @@ impl App {
             }
             WorkerMessage::CommandFinished { summary, failed } => {
                 self.command_status = None;
-                let summary = match std::mem::take(&mut self.inapplicable_row_count) {
-                    0 => summary,
-                    left_out_count => format!("{summary} ({left_out_count} left out)"),
-                };
                 self.status_message = Some(StatusMessage {
                     text: summary,
                     is_failure: failed,
@@ -394,7 +386,6 @@ impl App {
             // The event loop ends before this message gets here.
             WorkerMessage::LibraryOpenFailed(_) => {}
             WorkerMessage::RenamesProposed(renames) if renames.is_empty() => {
-                self.inapplicable_row_count = 0;
                 self.show_status_message("no game to rename");
             }
             WorkerMessage::RenamesProposed(renames) => {
@@ -813,27 +804,18 @@ impl App {
             .get_mut(dialog.focused_button)
             .and_then(|button| button.command.take());
         self.dialog = None;
-        match command {
-            Some(command) => {
-                self.games.clear_marks();
-                self.worker_handle.send(command);
-            }
-            None => self.inapplicable_row_count = 0,
+        if let Some(command) = command {
+            self.games.clear_marks();
+            self.worker_handle.send(command);
         }
     }
 
-    fn dialog_cancel(&mut self) {
-        self.dialog = None;
-        self.inapplicable_row_count = 0;
-    }
-
     fn confirm_trash_games(&mut self) {
-        let (entries, inapplicable) = self.games.library_entries_to_act_on();
+        let entries = self.games.library_entries_to_act_on();
         if entries.is_empty() {
             self.confirm_trash_orphans();
             return;
         }
-        self.inapplicable_row_count += inapplicable;
         self.dialog = Some(Dialog::trash_games(entries));
     }
 
@@ -841,7 +823,7 @@ impl App {
     /// opens the dialog. While it is busy that answer could take long to come,
     /// so nothing is asked then.
     fn propose_renames_to_standard_names(&mut self) {
-        let (entries, inapplicable) = self.games.library_entries_to_act_on();
+        let entries = self.games.library_entries_to_act_on();
         if entries.is_empty() {
             self.show_status_message("nothing here is in the library");
             return;
@@ -850,7 +832,6 @@ impl App {
             self.show_status_message("busy; try again when this is done");
             return;
         }
-        self.inapplicable_row_count += inapplicable;
         self.worker_handle
             .send(WorkerCommand::ProposeRenames(entries));
     }
@@ -882,7 +863,7 @@ impl App {
     }
 
     fn confirm_delete_games(&mut self) {
-        let (entries, inapplicable) = self.games.device_entries_to_act_on();
+        let entries = self.games.device_entries_to_act_on();
         if entries.is_empty() {
             self.confirm_delete_orphans();
             return;
@@ -892,7 +873,6 @@ impl App {
             .rows_to_act_on()
             .iter()
             .any(|row| matches!(row, GamesTableRow::Game(GameRow::OnDevice(_))));
-        self.inapplicable_row_count += inapplicable;
         self.dialog = Some(Dialog::delete_games(entries, is_any_only_here));
     }
 
@@ -908,7 +888,7 @@ impl App {
     }
 
     fn confirm_delete_save(&mut self) {
-        let (entries, _) = self.games.device_entries_to_act_on();
+        let entries = self.games.device_entries_to_act_on();
         if entries.is_empty() {
             self.show_status_message("nothing here is on the device");
             return;
@@ -923,29 +903,18 @@ impl App {
     // ---- Commands for the worker -----------------------------------------------
 
     fn send_for_device_rows(&mut self, command: fn(Vec<DeviceEntry>) -> WorkerCommand) {
-        let (entries, inapplicable) = self.games.device_entries_to_act_on();
-        self.send_for_entries(
-            entries,
-            inapplicable,
-            command,
-            "nothing here is on the device",
-        );
+        let entries = self.games.device_entries_to_act_on();
+        self.send_for_entries(entries, command, "nothing here is on the device");
     }
 
     fn send_for_library_rows(&mut self, command: fn(Vec<LocalEntry>) -> WorkerCommand) {
-        let (entries, inapplicable) = self.games.library_entries_to_act_on();
-        self.send_for_entries(
-            entries,
-            inapplicable,
-            command,
-            "nothing here is in the library",
-        );
+        let entries = self.games.library_entries_to_act_on();
+        self.send_for_entries(entries, command, "nothing here is in the library");
     }
 
     fn send_for_entries<T>(
         &mut self,
         entries: Vec<T>,
-        inapplicable: usize,
         command: impl FnOnce(Vec<T>) -> WorkerCommand,
         message_if_none: &str,
     ) {
@@ -953,7 +922,6 @@ impl App {
             self.show_status_message(message_if_none);
             return;
         }
-        self.inapplicable_row_count += inapplicable;
         self.games.clear_marks();
         self.worker_handle.send(command(entries));
     }
@@ -1641,30 +1609,12 @@ mod tests {
         }
 
         #[test]
-        fn counts_rows_left_out_of_renames() {
-            let (mut app, _rx) = app();
-            press(&mut app, "Mt");
-            answer_renaming_alpha(&mut app);
-            press(&mut app, "\n");
-            app.handle_worker_message(WorkerMessage::CommandFinished {
-                summary: "renamed".to_string(),
-                failed: false,
-            });
-            assert_eq!(app.status_message().unwrap().text, "renamed (2 left out)");
-        }
-
-        #[test]
-        fn empty_answer_reports_no_game_and_forgets_rows_left_out() {
+        fn empty_answer_reports_no_game() {
             let (mut app, _rx) = app();
             press(&mut app, "Mt");
             app.handle_worker_message(WorkerMessage::RenamesProposed(Vec::new()));
             assert!(app.dialog().is_none());
             assert_eq!(app.status_message().unwrap().text, "no game to rename");
-            app.handle_worker_message(WorkerMessage::CommandFinished {
-                summary: "next".to_string(),
-                failed: false,
-            });
-            assert_eq!(app.status_message().unwrap().text, "next");
         }
 
         #[test]

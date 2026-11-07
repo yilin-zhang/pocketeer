@@ -722,7 +722,7 @@ impl Keymap {
                 "cancel",
                 "",
                 Group::General,
-                App::dialog_cancel,
+                |app| app.dialog = None,
             ),
             Binding::new(
                 &[Key::plain(KeyCode::Left), Key::plain(KeyCode::Char('h'))],

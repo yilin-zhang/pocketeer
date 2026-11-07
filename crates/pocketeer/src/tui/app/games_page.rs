@@ -338,28 +338,20 @@ impl GamesPage {
         }
     }
 
-    /// The copies on the device among the rows to act on, and how many rows
-    /// had none.
-    pub(super) fn device_entries_to_act_on(&self) -> (Vec<DeviceEntry>, usize) {
+    /// The copies on the device among the rows to act on.
+    pub(super) fn device_entries_to_act_on(&self) -> Vec<DeviceEntry> {
         let rows = self.rows_to_act_on();
-        let entries: Vec<DeviceEntry> = rows
-            .iter()
+        rows.iter()
             .filter_map(|row| row.device_entry().cloned())
-            .collect();
-        let inapplicable = rows.len() - entries.len();
-        (entries, inapplicable)
+            .collect()
     }
 
-    /// The games in the library among the rows to act on, and how many rows
-    /// had none.
-    pub(super) fn library_entries_to_act_on(&self) -> (Vec<LocalEntry>, usize) {
+    /// The games in the library among the rows to act on.
+    pub(super) fn library_entries_to_act_on(&self) -> Vec<LocalEntry> {
         let rows = self.rows_to_act_on();
-        let entries: Vec<LocalEntry> = rows
-            .iter()
+        rows.iter()
             .filter_map(|row| row.local_entry().cloned())
-            .collect();
-        let inapplicable = rows.len() - entries.len();
-        (entries, inapplicable)
+            .collect()
     }
 }
 
