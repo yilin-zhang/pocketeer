@@ -592,20 +592,22 @@ impl WorkerState<'_> {
             }
             WorkerCommand::SyncDats => {
                 let synced = pocketeer.sync_dats();
-                Ok(progress.record_finished_target(pocketeer, OperationReport::SyncDats(synced)))
+                Ok(progress.record_finished_target(pocketeer, OperationReport::sync_dats(&synced)))
             }
             WorkerCommand::Reload => {
                 let read = pocketeer.reload();
                 let read = read.map(|report| {
                     send_duplicates(self.send_message, pocketeer, &report.duplicates)
                 });
-                Ok(progress.record_finished_target(pocketeer, OperationReport::Reload(read)))
+                Ok(progress.record_finished_target(pocketeer, OperationReport::reload(&read)))
             }
             WorkerCommand::Eject => {
                 let root = pocketeer.device().map(|device| device.root().to_path_buf());
                 let ejected = pocketeer.eject_device();
-                Ok(progress
-                    .record_finished_target(pocketeer, OperationReport::Eject(root, ejected)))
+                Ok(progress.record_finished_target(
+                    pocketeer,
+                    OperationReport::eject(root.as_deref(), &ejected),
+                ))
             }
         };
         let (mut summary, mut failed) =
@@ -641,7 +643,7 @@ impl CommandProgress<'_> {
         pocketeer: &Pocketeer,
         report: OperationReport,
     ) -> ControlFlow<()> {
-        let target = report.subject();
+        let target = report.subject.clone();
         self.reports.push(report);
         (self.send_message)(WorkerMessage::GamesPageChanged(games_page_data(
             pocketeer,
@@ -668,8 +670,8 @@ fn command_summary(
     reports: &[OperationReport],
 ) -> (String, bool) {
     let finished_count = reports.len();
-    let failed = reports.iter().filter(|report| !report.is_ok()).count();
-    let first_failure = reports.iter().find(|report| !report.is_ok());
+    let failed = reports.iter().filter(|report| !report.is_ok).count();
+    let first_failure = reports.iter().find(|report| !report.is_ok);
     let summary = match (target_count, first_failure, reports.last()) {
         (1, _, Some(last)) => last.to_line(),
         (_, Some(first), _) => format!(
@@ -1267,8 +1269,9 @@ game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686
 
         #[test]
         fn summarizes_how_command_went() {
-            let ok = || OperationReport::Reload(Ok(()));
-            let bad = || OperationReport::Reload(Err(pocketeer_core::error::BasicError::NoDevice));
+            let ok = || OperationReport::reload(&Ok(()));
+            let bad =
+                || OperationReport::reload::<()>(&Err(pocketeer_core::error::BasicError::NoDevice));
             assert_eq!(
                 command_summary("reading", 1, &[ok()]),
                 ("everything: read again".to_string(), false)

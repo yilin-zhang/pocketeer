@@ -941,7 +941,7 @@ impl CliSession {
         if let Err(error) = &batch_result {
             eprintln!("error: {error}");
         }
-        let ok = batch_result.is_ok() && self.entries.iter().all(|error| error.report.is_ok());
+        let ok = batch_result.is_ok() && self.entries.iter().all(|error| error.report.is_ok);
         if matches!(self.format, PrintFormat::Json) {
             let lines: Vec<Value> = self.entries.iter().map(LogEntry::to_json).collect();
             print_json(ok, json!(lines));

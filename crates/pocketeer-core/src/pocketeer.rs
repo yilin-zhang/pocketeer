@@ -258,7 +258,9 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         if ejected.is_ok() {
             self.device = None;
         }
-        self.log_result(ejected, |ejected| OperationReport::Eject(root, ejected))
+        self.log_result(ejected, |ejected| {
+            OperationReport::eject(root.as_deref(), ejected)
+        })
     }
 
     // ---- Reload -----------------------------------------------------------------
@@ -270,7 +272,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
             Some(_) => self.scan_device(),
             None => Ok(ScanReport::default()),
         });
-        self.log_result(read, |read| OperationReport::Reload(read.map(|_| ())))
+        self.log_result(read, OperationReport::reload)
     }
 
     // ---- Listing games ----------------------------------------------------------
@@ -342,7 +344,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     pub fn sync_dats(&mut self) -> Result<SyncReport, BasicError> {
         let synced = self.dats.sync();
-        self.log_result(synced, OperationReport::SyncDats)
+        self.log_result(synced, OperationReport::sync_dats)
     }
 
     /// The name a game on the device gets in the library when pulled.
@@ -385,7 +387,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     ) -> BatchResult {
         self.for_each_item(
             games,
-            |pocketeer, game| OperationReport::PullGame(game.clone(), pocketeer.pull_game(game)),
+            |pocketeer, game| OperationReport::pull_game(game, &pocketeer.pull_game(game)),
             on_logged,
         )
     }
@@ -406,7 +408,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     ) -> BatchResult {
         self.for_each_item(
             games,
-            |pocketeer, game| OperationReport::PushGame(game.clone(), pocketeer.push_game(game)),
+            |pocketeer, game| OperationReport::push_game(game, &pocketeer.push_game(game)),
             on_logged,
         )
     }
@@ -431,7 +433,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
                 let result = pocketeer.import_game(from, platform);
                 // The log outlives the folder the command was run in.
                 let from = std::path::absolute(from).unwrap_or_else(|_| from.clone());
-                OperationReport::ImportGame(from, result)
+                OperationReport::import_game(&from, &result)
             },
             on_logged,
         )
@@ -474,9 +476,9 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         self.for_each_item(
             games,
             |pocketeer, (local, new)| {
-                OperationReport::RenameInLibrary(
-                    local.clone(),
-                    pocketeer.rename_game_in_library(local, new),
+                OperationReport::rename_in_library(
+                    local,
+                    &pocketeer.rename_game_in_library(local, new),
                 )
             },
             on_logged,
@@ -504,9 +506,9 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         let batch_result = self.for_each_item(
             games,
             |pocketeer, (on_device, new)| {
-                OperationReport::RenameOnDevice(
-                    on_device.clone(),
-                    pocketeer.rename_game_on_device(on_device, new),
+                OperationReport::rename_on_device(
+                    on_device,
+                    &pocketeer.rename_game_on_device(on_device, new),
                 )
             },
             on_logged,
@@ -531,9 +533,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     ) -> BatchResult {
         self.for_each_item(
             games,
-            |pocketeer, game| {
-                OperationReport::FetchCover(game.clone(), pocketeer.fetch_cover(game))
-            },
+            |pocketeer, game| OperationReport::fetch_cover(game, &pocketeer.fetch_cover(game)),
             on_logged,
         )
     }
@@ -570,7 +570,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
                 let result = pocketeer.import_cover(local, from);
                 // The log outlives the folder the command was run in.
                 let from = std::path::absolute(from).unwrap_or_else(|_| from.clone());
-                OperationReport::ImportCover(local.clone(), from, result)
+                OperationReport::import_cover(local, &from, &result)
             },
             on_logged,
         )
@@ -593,7 +593,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         self.for_each_item(
             games,
             |pocketeer, game| {
-                OperationReport::TrashGame(game.clone(), pocketeer.trash_game_in_library(game))
+                OperationReport::trash_game(game, &pocketeer.trash_game_in_library(game))
             },
             on_logged,
         )
@@ -614,7 +614,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         let batch_result = self.for_each_item(
             games,
             |pocketeer, game| {
-                OperationReport::DeleteGame(game.clone(), pocketeer.delete_game_on_device(game))
+                OperationReport::delete_game(game, &pocketeer.delete_game_on_device(game))
             },
             on_logged,
         );
@@ -638,7 +638,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     ) -> BatchResult {
         self.for_each_item(
             games,
-            |pocketeer, game| OperationReport::PullSave(game.clone(), pocketeer.pull_save(game)),
+            |pocketeer, game| OperationReport::pull_save(game, &pocketeer.pull_save(game)),
             on_logged,
         )
     }
@@ -658,7 +658,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         self.for_each_item(
             versions,
             |pocketeer, (game, version)| {
-                OperationReport::PushSave(game.clone(), pocketeer.push_save(game, version))
+                OperationReport::push_save(game, &pocketeer.push_save(game, version))
             },
             on_logged,
         )
@@ -686,7 +686,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
                 let result = pocketeer.import_save(local, from);
                 // The log outlives the folder the command was run in.
                 let from = std::path::absolute(from).unwrap_or_else(|_| from.clone());
-                OperationReport::ImportSave(local.clone(), from, result)
+                OperationReport::import_save(local, &from, &result)
             },
             on_logged,
         )
@@ -715,9 +715,9 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         self.for_each_item(
             games,
             |pocketeer, game| {
-                OperationReport::TrashSaveAll(
-                    game.clone(),
-                    pocketeer.trash_every_version_in_library(game),
+                OperationReport::trash_every_version(
+                    game,
+                    &pocketeer.trash_every_version_in_library(game),
                 )
             },
             on_logged,
@@ -742,7 +742,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
             versions,
             |pocketeer, (game, version)| {
                 let result = pocketeer.trash_save_version(game, &version.name);
-                OperationReport::TrashSaveVersion(game.clone(), version.name.clone(), result)
+                OperationReport::trash_save_version(game, &version.name, &result)
             },
             on_logged,
         )
@@ -765,7 +765,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         self.for_each_item(
             games,
             |pocketeer, game| {
-                OperationReport::DeleteSave(game.clone(), pocketeer.delete_save_on_device(game))
+                OperationReport::delete_save(game, &pocketeer.delete_save_on_device(game))
             },
             on_logged,
         )
@@ -800,9 +800,9 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         self.for_each_item(
             orphans,
             |pocketeer, orphan| {
-                OperationReport::TrashOrphanSave(
-                    orphan.clone(),
-                    pocketeer.library.trash_orphan_save(orphan),
+                OperationReport::trash_orphan_save(
+                    orphan,
+                    &pocketeer.library.trash_orphan_save(orphan),
                 )
             },
             on_logged,
@@ -817,9 +817,9 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         self.for_each_item(
             orphans,
             |pocketeer, orphan| {
-                OperationReport::DeleteOrphanSave(
-                    orphan.clone(),
-                    pocketeer.delete_orphan_save_on_device(orphan),
+                OperationReport::delete_orphan_save(
+                    orphan,
+                    &pocketeer.delete_orphan_save_on_device(orphan),
                 )
             },
             on_logged,
@@ -875,7 +875,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     ) -> BatchResult {
         let batch_result = self.for_each_item(
             ids,
-            |pocketeer, id| OperationReport::InstallCore(id.clone(), pocketeer.install_core(id)),
+            |pocketeer, id| OperationReport::install_core(id, &pocketeer.install_core(id)),
             on_logged,
         );
         self.rescan_device_after(batch_result)
@@ -913,7 +913,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     ) -> BatchResult {
         let batch_result = self.for_each_item(
             ids,
-            |pocketeer, id| OperationReport::RemoveCore(id.clone(), pocketeer.remove_core(id)),
+            |pocketeer, id| OperationReport::remove_core(id, &pocketeer.remove_core(id)),
             on_logged,
         );
         self.rescan_device_after(batch_result)
@@ -945,7 +945,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
                 let result = pocketeer.put_bios_file(row, from);
                 // The log outlives the folder the command was run in.
                 let from = std::path::absolute(from).unwrap_or_else(|_| from.clone());
-                OperationReport::PutBios(row.clone(), from, result)
+                OperationReport::put_bios(row, &from, &result)
             },
             on_logged,
         )
@@ -965,12 +965,12 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     /// Logs `result` and returns it. If it succeeded but can't be logged, that
     /// is the error.
-    fn log_result<T: Clone, E: Clone + From<BasicError>>(
+    fn log_result<T, E: From<BasicError>>(
         &self,
         result: Result<T, E>,
-        to_report: impl FnOnce(Result<T, E>) -> OperationReport,
+        to_report: impl FnOnce(&Result<T, E>) -> OperationReport,
     ) -> Result<T, E> {
-        let (_, log_write_result) = self.logger.record(to_report(result.clone()));
+        let (_, log_write_result) = self.logger.record(to_report(&result));
         let value = result?;
         log_write_result?;
         Ok(value)
@@ -1419,7 +1419,7 @@ mod tests {
             let _ = setup
                 .pocketeer
                 .push_games(&[unknown, local], |_, entry| {
-                    seen.push((entry.report.subject(), entry.report.is_ok()));
+                    seen.push((entry.report.subject.clone(), entry.report.is_ok));
                     ControlFlow::Continue(())
                 })
                 .unwrap();
@@ -1438,7 +1438,7 @@ mod tests {
             let games = setup.pocketeer.library().entries().to_vec();
             let mut seen = Vec::new();
             let control_flow = setup.pocketeer.push_games(&games, |_, entry| {
-                seen.push(entry.report.subject());
+                seen.push(entry.report.subject.clone());
                 ControlFlow::Break(())
             });
             assert!(control_flow.unwrap().is_break());
@@ -1708,7 +1708,7 @@ mod tests {
             fs::create_dir(setup.pocketeer.library().layout().log()).unwrap();
             let mut seen = Vec::new();
             let batch_result = setup.pocketeer.push_games(&games, |_, entry| {
-                seen.push(entry.report.subject());
+                seen.push(entry.report.subject.clone());
                 ControlFlow::Continue(())
             });
             assert!(matches!(batch_result, Err(BasicError::LogFailed { .. })));
