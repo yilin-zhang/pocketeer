@@ -43,7 +43,11 @@ impl LibrarySaves {
         }
         saves.sort_by(|a, b| {
             let newest_first = b.save.modified.cmp(&a.save.modified);
-            newest_first.then_with(|| b.name.cmp(&a.name))
+            // Their names differ only in the number, so a longer name has a
+            // higher number.
+            newest_first
+                .then_with(|| b.name.len().cmp(&a.name.len()))
+                .then_with(|| b.name.cmp(&a.name))
         });
         Some(Self { versions: saves })
     }
@@ -1234,6 +1238,29 @@ mod tests {
             let saves = library.entries()[0].save.as_ref().unwrap();
             assert_eq!(saves.version_named("1970-01-01T00-16-40-2"), Some(&second));
             assert_eq!(saves.version_named("never"), None);
+        }
+
+        #[test]
+        fn sorts_versions_of_same_second_by_their_number() {
+            let version = |name: &str| LibrarySave {
+                name: name.to_string(),
+                save: Save::from_bytes(name.as_bytes(), at(1_000)),
+            };
+            let saves = LibrarySaves::from_saves(vec![
+                version("1970-01-01T00-16-40-9"),
+                version("1970-01-01T00-16-40"),
+                version("1970-01-01T00-16-40-10"),
+            ])
+            .unwrap();
+            let names: Vec<_> = saves.iter().map(|version| version.name.as_str()).collect();
+            assert_eq!(
+                names,
+                [
+                    "1970-01-01T00-16-40-10",
+                    "1970-01-01T00-16-40-9",
+                    "1970-01-01T00-16-40",
+                ]
+            );
         }
 
         #[test]
