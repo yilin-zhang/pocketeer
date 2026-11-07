@@ -26,8 +26,8 @@ use strum::IntoEnumIterator;
 
 use super::{
     app::{
-        App, DeviceStatus, GamesFilter, ImportPrompt, ImportTarget, Page, PlatformPrompt, Prompt,
-        RenamePrompt, RenameTarget, StatusMessage, name_of,
+        App, DeviceStatus, GamesFilter, Group, ImportPrompt, ImportTarget, Page, PlatformPrompt,
+        Prompt, RenamePrompt, RenameTarget, StatusMessage,
     },
     covers::{self, CoverDisplay},
     path_input::{PathEntry, PathInput},
@@ -513,7 +513,7 @@ fn draw_games_table(frame: &mut Frame, app: &mut App, area: Rect) {
             rows,
             vec![
                 Constraint::Length(9),
-                names_column_width("GAME", app.games.rows().iter().map(name_of)),
+                names_column_width("GAME", app.games.rows().iter().map(GamesTableRow::name)),
                 Constraint::Length(12),
                 Constraint::Length(3),
                 Constraint::Length(4),
@@ -535,7 +535,7 @@ fn centered_cell(text: &'static str) -> Cell<'static> {
 }
 
 fn game_table_row(app: &App, row: &GamesTableRow, compact: bool) -> TableRow<'static> {
-    let name = Cell::from(name_of(row));
+    let name = Cell::from(row.name());
     let mut cells = match row {
         GamesTableRow::Game(game_row) => {
             let place = match game_row {
@@ -606,16 +606,13 @@ fn draw_cover(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(path) = path else {
-        let (what, keys): (_, &[KeyHint]) = match app.games.selected_row() {
-            Some(GamesTableRow::Game(GameRow::OnDevice(_))) => ("on the device only", &[]),
-            Some(GamesTableRow::Game(_)) => (
-                "no cover yet",
-                &[("a", "download it"), ("c", "use an image file")],
-            ),
-            Some(_) => ("", &[]),
-            None => ("no games", &[]),
+        let (what, keys) = match app.games.selected_row() {
+            Some(GamesTableRow::Game(GameRow::OnDevice(_))) => ("on the device only", Vec::new()),
+            Some(GamesTableRow::Game(_)) => ("no cover yet", hints(app, Group::Cover)),
+            Some(_) => ("", Vec::new()),
+            None => ("no games", Vec::new()),
         };
-        draw_cover_placeholder(frame, inner, what, keys);
+        draw_cover_placeholder(frame, inner, what, &keys);
         return;
     };
     match app.cover_loader.show(&path, &around, inner.as_size()) {
@@ -737,7 +734,7 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version_index: 
         .and_then(GamesTableRow::device_entry);
     let on_device = on_device.and_then(|on_device| on_device.save.clone());
     let block = panel_block(match app.games.selected_row() {
-        Some(row) => format!("SAVES OF {}", name_of(row)),
+        Some(row) => format!("SAVES OF {}", row.name()),
         None => "SAVES".to_string(),
     });
     let inner = block.inner(area);
@@ -869,104 +866,46 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(general_line), general_keys);
 }
 
-/// A key and what it does. [`NO_KEY`] leaves its place in the grid empty.
+/// A keycap and the word after it. An empty keycap leaves its place in the
+/// grid empty.
 type KeyHint = (&'static str, &'static str);
 
-const NO_KEY: KeyHint = ("", "");
-
-/// The keys to show, by what they change. They are drawn as a grid so that a
-/// key sits above the same key with Shift. Rows don't change with the
-/// selection, and a key that doesn't apply says why when pressed.
-#[derive(Default)]
+/// The keys to show in the bar, by row.
 struct Legend {
     library: Vec<KeyHint>,
     device: Vec<KeyHint>,
     general: Vec<KeyHint>,
 }
 
-fn legend(app: &App) -> Legend {
-    if app.games.is_searching() {
-        return only_general(vec![("↵", "done"), ("Esc", "clear")]);
-    }
-    match app.prompt() {
-        Some(Prompt::Import(import)) => {
-            let enter = match import.target {
-                ImportTarget::Bios(_) => "put on the device",
-                _ => "import",
-            };
-            return only_general(vec![
-                ("↵", enter),
-                ("Esc", "cancel"),
-                ("Tab", "complete"),
-                ("↑↓", "pick"),
-            ]);
-        }
-        Some(Prompt::Platform(_)) => {
-            return only_general(vec![("↵", "import"), ("Esc", "cancel"), ("↑↓", "pick")]);
-        }
-        Some(Prompt::Rename(_)) => {
-            return only_general(vec![("↵", "rename"), ("Esc", "cancel")]);
-        }
-        None => {}
-    }
-    let page_keys = vec![("r", "reload"), ("?", "help"), ("q", "quit")];
-    match app.current_page() {
-        Page::Games if app.games.selected_version_index().is_some() => Legend {
-            library: vec![("i", "import"), ("s", "save"), ("x", "trash")],
-            device: vec![NO_KEY, ("S", "push"), ("X", "delete")],
-            general: vec![("Esc", "back"), ("?", "help"), ("q", "quit")],
-        },
-        Page::Games => Legend {
-            library: vec![
-                ("i", "import"),
-                ("p", "pull"),
-                ("s", "save"),
-                ("n", "rename"),
-                ("t", "standard"),
-                ("x", "trash"),
-            ],
-            device: vec![
-                NO_KEY,
-                ("P", "push"),
-                NO_KEY,
-                ("N", "rename"),
-                ("E", "eject"),
-                ("X", "delete"),
-            ],
-            general: vec![
-                ("↵", "saves"),
-                ("m", "mark"),
-                ("d", "DATs"),
-                ("r", "reload"),
-                ("?", "help"),
-                ("q", "quit"),
-            ],
-        },
-        Page::Cores => Legend {
-            device: vec![
-                ("U", "install or update"),
-                ("A", "update all"),
-                ("X", "delete"),
-            ],
-            general: page_keys,
-            ..Legend::default()
-        },
-        Page::Bios => Legend {
-            device: vec![("I", "put a file")],
-            general: page_keys,
-            ..Legend::default()
-        },
-        Page::Device => Legend {
-            general: page_keys,
-            ..Legend::default()
-        },
-    }
+/// The keys of `group` in the keymap of what has the focus.
+fn hints(app: &App, group: Group) -> Vec<KeyHint> {
+    app.keymap()
+        .in_group(group)
+        .map(|binding| (binding.keycap, binding.short_desc))
+        .collect()
 }
 
-fn only_general(general: Vec<KeyHint>) -> Legend {
+/// The bar's rows. A device key sits under the library key it is the Shift of,
+/// and the others take the next free column.
+fn legend(app: &App) -> Legend {
+    let library = hints(app, Group::Library);
+    let mut device: Vec<KeyHint> = Vec::new();
+    let mut next_column = 0;
+    for (keycap, short_desc) in hints(app, Group::Device) {
+        let twin = library
+            .iter()
+            .position(|(library_keycap, _)| library_keycap.to_uppercase() == keycap);
+        let column = twin.unwrap_or(next_column);
+        if device.len() <= column {
+            device.resize(column + 1, ("", ""));
+        }
+        device[column] = (keycap, short_desc);
+        next_column = column + 1;
+    }
     Legend {
-        general,
-        ..Legend::default()
+        library,
+        device,
+        general: hints(app, Group::General),
     }
 }
 

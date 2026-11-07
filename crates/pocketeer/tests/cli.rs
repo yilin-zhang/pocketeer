@@ -596,20 +596,16 @@ mod versions {
              2020-09-13T12-26-40-2  6 bytes  newest\n\
              2020-09-13T12-26-40    5 bytes\n"
         );
-        let ran = setup.run(&[
-            "trash",
-            "save",
-            "gba/Mine.gba",
-            "--at",
-            "2020-09-13T12-26-40-2",
-        ]);
-        assert_eq!(ran.code, 0);
-        assert_eq!(ran.stdout, "gba/Mine.gba: save put in the trash\n");
-        let ran = setup.run(&["saves", "gba/Mine.gba"]);
-        assert_eq!(
-            ran.stdout,
-            "VERSION                 SIZE\n2020-09-13T12-26-40  5 bytes  newest\n"
-        );
+        for (name, bytes) in [
+            ("2020-09-13T12-26-40-2", "second"),
+            ("2020-09-13T12-26-40", "first"),
+        ] {
+            let ran = setup.run(&["push", "save", "gba/Mine.gba", "--at", name]);
+            assert_eq!(ran.code, 0);
+            assert_eq!(ran.stdout, format!("gba/Mine.gba: save {name} pushed\n"));
+            let on_device = setup.device().join("Saves/gba/common/Mine.sav");
+            assert_eq!(fs::read(on_device).unwrap(), bytes.as_bytes());
+        }
     }
 }
 

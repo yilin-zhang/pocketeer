@@ -188,21 +188,13 @@ impl PathInput {
         true
     }
 
-    /// Handles editing, moving through the matches, and Tab.
+    /// Edits the text with `key`, including C-w.
     pub fn handle_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-            KeyCode::Down => self.pick_next(),
-            KeyCode::Char('n') if ctrl => self.pick_next(),
-            KeyCode::Up => self.pick_previous(),
-            KeyCode::Char('p') if ctrl => self.pick_previous(),
-            KeyCode::Tab => self.complete(),
-            KeyCode::Char('w') if ctrl => self.cut_word(),
-            _ => {
-                if edit(&mut self.input, key) {
-                    self.picked_match_index = None;
-                }
-            }
+        if ctrl && key.code == KeyCode::Char('w') {
+            self.cut_word();
+        } else if edit(&mut self.input, key) {
+            self.picked_match_index = None;
         }
     }
 
@@ -218,19 +210,19 @@ impl PathInput {
         }
     }
 
-    fn pick_next(&mut self) {
+    pub fn pick_next(&mut self) {
         let last = self.matches().len().checked_sub(1);
         self.picked_match_index =
             last.map(|last| self.picked_match_index.map_or(0, |i| (i + 1).min(last)));
     }
 
-    fn pick_previous(&mut self) {
+    pub fn pick_previous(&mut self) {
         self.picked_match_index = self.picked_match_index.and_then(|i| i.checked_sub(1));
     }
 
     /// Completes to the picked or only match, or else as far as all matches
     /// starting with the text agree.
-    fn complete(&mut self) {
+    pub fn complete(&mut self) {
         if self.fill_in_picked() {
             return;
         }
@@ -427,7 +419,7 @@ mod tests {
         #[test]
         fn offers_nothing_from_dir_text_has_left() {
             let mut input = input("/a/", &[entry("b", true)]);
-            press(&mut input, KeyCode::Tab);
+            input.complete();
             assert_eq!(text(&input), "/a/b/");
             assert_eq!(input.matches(), Vec::<&PathEntry>::new());
             // Entries arriving late for a folder the text has left are ignored.
@@ -479,31 +471,31 @@ mod tests {
         #[test]
         fn tab_completes_only_match_with_slash_for_dir() {
             let mut only_file = input("/a/mi", &[entry("mine.sav", false)]);
-            press(&mut only_file, KeyCode::Tab);
+            only_file.complete();
             assert_eq!(text(&only_file), "/a/mine.sav");
             let mut only_dir = input("/a/mi", &[entry("misc", true)]);
-            press(&mut only_dir, KeyCode::Tab);
+            only_dir.complete();
             assert_eq!(text(&only_dir), "/a/misc/");
         }
 
         #[test]
         fn tab_completes_common_prefix() {
             let mut input = input("/a/m", &[entry("mine-1", false), entry("mine-2", false)]);
-            press(&mut input, KeyCode::Tab);
+            input.complete();
             assert_eq!(text(&input), "/a/mine-");
             // No further, because they differ from here.
-            press(&mut input, KeyCode::Tab);
+            input.complete();
             assert_eq!(text(&input), "/a/mine-");
         }
 
         #[test]
         fn arrows_pick_match_and_tab_completes_it() {
             let mut input = input("/a/", &[entry("one", false), entry("two", false)]);
-            press(&mut input, KeyCode::Down);
-            press(&mut input, KeyCode::Down);
-            press(&mut input, KeyCode::Down);
+            input.pick_next();
+            input.pick_next();
+            input.pick_next();
             assert_eq!(input.picked_match_index(), Some(1));
-            press(&mut input, KeyCode::Tab);
+            input.complete();
             assert_eq!(text(&input), "/a/two");
             assert_eq!(input.picked_match_index(), None);
         }
@@ -511,10 +503,10 @@ mod tests {
         #[test]
         fn clears_pick_on_up_from_first_match_or_on_editing() {
             let mut input = input("/a/", &[entry("one", false)]);
-            press(&mut input, KeyCode::Down);
-            press(&mut input, KeyCode::Up);
+            input.pick_next();
+            input.pick_previous();
             assert_eq!(input.picked_match_index(), None);
-            press(&mut input, KeyCode::Down);
+            input.pick_next();
             press(&mut input, KeyCode::Char('o'));
             assert_eq!(input.picked_match_index(), None);
         }

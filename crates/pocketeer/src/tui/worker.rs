@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 
+use super::path_input::fuzzy_match;
 use pocketeer_core::{
     Pocketeer,
     cores::{BiosRow, CoreRow},
@@ -166,6 +167,27 @@ impl GamesTableRow {
             GamesTableRow::OrphanSaveOnDevice(orphan) => Some(orphan),
             _ => None,
         }
+    }
+
+    /// The row's name in the table, which is also what a search matches.
+    pub fn name(&self) -> String {
+        match self {
+            GamesTableRow::Game(game_row) => match game_row {
+                GameRow::InLibrary(local) | GameRow::Both { local, .. } => local.name.clone(),
+                GameRow::OnDevice(on_device) => on_device.path.display().to_string(),
+            },
+            GamesTableRow::OrphanSaveInLibrary(orphan) => orphan.stem.clone(),
+            GamesTableRow::OrphanSaveOnDevice(orphan) => orphan.path.display().to_string(),
+        }
+    }
+
+    /// Whether a search for `query` finds the row, by its name or by its path
+    /// on the device.
+    pub fn matches(&self, query: &str) -> bool {
+        let on_device = self.device_entry().map_or(String::new(), |on_device| {
+            on_device.path.display().to_string()
+        });
+        fuzzy_match(query, &self.name()).is_some() || fuzzy_match(query, &on_device).is_some()
     }
 }
 
