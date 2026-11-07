@@ -476,37 +476,17 @@ impl App {
         }
     }
 
-    fn open_help(&mut self) {
-        self.dialog = Some(Dialog::keys(self.keymap()));
-    }
-
-    fn quit(&mut self) {
-        self.should_quit = true;
-    }
-
     // ---- Pages and moving in their tables --------------------------------------
 
     /// How far a page key moves.
     const PAGE_KEY_ROW_COUNT: isize = 20;
 
-    fn show_games(&mut self) {
-        self.current_page = Page::Games;
-    }
-
-    fn show_bios(&mut self) {
-        self.current_page = Page::Bios;
-    }
-
-    fn show_device(&mut self) {
-        self.current_page = Page::Device;
-    }
-
     fn next_page(&mut self) {
         match self.current_page {
             Page::Games => self.show_cores(),
-            Page::Cores => self.show_bios(),
-            Page::Bios => self.show_device(),
-            Page::Device => self.show_games(),
+            Page::Cores => self.current_page = Page::Bios,
+            Page::Bios => self.current_page = Page::Device,
+            Page::Device => self.current_page = Page::Games,
         }
     }
 
@@ -698,10 +678,6 @@ impl App {
                 RenameTarget::OnDevice(on_device) => WorkerCommand::RenameOnDevice(on_device, new),
             });
         }
-    }
-
-    fn cancel_prompt(&mut self) {
-        self.prompt = None;
     }
 
     fn prompt_for_name_in_library(&mut self) {

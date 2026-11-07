@@ -19,7 +19,7 @@ use pocketeer_core::{
     cores::{BiosRow, CoreList},
     device::{Device, DeviceEntry, DiskSpace, Firmware, OrphanDeviceSave},
     library::{LibrarySave, LocalEntry, OrphanLocalSave},
-    log::{FrontEnd, OperationReport, device_ref},
+    log::{FrontEnd, LogEntry, OperationReport, device_ref},
     platform::Platform,
     pocketeer::GameRow,
 };
@@ -393,7 +393,7 @@ impl WorkerState<'_> {
     /// Looks for orphans only when a command ends, because that reads every
     /// save and the games page may be sent for each game.
     fn refresh_orphans(&mut self, pocketeer: &Pocketeer) {
-        self.orphan_saves.in_library = pocketeer.find_orphan_saves_in_library().unwrap_or_default();
+        self.orphan_saves.in_library = pocketeer.library().find_orphan_saves().unwrap_or_default();
         self.orphan_saves.on_device = pocketeer.find_orphan_saves_on_device().unwrap_or_default();
     }
 
@@ -521,7 +521,7 @@ impl WorkerState<'_> {
             ));
             return;
         }
-        let mut command_progress = CommandProgress {
+        let mut progress = CommandProgress {
             send_message: self.send_message,
             orphan_saves: &self.orphan_saves,
             is_canceled,
@@ -531,135 +531,85 @@ impl WorkerState<'_> {
         let label = command.label();
         (self.send_message)(WorkerMessage::CommandStarted {
             label: label.to_string(),
-            target_count: command_progress.target_count,
+            target_count: progress.target_count,
         });
-        // A non-batch command reports through `command_progress` by hand,
+        // A non-batch command reports through `progress` by hand,
         // because it has no log entry, only its result.
         let batch_result = match command {
-            WorkerCommand::PullGames(games) => {
-                pocketeer.pull_games(&games, |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                })
-            }
-            WorkerCommand::PullSaves(games) => {
-                pocketeer.pull_saves(&games, |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                })
-            }
-            WorkerCommand::PushGames(games) => {
-                pocketeer.push_games(&games, |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                })
-            }
+            WorkerCommand::PullGames(games) => pocketeer.pull_games(&games, progress.on_logged()),
+            WorkerCommand::PullSaves(games) => pocketeer.pull_saves(&games, progress.on_logged()),
+            WorkerCommand::PushGames(games) => pocketeer.push_games(&games, progress.on_logged()),
             WorkerCommand::PushSaveVersion(game, version) => {
-                pocketeer.push_save_versions(&[(game, version)], |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                })
+                pocketeer.push_save_versions(&[(game, version)], progress.on_logged())
             }
             WorkerCommand::FetchCovers(games) => {
-                pocketeer.fetch_covers(&games, |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                })
+                pocketeer.fetch_covers(&games, progress.on_logged())
             }
             WorkerCommand::ImportGame(path, platform) => {
                 pocketeer_core::pocketeer::expand_import_paths(&[path]).and_then(|files| {
-                    command_progress.target_count = files.len();
-                    pocketeer.import_games(&files, platform.as_ref(), |pocketeer, log_entry| {
-                        command_progress.record_finished_target(pocketeer, log_entry.report)
-                    })
+                    progress.target_count = files.len();
+                    pocketeer.import_games(&files, platform.as_ref(), progress.on_logged())
                 })
             }
             WorkerCommand::ImportSave(game, from) => {
-                pocketeer.import_saves(&[(game, from)], |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                })
+                pocketeer.import_saves(&[(game, from)], progress.on_logged())
             }
             WorkerCommand::ImportCover(game, from) => {
-                pocketeer.import_covers(&[(game, from)], |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                })
+                pocketeer.import_covers(&[(game, from)], progress.on_logged())
             }
             WorkerCommand::TrashGames(games) => {
-                pocketeer.trash_games_in_library(&games, |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                })
+                pocketeer.trash_games_in_library(&games, progress.on_logged())
             }
-            WorkerCommand::TrashSaveVersion(game, version) => pocketeer
-                .trash_save_versions_in_library(&[(game, version)], |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                }),
-            WorkerCommand::TrashOrphanSaves(orphan_saves) => pocketeer
-                .trash_orphan_saves_in_library(&orphan_saves, |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                }),
+            WorkerCommand::TrashSaveVersion(game, version) => {
+                pocketeer.trash_save_versions_in_library(&[(game, version)], progress.on_logged())
+            }
+            WorkerCommand::TrashOrphanSaves(orphan_saves) => {
+                pocketeer.trash_orphan_saves_in_library(&orphan_saves, progress.on_logged())
+            }
             WorkerCommand::DeleteGames(games) => {
-                pocketeer.delete_games_on_device(&games, |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                })
+                pocketeer.delete_games_on_device(&games, progress.on_logged())
             }
             WorkerCommand::DeleteSaves(games) => {
-                pocketeer.delete_saves_on_device(&games, |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                })
+                pocketeer.delete_saves_on_device(&games, progress.on_logged())
             }
-            WorkerCommand::DeleteOrphanSaves(orphan_saves) => pocketeer
-                .delete_orphan_saves_on_device(&orphan_saves, |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                }),
+            WorkerCommand::DeleteOrphanSaves(orphan_saves) => {
+                pocketeer.delete_orphan_saves_on_device(&orphan_saves, progress.on_logged())
+            }
             // Handled above, since they aren't commands to report.
             WorkerCommand::ShowCores | WorkerCommand::ProposeRenames(_) => {
                 Ok(ControlFlow::Continue(()))
             }
-            WorkerCommand::InstallCores(ids) => {
-                pocketeer.install_cores(&ids, |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                })
-            }
-            WorkerCommand::RemoveCores(ids) => {
-                pocketeer.remove_cores(&ids, |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                })
-            }
+            WorkerCommand::InstallCores(ids) => pocketeer.install_cores(&ids, progress.on_logged()),
+            WorkerCommand::RemoveCores(ids) => pocketeer.remove_cores(&ids, progress.on_logged()),
             WorkerCommand::PutBios(row, from) => {
-                pocketeer.put_bios_files(&[(row, from)], |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                })
+                pocketeer.put_bios_files(&[(row, from)], progress.on_logged())
             }
             WorkerCommand::RenameGamesInLibrary(games) => {
-                pocketeer.rename_games_in_library(&games, |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                })
+                pocketeer.rename_games_in_library(&games, progress.on_logged())
             }
             WorkerCommand::RenameOnDevice(game, new) => {
-                pocketeer.rename_games_on_device(&[(game, new)], |pocketeer, log_entry| {
-                    command_progress.record_finished_target(pocketeer, log_entry.report)
-                })
+                pocketeer.rename_games_on_device(&[(game, new)], progress.on_logged())
             }
             WorkerCommand::SyncDats => {
                 let synced = pocketeer.sync_dats();
-                Ok(command_progress
-                    .record_finished_target(pocketeer, OperationReport::SyncDats(synced)))
+                Ok(progress.record_finished_target(pocketeer, OperationReport::SyncDats(synced)))
             }
             WorkerCommand::Reload => {
                 let read = pocketeer.reload();
                 let read = read.map(|report| {
                     send_duplicates(self.send_message, pocketeer, &report.duplicates)
                 });
-                Ok(command_progress
-                    .record_finished_target(pocketeer, OperationReport::Reload(read)))
+                Ok(progress.record_finished_target(pocketeer, OperationReport::Reload(read)))
             }
             WorkerCommand::Eject => {
                 let root = pocketeer.device().map(|device| device.root().to_path_buf());
                 let ejected = pocketeer.eject_device();
-                Ok(command_progress
+                Ok(progress
                     .record_finished_target(pocketeer, OperationReport::Eject(root, ejected)))
             }
         };
-        let (mut summary, mut failed) = command_summary(
-            label,
-            command_progress.target_count,
-            &command_progress.reports,
-        );
+        let (mut summary, mut failed) =
+            command_summary(label, progress.target_count, &progress.reports);
         if let Err(error) = batch_result {
             summary.push_str(&format!("; {error}"));
             failed = true;
@@ -677,6 +627,13 @@ struct CommandProgress<'a> {
 }
 
 impl CommandProgress<'_> {
+    /// The callback for a batch, which records each game as it finishes.
+    fn on_logged(&mut self) -> impl FnMut(&Pocketeer, LogEntry) -> ControlFlow<()> + '_ {
+        move |pocketeer: &Pocketeer, log_entry: LogEntry| {
+            self.record_finished_target(pocketeer, log_entry.report)
+        }
+    }
+
     /// Records how one game went and sends the current state. Breaks if the
     /// command was canceled.
     fn record_finished_target(

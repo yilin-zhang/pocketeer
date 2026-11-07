@@ -718,7 +718,8 @@ impl CliSession {
         }
         let orphans: Vec<Orphan> = self
             .pocketeer
-            .find_orphan_saves_in_library()?
+            .library()
+            .find_orphan_saves()?
             .into_iter()
             .map(|orphan| Orphan {
                 save: library_orphan_ref(&orphan),
@@ -880,7 +881,7 @@ impl CliSession {
     }
 
     fn trash_orphan_saves(&mut self, orphan_refs: &[String]) -> CliResult<()> {
-        let orphans = self.pocketeer.find_orphan_saves_in_library()?;
+        let orphans = self.pocketeer.library().find_orphan_saves()?;
         let orphans = pick_orphans(orphan_refs, &orphans, library_orphan_ref)?;
         self.run_batch(|pocketeer, on_logged| {
             pocketeer.trash_orphan_saves_in_library(&orphans, on_logged)

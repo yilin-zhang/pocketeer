@@ -23,7 +23,7 @@ use crate::{
     game::Game,
     library::{
         AddGameError, Library, LibrarySave, LocalEntry, OpenLibraryError, OrphanLocalSave,
-        RenameInLibraryError, TrashOrphanSaveError, TrashSaveAllOutcome, TrashSaveError,
+        RenameInLibraryError, TrashSaveAllOutcome, TrashSaveError,
     },
     log::{FrontEnd, LogEntry, Logger, OperationReport},
     platform::Platform,
@@ -784,10 +784,6 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
 
     // ---- Orphan saves -----------------------------------------------------------
 
-    pub fn find_orphan_saves_in_library(&self) -> Result<Vec<OrphanLocalSave>, BasicError> {
-        self.library.find_orphan_saves()
-    }
-
     /// The saves on the device with no game, or none if no device is open.
     pub fn find_orphan_saves_on_device(&self) -> Result<Vec<OrphanDeviceSave>, BasicError> {
         self.device
@@ -806,18 +802,11 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
             |pocketeer, orphan| {
                 OperationReport::TrashOrphanSave(
                     orphan.clone(),
-                    pocketeer.trash_orphan_save_in_library(orphan),
+                    pocketeer.library.trash_orphan_save(orphan),
                 )
             },
             on_logged,
         )
-    }
-
-    fn trash_orphan_save_in_library(
-        &mut self,
-        orphan: &OrphanLocalSave,
-    ) -> Result<(), TrashOrphanSaveError> {
-        self.library.trash_orphan_save(orphan)
     }
 
     pub fn delete_orphan_saves_on_device(
@@ -1943,7 +1932,7 @@ mod tests {
         #[test]
         fn reports_orphan_gone_from_library() {
             let mut setup = setup(&[], &[("saves/gba/Gone/a.sav", b"save")]);
-            let orphans = setup.pocketeer.find_orphan_saves_in_library().unwrap();
+            let orphans = setup.pocketeer.library().find_orphan_saves().unwrap();
             let root = setup.pocketeer.library().root().to_path_buf();
             fs::remove_file(root.join("saves/gba/Gone/a.sav")).unwrap();
             let lines = lines_of(|on_logged| {

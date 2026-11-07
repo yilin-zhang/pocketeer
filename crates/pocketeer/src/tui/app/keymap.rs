@@ -3,7 +3,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{App, ImportTarget};
+use super::{App, Dialog, ImportTarget, Page};
 use crate::tui::worker::WorkerCommand;
 
 /// Where a key is shown.
@@ -185,10 +185,16 @@ impl Keymap {
 
     const PAGES: [Binding; 5] = [
         Binding::hidden(&[Key::plain(KeyCode::Tab)], App::next_page),
-        Binding::hidden(&[Key::plain(KeyCode::Char('1'))], App::show_games),
+        Binding::hidden(&[Key::plain(KeyCode::Char('1'))], |app| {
+            app.current_page = Page::Games
+        }),
         Binding::hidden(&[Key::plain(KeyCode::Char('2'))], App::show_cores),
-        Binding::hidden(&[Key::plain(KeyCode::Char('3'))], App::show_bios),
-        Binding::hidden(&[Key::plain(KeyCode::Char('4'))], App::show_device),
+        Binding::hidden(&[Key::plain(KeyCode::Char('3'))], |app| {
+            app.current_page = Page::Bios
+        }),
+        Binding::hidden(&[Key::plain(KeyCode::Char('4'))], |app| {
+            app.current_page = Page::Device
+        }),
     ];
 
     const SHARED: [Binding; 3] = [
@@ -206,7 +212,7 @@ impl Keymap {
             "help",
             "This window.",
             Group::General,
-            App::open_help,
+            |app| app.dialog = Some(Dialog::keys(app.keymap())),
         ),
         Binding::new(
             &[Key::plain(KeyCode::Char('q'))],
@@ -214,7 +220,7 @@ impl Keymap {
             "quit",
             "Quits. What is under way finishes first.",
             Group::General,
-            App::quit,
+            |app| app.should_quit = true,
         ),
     ];
 
@@ -647,7 +653,7 @@ impl Keymap {
                 "cancel",
                 "",
                 Group::General,
-                App::cancel_prompt,
+                |app| app.prompt = None,
             ),
             Binding::new(
                 &[
@@ -689,7 +695,7 @@ impl Keymap {
                 "cancel",
                 "",
                 Group::General,
-                App::cancel_prompt,
+                |app| app.prompt = None,
             ),
         ],
         notes: &[],
