@@ -146,6 +146,7 @@ impl Keymap {
     const MOVE_NOTE: &'static str = "Move      j k, arrows, C-n C-p; PgUp PgDn; g G top, bottom";
     const PAGES_NOTE: &'static str =
         "Pages     Tab the next one; 1 games, 2 cores, 3 BIOS, 4 device";
+    const STOP_NOTE: &'static str = "Stop      Esc stops what runs, after the game under way.";
     const SHIFT_NOTE: &'static str =
         "          Lowercase changes the library, Shift changes the device.";
 
@@ -217,14 +218,8 @@ impl Keymap {
         ),
     ];
 
-    const STOP: [Binding; 1] = [Binding::new(
-        &[Key::plain(KeyCode::Esc)],
-        "Esc",
-        "stop",
-        "Stops what runs, after the game under way.",
-        Group::General,
-        App::escape,
-    )];
+    /// The status line shows this key while something runs.
+    const STOP: [Binding; 1] = [Binding::hidden(&[Key::plain(KeyCode::Esc)], App::escape)];
 
     // ---- The Games page ---------------------------------------------------------
 
@@ -360,20 +355,10 @@ impl Keymap {
         }),
     ];
 
-    /// On the Games page Esc clears the search first.
-    const GAMES_ESC: [Binding; 1] = [Binding::new(
-        &[Key::plain(KeyCode::Esc)],
-        "Esc",
-        "stop",
-        "Clears the search, or stops what runs after the game under way.",
-        Group::General,
-        App::escape,
-    )];
-
     const GAMES_PAGE_BINDINGS: [Binding; 33] = Self::join(&[
         &Self::GAMES_ACTIONS,
         &Self::SHARED,
-        &Self::GAMES_ESC,
+        &Self::STOP,
         &Self::LIST_MOVEMENT,
         &Self::PAGES,
     ]);
@@ -383,9 +368,10 @@ impl Keymap {
         notes: &[
             Self::MOVE_NOTE,
             Self::PAGES_NOTE,
+            Self::STOP_NOTE,
             "Mark      M marks every row shown, and again clears every mark.",
             Self::SHIFT_NOTE,
-            "Search    / starts a search; f cycles the filter.",
+            "Search    / starts a search, Esc clears it; f cycles the filter.",
         ],
     };
 
@@ -542,7 +528,7 @@ impl Keymap {
 
     pub(super) const CORES_PAGE: Self = Self {
         bindings: &Self::CORES_PAGE_BINDINGS,
-        notes: &[Self::MOVE_NOTE, Self::PAGES_NOTE],
+        notes: &[Self::MOVE_NOTE, Self::PAGES_NOTE, Self::STOP_NOTE],
     };
 
     const BIOS_ACTIONS: [Binding; 1] = [Binding::new(
@@ -564,7 +550,7 @@ impl Keymap {
 
     pub(super) const BIOS_PAGE: Self = Self {
         bindings: &Self::BIOS_PAGE_BINDINGS,
-        notes: &[Self::MOVE_NOTE, Self::PAGES_NOTE],
+        notes: &[Self::MOVE_NOTE, Self::PAGES_NOTE, Self::STOP_NOTE],
     };
 
     const DEVICE_PAGE_BINDINGS: [Binding; 9] =
@@ -572,7 +558,7 @@ impl Keymap {
 
     pub(super) const DEVICE_PAGE: Self = Self {
         bindings: &Self::DEVICE_PAGE_BINDINGS,
-        notes: &[Self::PAGES_NOTE],
+        notes: &[Self::PAGES_NOTE, Self::STOP_NOTE],
     };
 
     // ---- Prompts and dialogs ----------------------------------------------------
