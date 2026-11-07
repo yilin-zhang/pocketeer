@@ -1,4 +1,4 @@
-//! The library on the computer, where pocketeer keeps games, their covers
+//! The library on the computer, where Pocketeer keeps games, their covers
 //! and their saves.
 
 use std::{

@@ -1,6 +1,6 @@
 [package]
 name = "pocketeer-core"
-description = "The games, saves and covers pocketeer manages, and their rules"
+description = "The games, saves and covers Pocketeer manages, and their rules"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

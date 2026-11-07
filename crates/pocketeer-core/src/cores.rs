@@ -14,7 +14,7 @@ use zip::ZipArchive;
 
 use crate::{error::BasicError, files::write_atomically, platform::Platform};
 
-/// The cores pocketeer installs for now. Each comes alone in its zip and needs
+/// The cores Pocketeer installs for now. Each comes alone in its zip and needs
 /// nothing beyond `Cores/` and `Platforms/`, so there are no ROMs, saves or
 /// licenses to find.
 pub const SUPPORTED: &[&str] = &[
@@ -36,7 +36,7 @@ pub const SUPPORTED: &[&str] = &[
     "agg23.SNES",
 ];
 
-/// The largest zip pocketeer accepts. The cores above take a few MB, and the
+/// The largest zip Pocketeer accepts. The cores above take a few MB, and the
 /// zips are hosted by third parties.
 const MOST_IN_A_ZIP: u64 = 64 * 1024 * 1024;
 
@@ -133,6 +133,14 @@ impl CoreRow {
             _ => false,
         }
     }
+}
+
+/// Every core, as far as it could be found out.
+#[derive(Debug, Clone)]
+pub struct CoreList {
+    pub rows: Vec<CoreRow>,
+    /// Why the inventory couldn't be fetched, if it couldn't.
+    pub inventory_failure: Option<BasicError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

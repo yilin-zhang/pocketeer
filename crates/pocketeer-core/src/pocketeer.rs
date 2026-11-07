@@ -1,4 +1,4 @@
-//! Everything pocketeer does, in one place for every front end.
+//! Everything Pocketeer does, in one place for every front end.
 
 use std::{
     ops::ControlFlow,
@@ -9,7 +9,7 @@ use fs_err as fs;
 
 use crate::{
     cores::{
-        BiosRow, CoreInventory, CoreRow, CoreZip, InstallCoreError, InstallCoreOutcome,
+        BiosRow, CoreInventory, CoreList, CoreRow, CoreZip, InstallCoreError, InstallCoreOutcome,
         PutBiosError, RemoteCoreSource, RemoveCoreError, SUPPORTED,
     },
     cover::{Cover, CoverIndex, RemoteCoverSource},
@@ -167,7 +167,7 @@ impl Pocketeer {
     }
 
     /// The `Pocketeer Library` folder in the home folder, created if missing.
-    /// This is the only library pocketeer creates.
+    /// This is the only library Pocketeer creates.
     pub fn default_library_path() -> Result<PathBuf, OpenLibraryError> {
         let home = std::env::home_dir().ok_or(OpenLibraryError::NoHome)?;
         let library = home.join("Pocketeer Library");
@@ -224,7 +224,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     /// Opens the mounted device, if there is one, replacing any open one, and
     /// returns whether there was. It isn't scanned yet.
     ///
-    /// With more than one mounted none is opened, because pocketeer shouldn't
+    /// With more than one mounted none is opened, because Pocketeer shouldn't
     /// guess which one is meant.
     pub fn open_mounted_device(&mut self) -> Result<bool, OpenDeviceError> {
         match &Device::find_mounted()[..] {
@@ -264,17 +264,13 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     // ---- Reload -----------------------------------------------------------------
 
     /// Reads the library's folder again, and the open device's, for changes
-    /// made outside pocketeer.
+    /// made outside Pocketeer.
     pub fn reload(&mut self) -> Result<ScanReport, BasicError> {
-        let read = self.reload_library().and_then(|()| match self.device {
+        let read = self.library.reload().and_then(|()| match self.device {
             Some(_) => self.scan_device(),
             None => Ok(ScanReport::default()),
         });
         self.log_result(read, |read| OperationReport::Reload(read.map(|_| ())))
-    }
-
-    fn reload_library(&mut self) -> Result<(), BasicError> {
-        self.library.reload()
     }
 
     // ---- Listing games ----------------------------------------------------------
@@ -334,7 +330,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         games
     }
 
-    pub(crate) fn games_on_device(&self) -> Vec<DeviceEntry> {
+    fn games_on_device(&self) -> Vec<DeviceEntry> {
         let entries = self
             .device
             .as_ref()
@@ -855,27 +851,30 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     // cores.
 
     /// Every core, starting with those that can be installed, then the others
-    /// on the device. If the inventory can't be fetched, the error comes back
-    /// with the cores on the device alone.
-    pub fn load_core_rows(&mut self) -> Result<(Vec<CoreRow>, Option<BasicError>), BasicError> {
+    /// on the device. If the inventory can't be fetched, the list says why and
+    /// holds the cores on the device alone.
+    pub fn load_core_list(&mut self) -> Result<CoreList, BasicError> {
         let installed = match &self.device {
             Some(device) => device.installed_cores()?,
             None => Vec::new(),
         };
-        let (latest, failure) = match self.cores.supported_cores() {
+        let (latest, inventory_failure) = match self.cores.supported_cores() {
             Ok(latest) => (latest, None),
             Err(error) => (Vec::new(), Some(error)),
         };
-        Ok((CoreRow::pair(installed, latest), failure))
+        Ok(CoreList {
+            rows: CoreRow::pair(installed, latest),
+            inventory_failure,
+        })
     }
 
     /// The cores on the device with another version in the inventory.
     pub fn find_cores_with_updates(&mut self) -> Result<Vec<String>, BasicError> {
-        let (rows, failure) = self.load_core_rows()?;
-        if let Some(failure) = failure {
+        let core_list = self.load_core_list()?;
+        if let Some(failure) = core_list.inventory_failure {
             return Err(failure);
         }
-        let with_updates = rows.iter().filter(|row| row.has_update());
+        let with_updates = core_list.rows.iter().filter(|row| row.has_update());
         Ok(with_updates.map(|row| row.id().to_string()).collect())
     }
 
@@ -1236,7 +1235,7 @@ mod tests {
         );
         let root = setup.pocketeer.library().root().to_path_buf();
         put_at(&root, "saves/gba/A/one.sav", b"one", 1_000);
-        setup.pocketeer.reload_library().unwrap();
+        setup.pocketeer.library.reload().unwrap();
         let on_device = setup.pocketeer.games_on_device();
         let local = setup.pocketeer.library().entries().to_vec();
         (setup, on_device, local)
@@ -1408,7 +1407,7 @@ mod tests {
                 Err(BasicError::NotOnDevice)
             ));
             fs::remove_file(setup.pocketeer.library().game_path(&local)).unwrap();
-            setup.pocketeer.reload_library().unwrap();
+            setup.pocketeer.library.reload().unwrap();
             assert!(matches!(
                 setup.pocketeer.fetch_cover(&local),
                 Err(BasicError::NotInLibrary)
@@ -1540,7 +1539,7 @@ mod tests {
             let (mut setup, on_device, _) = with_versions();
             let root = setup.pocketeer.library().root().to_path_buf();
             put_at(&root, "saves/gba/A/two.sav", b"two", 1_000);
-            setup.pocketeer.reload_library().unwrap();
+            setup.pocketeer.library.reload().unwrap();
             let local = setup.pocketeer.library().entries()[0].clone();
             for name in ["two", "one"] {
                 let version = local.save.as_ref().unwrap().version_named(name).unwrap();
@@ -1831,8 +1830,8 @@ mod tests {
         fn lists_every_core_as_available_without_device() {
             let mut setup = setup(&[("Cores/Spiritualized.GB/core.json", b"{}")], &[]);
             setup.pocketeer.close_device();
-            let (rows, _) = setup.pocketeer.load_core_rows().unwrap();
-            assert!(matches!(rows[..], [CoreRow::Available(_)]));
+            let core_list = setup.pocketeer.load_core_list().unwrap();
+            assert!(matches!(core_list.rows[..], [CoreRow::Available(_)]));
         }
 
         #[test]

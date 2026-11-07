@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pocketeer_core::{
-    cores::{BiosRow, BiosStatus, CoreRow},
+    cores::{BiosRow, BiosStatus, CoreList, CoreRow},
     device::{DeviceEntry, OrphanDeviceSave},
     library::{LocalEntry, OrphanLocalSave},
     platform::Platform,
@@ -139,16 +139,9 @@ impl Prompt {
 // Cores page
 // ============================================================================
 
-/// The cores as the worker last sent them.
-pub struct CoreList {
-    pub rows: Vec<CoreRow>,
-    /// Why the inventory couldn't be fetched, if it couldn't.
-    pub inventory_failure: Option<String>,
-}
-
 #[derive(Default)]
 pub struct CoresPage {
-    /// None until the worker has sent them.
+    /// The cores as the worker last sent them, or none until it has.
     core_list: Option<CoreList>,
     pub table_state: TableState,
 }
@@ -164,17 +157,14 @@ impl CoresPage {
     }
 
     /// Stores the cores the worker sent, keeping the selection on its core.
-    fn set_rows(&mut self, rows: Vec<CoreRow>, inventory_failure: Option<String>) {
+    fn set_core_list(&mut self, core_list: CoreList) {
         let selected_id = self.selected_row().map(|row| row.id().to_string());
         let new_selected_row =
-            selected_id.and_then(|id| rows.iter().position(|row| row.id() == id));
+            selected_id.and_then(|id| core_list.rows.iter().position(|row| row.id() == id));
         let selected = new_selected_row
             .or(self.table_state.selected())
             .unwrap_or(0);
-        self.core_list = Some(CoreList {
-            rows,
-            inventory_failure,
-        });
+        self.core_list = Some(core_list);
         self.select_row(selected);
     }
 
@@ -354,7 +344,7 @@ impl App {
                     None => DeviceStatus::NoDevice,
                 };
             }
-            WorkerMessage::CoreListChanged { rows, failure } => self.cores.set_rows(rows, failure),
+            WorkerMessage::CoreListChanged(core_list) => self.cores.set_core_list(core_list),
             WorkerMessage::BiosFilesChanged(rows) => self.bios.set_rows(rows),
             WorkerMessage::DevicePageChanged(data) => self.device_page = data,
             WorkerMessage::DeviceReadStarted(root) => {
@@ -1037,6 +1027,7 @@ mod tests {
     use pocketeer_core::{
         cores::{BiosRow, BiosStatus, InstalledCore, InventoryCore},
         device::{DiskSpace, Firmware},
+        error::BasicError,
         platform::Platform,
     };
     use ratatui::{Terminal, backend::TestBackend};
@@ -1127,15 +1118,15 @@ mod tests {
     fn on_cores_page() -> (App, Receiver<QueuedCommand>) {
         let (mut app, rx) = app();
         app.handle_key(KeyEvent::from(KeyCode::Tab));
-        app.handle_worker_message(WorkerMessage::CoreListChanged {
+        app.handle_worker_message(WorkerMessage::CoreListChanged(CoreList {
             rows: vec![
                 core_row("new.Core", None, Some("1")),
                 core_row("old.Core", Some("1"), Some("2")),
                 core_row("same.Core", Some("2"), Some("2")),
                 core_row("mine.Core", Some("1"), None),
             ],
-            failure: None,
-        });
+            inventory_failure: None,
+        }));
         assert_eq!(sent(&rx), [WorkerCommand::ShowCores]);
         (app, rx)
     }
@@ -1791,10 +1782,10 @@ mod tests {
         #[test]
         fn shift_a_reports_every_core_up_to_date() {
             let (mut app, rx) = on_cores_page();
-            app.handle_worker_message(WorkerMessage::CoreListChanged {
+            app.handle_worker_message(WorkerMessage::CoreListChanged(CoreList {
                 rows: vec![core_row("same.Core", Some("2"), Some("2"))],
-                failure: None,
-            });
+                inventory_failure: None,
+            }));
             press(&mut app, "A");
             assert_eq!(
                 app.status_message().unwrap().text,
@@ -1820,18 +1811,18 @@ mod tests {
         fn keeps_selection_on_same_core_when_rows_change() {
             let (mut app, _rx) = on_cores_page();
             press(&mut app, "jj");
-            app.handle_worker_message(WorkerMessage::CoreListChanged {
+            app.handle_worker_message(WorkerMessage::CoreListChanged(CoreList {
                 rows: vec![
                     core_row("old.Core", Some("2"), Some("2")),
                     core_row("same.Core", Some("2"), Some("2")),
                 ],
-                failure: None,
-            });
+                inventory_failure: None,
+            }));
             assert_eq!(app.cores.selected_row().unwrap().id(), "same.Core");
-            app.handle_worker_message(WorkerMessage::CoreListChanged {
+            app.handle_worker_message(WorkerMessage::CoreListChanged(CoreList {
                 rows: vec![core_row("old.Core", Some("2"), Some("2"))],
-                failure: None,
-            });
+                inventory_failure: None,
+            }));
             assert_eq!(app.cores.selected_row().unwrap().id(), "old.Core");
         }
     }
@@ -2124,14 +2115,17 @@ mod tests {
             }
             fn open_cores_page(app: &mut App) {
                 app.handle_key(KeyEvent::from(KeyCode::Tab));
-                app.handle_worker_message(WorkerMessage::CoreListChanged {
+                app.handle_worker_message(WorkerMessage::CoreListChanged(CoreList {
                     rows: vec![
                         core_row("new.Core", None, Some("1")),
                         core_row("old.Core", Some("1"), Some("2")),
                         core_row("mine.Core", Some("1"), None),
                     ],
-                    failure: Some("no network".into()),
-                });
+                    inventory_failure: Some(BasicError::BadResponse {
+                        from: "the inventory".into(),
+                        message: "no network".into(),
+                    }),
+                }));
             }
             fn open_bios_page(app: &mut App) {
                 press(app, "3");

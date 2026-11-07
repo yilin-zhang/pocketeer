@@ -76,7 +76,7 @@ pub enum RenameOnDeviceError {
     Other(#[from] BasicError),
 }
 
-/// Every path pocketeer reads or writes on a device is spelled out here.
+/// Every path Pocketeer reads or writes on a device is spelled out here.
 #[derive(Debug, Clone)]
 struct DeviceLayout {
     root: PathBuf,
@@ -260,7 +260,7 @@ pub struct Device {
     layout: DeviceLayout,
     cache: Cache,
     /// What the last scan found, sorted by platform id and path with each game
-    /// once, plus what pocketeer has put on the device since.
+    /// once, plus what Pocketeer has put on the device since.
     entries: Vec<DeviceEntry>,
     scanned: bool,
 }

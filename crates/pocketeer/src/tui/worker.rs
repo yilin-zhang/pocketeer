@@ -16,7 +16,7 @@ use std::{
 use super::path_input::fuzzy_match;
 use pocketeer_core::{
     Pocketeer,
-    cores::{BiosRow, CoreRow},
+    cores::{BiosRow, CoreList},
     device::{Device, DeviceEntry, DiskSpace, Firmware, OrphanDeviceSave},
     library::{LibrarySave, LocalEntry, OrphanLocalSave},
     log::{FrontEnd, OperationReport, device_ref},
@@ -210,15 +210,11 @@ pub struct DevicePageData {
 }
 
 /// What the worker has read and how a command is going, sent to the UI.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum WorkerMessage {
     GamesPageChanged(GamesPageData),
-    /// The cores, once their page has been opened, and why the inventory
-    /// couldn't be fetched, if it couldn't.
-    CoreListChanged {
-        rows: Vec<CoreRow>,
-        failure: Option<String>,
-    },
+    /// The cores, once their page has been opened.
+    CoreListChanged(CoreList),
     /// The files the cores on the device load, or none without a device.
     BiosFilesChanged(Vec<BiosRow>),
     /// None without a device.
@@ -405,11 +401,11 @@ impl WorkerState<'_> {
         if !self.is_cores_page_opened {
             return;
         }
-        let (rows, failure) = match pocketeer.load_core_rows() {
-            Ok((rows, failure)) => (rows, failure.map(|error| error.to_string())),
-            Err(error) => (Vec::new(), Some(error.to_string())),
-        };
-        (self.send_message)(WorkerMessage::CoreListChanged { rows, failure });
+        let core_list = pocketeer.load_core_list().unwrap_or_else(|error| CoreList {
+            rows: Vec::new(),
+            inventory_failure: Some(error),
+        });
+        (self.send_message)(WorkerMessage::CoreListChanged(core_list));
     }
 
     fn send_bios_page_data(&self, pocketeer: &Pocketeer) {
@@ -453,6 +449,7 @@ impl WorkerState<'_> {
         }
         pocketeer.close_device();
         match &found[..] {
+            [] if open.is_none() => {}
             [] => {
                 self.finish_with_refresh(pocketeer, "device gone".to_string(), false);
             }
@@ -858,7 +855,9 @@ mod tests {
 
     /// Every message up to the device having been read.
     fn until_device_read(rx: &Receiver<WorkerMessage>) -> Vec<WorkerMessage> {
-        messages_until(rx, |message| *message == WorkerMessage::DeviceReadFinished)
+        messages_until(rx, |message| {
+            matches!(message, WorkerMessage::DeviceReadFinished)
+        })
     }
 
     fn last_games_page_data(messages: &[WorkerMessage]) -> &GamesPageData {
@@ -907,9 +906,13 @@ mod tests {
     /// The ids of the cores last sent in `messages`.
     fn cores_sent(messages: &[WorkerMessage]) -> Option<Vec<String>> {
         messages.iter().rev().find_map(|message| match message {
-            WorkerMessage::CoreListChanged { rows, .. } => {
-                Some(rows.iter().map(|row| row.id().to_string()).collect())
-            }
+            WorkerMessage::CoreListChanged(core_list) => Some(
+                core_list
+                    .rows
+                    .iter()
+                    .map(|row| row.id().to_string())
+                    .collect(),
+            ),
             _ => None,
         })
     }
@@ -917,7 +920,7 @@ mod tests {
     /// Every message up to the cores being sent.
     fn until_cores(rx: &Receiver<WorkerMessage>) -> Vec<WorkerMessage> {
         messages_until(rx, |message| {
-            matches!(message, WorkerMessage::CoreListChanged { .. })
+            matches!(message, WorkerMessage::CoreListChanged(_))
         })
     }
 
@@ -960,6 +963,50 @@ mod tests {
             _ => None,
         });
         told.unwrap()
+    }
+
+    mod mounted_device {
+        use std::cell::RefCell;
+
+        use super::*;
+
+        /// Runs `after_device_opened` on a Pocketeer with the device open, then
+        /// checks for the device once it has disappeared. Returns the messages
+        /// that check sent.
+        fn messages_after_device_disappears(
+            after_device_opened: impl FnOnce(&mut Pocketeer),
+        ) -> Vec<WorkerMessage> {
+            let (_dir, library, device) = empty_library_and_device();
+            let mut pocketeer = Pocketeer::open(&library, FrontEnd::Tui).unwrap();
+            let messages = RefCell::new(Vec::new());
+            let send_message = |message| messages.borrow_mut().push(message);
+            let mut worker_state = WorkerState {
+                send_message: &send_message,
+                device_from_command_line: Some(device.clone()),
+                last_found_devices: Vec::new(),
+                orphan_saves: OrphanSaves::default(),
+                is_cores_page_opened: false,
+            };
+            worker_state.sync_mounted_device(&mut pocketeer);
+            after_device_opened(&mut pocketeer);
+            messages.borrow_mut().clear();
+            fs::remove_dir_all(&device).unwrap();
+            worker_state.sync_mounted_device(&mut pocketeer);
+            messages.into_inner()
+        }
+
+        #[test]
+        fn says_so_when_open_device_disappears() {
+            let messages = messages_after_device_disappears(|_| ());
+            assert_eq!(finished(&messages), ("device gone", false));
+        }
+
+        /// Ejecting closes the device, and it leaves the mounted ones afterward.
+        #[test]
+        fn says_nothing_when_closed_device_disappears() {
+            let messages = messages_after_device_disappears(Pocketeer::close_device);
+            assert!(messages.is_empty(), "{messages:?}");
+        }
     }
 
     mod opening {
@@ -1044,7 +1091,11 @@ mod tests {
                 summary.starts_with("couldn't read the device: "),
                 "{summary}"
             );
-            assert!(messages.contains(&WorkerMessage::DeviceReadFinished));
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| matches!(message, WorkerMessage::DeviceReadFinished))
+            );
             assert_eq!(last_games_page_data(&messages).device_root, None);
         }
     }
@@ -1378,7 +1429,10 @@ game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686
             drop(worker_handle);
             // The thread held the other end.
             while rx.try_recv().is_ok() {}
-            assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::TryRecvError::Disconnected)
+            ));
         }
 
         #[test]

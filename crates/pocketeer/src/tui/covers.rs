@@ -231,7 +231,7 @@ impl CoverLoader {
         let Some(stamp) = file_stamp(path) else {
             return CoverDisplay::Unreadable;
         };
-        if !self.request_unless_cached(path, stamp, size) {
+        if self.request_unless_cached(path, stamp, size) {
             return CoverDisplay::Loading;
         }
         let Some((_, state)) = self.cache.get_mut(path) else {
@@ -262,14 +262,14 @@ impl CoverLoader {
     }
 
     /// Sends the cover to the thread unless the cached copy is for this version
-    /// of the file. Returns `false` when it was sent.
+    /// of the file. Returns whether it was sent.
     fn request_unless_cached(&mut self, path: &Path, stamp: CoverFileStamp, size: Size) -> bool {
         if self
             .cache
             .get(path)
             .is_some_and(|(cached_stamp, _)| *cached_stamp == stamp)
         {
-            return true;
+            return false;
         }
         if self.cache.len() >= DECODED_COVER_LIMIT {
             // Covers being worked on are what's on screen or next to it.
@@ -283,7 +283,7 @@ impl CoverLoader {
             stamp,
             size,
         });
-        false
+        true
     }
 }
 

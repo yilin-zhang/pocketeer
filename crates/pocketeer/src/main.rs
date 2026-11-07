@@ -963,11 +963,12 @@ impl CliSession {
             latest: Option<String>,
             update_available: bool,
         }
-        let (rows, failure) = self.pocketeer.load_core_rows()?;
-        if let Some(failure) = failure {
+        let core_list = self.pocketeer.load_core_list()?;
+        if let Some(failure) = &core_list.inventory_failure {
             eprintln!("warning: couldn't get the cores that can be installed: {failure}");
         }
-        let rows: Vec<Row> = rows
+        let rows: Vec<Row> = core_list
+            .rows
             .iter()
             .map(|row: &CoreRow| {
                 let platforms = match (row.latest(), row.installed()) {
