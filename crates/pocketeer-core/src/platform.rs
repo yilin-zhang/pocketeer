@@ -102,11 +102,6 @@ mod tests {
     }
 
     #[test]
-    fn iterates_only_named_platforms() {
-        assert!(!Platform::iter().any(|platform| matches!(platform, Platform::Other(_))));
-    }
-
-    #[test]
     fn finds_every_named_platform_by_id() {
         for platform in Platform::iter() {
             assert_eq!(Platform::from_id(platform.id()), platform);

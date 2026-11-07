@@ -178,6 +178,16 @@ mod tests {
         on_device: DeviceEntry,
     }
 
+    impl Setup {
+        fn pull_save(&mut self) -> Result<PullSaveOutcome, PullSaveError> {
+            pull_save(&mut self.library, &self.device, &self.on_device)
+        }
+
+        fn push_save(&mut self, version: &Save) -> Result<PushSaveOutcome, PushSaveError> {
+            push_save(&self.library, &mut self.device, &self.on_device, version)
+        }
+    }
+
     fn setup(kept: Option<&[u8]>, save_there: Option<&[u8]>) -> Setup {
         let (lib_dir, device_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let (lib, root) = (lib_dir.path(), device_dir.path());
@@ -233,7 +243,7 @@ mod tests {
         #[test]
         fn pulls_new_save() {
             let mut setup = setup(Some(b"a"), Some(b"bb"));
-            let pulled = pull_save(&mut setup.library, &setup.device, &setup.on_device).unwrap();
+            let pulled = setup.pull_save().unwrap();
             assert_eq!(pulled, PullSaveOutcome::Pulled);
             assert_eq!(kept(&setup), [2, 1]);
         }
@@ -261,15 +271,14 @@ mod tests {
         #[test]
         fn pushes_kept_version_over_backed_up_save() {
             let mut setup = setup(Some(b"a"), Some(b"bb"));
-            pull_save(&mut setup.library, &setup.device, &setup.on_device).unwrap();
+            setup.pull_save().unwrap();
             let old = setup.library.entries()[0].save.as_ref().unwrap().versions[0].clone();
-            let pushed =
-                push_save(&setup.library, &mut setup.device, &setup.on_device, &old).unwrap();
+            let pushed = setup.push_save(&old).unwrap();
             assert_eq!(pushed, PushSaveOutcome::Pushed(old.clone()));
             let now = setup.device.read_save(&setup.on_device).unwrap().unwrap();
             assert_eq!(now, old);
             // The device now holds a version the library has.
-            let pulled = pull_save(&mut setup.library, &setup.device, &setup.on_device).unwrap();
+            let pulled = setup.pull_save().unwrap();
             assert_eq!(pulled, PullSaveOutcome::AlreadyHad);
         }
 
@@ -277,7 +286,7 @@ mod tests {
         fn rejects_push_over_save_not_backed_up() {
             let mut setup = setup(Some(b"a"), Some(b"bb"));
             let kept = current(&setup);
-            let pushed = push_save(&setup.library, &mut setup.device, &setup.on_device, &kept);
+            let pushed = setup.push_save(&kept);
             assert!(matches!(pushed, Err(PushSaveError::NotBackedUp)));
             let now = setup.device.read_save(&setup.on_device).unwrap().unwrap();
             assert_eq!(now.size, 2);
@@ -287,8 +296,7 @@ mod tests {
         fn pushes_onto_device_without_save() {
             let mut setup = setup(Some(b"a"), None);
             let kept = current(&setup);
-            let pushed =
-                push_save(&setup.library, &mut setup.device, &setup.on_device, &kept).unwrap();
+            let pushed = setup.push_save(&kept).unwrap();
             assert_eq!(pushed, PushSaveOutcome::Pushed(kept.clone()));
             assert_eq!(
                 setup.device.read_save(&setup.on_device).unwrap(),
@@ -300,8 +308,7 @@ mod tests {
         fn reports_already_there_when_device_has_same_save() {
             let mut setup = setup(Some(b"a"), Some(b"a"));
             let kept = current(&setup);
-            let pushed =
-                push_save(&setup.library, &mut setup.device, &setup.on_device, &kept).unwrap();
+            let pushed = setup.push_save(&kept).unwrap();
             assert_eq!(pushed, PushSaveOutcome::AlreadyThere);
         }
 
@@ -311,7 +318,7 @@ mod tests {
             let kept = current(&setup);
             fs::remove_file(setup.library.root().join("roms/gba/Tetris.gba")).unwrap();
             setup.library.reload().unwrap();
-            let pushed = push_save(&setup.library, &mut setup.device, &setup.on_device, &kept);
+            let pushed = setup.push_save(&kept);
             assert!(matches!(pushed, Err(PushSaveError::NotInLibrary)));
         }
 
@@ -319,12 +326,7 @@ mod tests {
         fn rejects_version_not_in_library() {
             let mut setup = setup(Some(b"a"), None);
             let unknown = Save::from_bytes(b"zzz", at(5));
-            let pushed = push_save(
-                &setup.library,
-                &mut setup.device,
-                &setup.on_device,
-                &unknown,
-            );
+            let pushed = setup.push_save(&unknown);
             assert!(matches!(pushed, Err(PushSaveError::NoSuchVersion)));
         }
     }
@@ -371,6 +373,8 @@ mod tests {
             let entry = &setup.library.entries()[0];
             let pushed = push_game(&setup.library, &mut setup.device, entry).unwrap();
             assert!(matches!(pushed, PushGameOutcome::Pushed(_)));
+            let on_device = setup.device.root().join("Assets/gba/common/Tetris.gba");
+            assert_eq!(fs::read(on_device).unwrap(), b"hello");
         }
 
         #[test]

@@ -549,7 +549,7 @@ mod tests {
     use std::cell::Cell;
 
     use super::{testing::*, *};
-    use crate::files::testing::put_at;
+    use crate::files::testing::{put, put_at};
 
     mod core_files {
         use super::*;
@@ -557,10 +557,6 @@ mod tests {
         /// What these slots of a core for GBA declare.
         fn files(slots: &str) -> Vec<CoreFile> {
             parse_core_files(&[Platform::Gba], data_json(slots).as_bytes())
-        }
-
-        fn paths(slots: &str) -> Vec<PathBuf> {
-            files(slots).into_iter().map(|file| file.path).collect()
         }
 
         #[test]
@@ -601,20 +597,14 @@ mod tests {
         }
 
         #[test]
-        fn leaves_out_core_specific_files() {
-            assert_eq!(files(r#"{"filename":"x.bin","parameters":2}"#), []);
-            assert_eq!(files(r#"{"filename":"x.bin","parameters":"0x8a"}"#), []);
-        }
-
-        #[test]
-        fn keeps_only_fixed_non_save_files() {
-            assert_eq!(
-                paths(
-                    r#"{"name":"Cartridge","required":true,"parameters":"0x109"},
-                       {"filename":"x.sav","nonvolatile":true}"#
-                ),
-                [] as [&Path; 0]
-            );
+        fn leaves_out_core_specific_save_and_unnamed_slots() {
+            for slot in [
+                r#"{"filename":"x.bin","parameters":2}"#,
+                r#"{"filename":"x.sav","nonvolatile":true}"#,
+                r#"{"name":"Cartridge","required":true,"parameters":"0x109"}"#,
+            ] {
+                assert_eq!(files(slot), [], "{slot}");
+            }
         }
 
         #[test]
@@ -683,23 +673,23 @@ mod tests {
         }
 
         #[test]
-        fn has_update_when_versions_differ() {
-            assert!(update_available(Some("1.2.0"), "1.3.0"));
-            // Any difference counts, whichever is newer, because versions
-            // aren't always numbers.
-            assert!(update_available(Some("1.3.0"), "1.2.0"));
-        }
-
-        #[test]
-        fn has_no_update_for_same_version_written_differently() {
-            assert!(!update_available(Some("1.2.0"), "1.2.0"));
-            assert!(!update_available(Some("v1.2.0"), "1.2.0"));
-            assert!(!update_available(Some(" 1.2B "), "V1.2b"));
-        }
-
-        #[test]
-        fn has_update_when_installed_version_unknown() {
-            assert!(update_available(None, "1.2.0"));
+        fn decides_update_by_comparing_versions() {
+            for (on_device, newest, expected) in [
+                (Some("1.2.0"), "1.3.0", true),
+                // Any difference counts, whichever is newer, because versions
+                // aren't always numbers.
+                (Some("1.3.0"), "1.2.0", true),
+                (Some("1.2.0"), "1.2.0", false),
+                (Some("v1.2.0"), "1.2.0", false),
+                (Some(" 1.2B "), "V1.2b", false),
+                (None, "1.2.0", true),
+            ] {
+                assert_eq!(
+                    update_available(on_device, newest),
+                    expected,
+                    "{on_device:?} and {newest}"
+                );
+            }
         }
 
         #[test]
@@ -751,29 +741,29 @@ mod tests {
         }
 
         #[test]
-        fn rejects_path_outside_device() {
-            let bytes = zip_of(&[
-                ("Cores/a.B/core.json", core_json("1").as_bytes()),
-                ("../../evil", b"x"),
-            ]);
-            assert!(why_not(bytes).contains("outside"));
-        }
-
-        #[test]
-        fn rejects_zip_of_another_core() {
-            let bytes = zip_of(&[("Cores/other.C/core.json", core_json("1").as_bytes())]);
-            assert!(why_not(bytes).contains("core.json"));
-        }
-
-        #[test]
-        fn rejects_unreadable_core_json() {
-            let bytes = zip_of(&[("Cores/a.B/core.json", b"{ not json")]);
-            assert!(why_not(bytes).contains("can't be read"));
-        }
-
-        #[test]
-        fn rejects_file_that_is_not_zip() {
-            why_not(b"hello".to_vec());
+        fn rejects_what_is_not_zip_of_this_core() {
+            let core_json = core_json("1");
+            for (bytes, reason) in [
+                (
+                    zip_of(&[
+                        ("Cores/a.B/core.json", core_json.as_bytes()),
+                        ("../../evil", b"x"),
+                    ]),
+                    "outside",
+                ),
+                (
+                    zip_of(&[("Cores/other.C/core.json", core_json.as_bytes())]),
+                    "core.json",
+                ),
+                (
+                    zip_of(&[("Cores/a.B/core.json", b"{ not json")]),
+                    "can't be read",
+                ),
+                (b"hello".to_vec(), ""),
+            ] {
+                let why = why_not(bytes);
+                assert!(why.contains(reason), "{why}");
+            }
         }
     }
 
@@ -885,7 +875,8 @@ mod tests {
         #[test]
         fn ignores_corrupt_inventory_file() {
             let dir = tempfile::tempdir().unwrap();
-            let path = put_at(dir.path(), "cores.json", b"{ not json", 1_000);
+            // Written just now, so only being corrupt makes it fetch again.
+            let path = put(dir.path(), "cores.json", b"{ not json");
             let fake = Fake::at("2.0");
             let got = CoreInventory::open(&path, &fake).supported_cores().unwrap();
             assert_eq!(versions(&got), ["2.0"]);

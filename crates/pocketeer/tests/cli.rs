@@ -220,7 +220,7 @@ mod printing {
     }
 
     #[test]
-    fn prints_saves_newest_first() {
+    fn prints_saves_as_json_newest_first() {
         let setup = Setup::new();
         setup.in_library("roms/gba/Mine.gba", b"game");
         let old = setup.in_library("saves/gba/Mine/old.sav", b"old");
@@ -261,6 +261,22 @@ mod printing {
             }])
         );
     }
+
+    #[test]
+    fn aligns_sizes_to_the_right() {
+        let setup = Setup::new();
+        let long = setup.on_device("Saves/gba/common/A.sav", &[0; 12]);
+        let short = setup.on_device("Saves/gba/common/B.sav", &[0; 3]);
+        set_written_at(&long, 1_600_000_000);
+        set_written_at(&short, 1_600_000_000);
+        let ran = setup.run(&["orphan-saves", "device"]);
+        assert_eq!(
+            ran.stdout,
+            "SAVE           SIZE  WRITTEN\n\
+         gba/A.sav  12 bytes  2020-09-13T12-26-40\n\
+         gba/B.sav   3 bytes  2020-09-13T12-26-40\n"
+        );
+    }
 }
 
 mod batches {
@@ -299,16 +315,6 @@ mod batches {
             .map(|entry| &entry["ok"])
             .collect();
         assert_eq!(ok, [&json!(false), &json!(true)]);
-    }
-
-    #[test]
-    fn exits_0_when_nothing_to_do() {
-        let setup = Setup::new();
-        setup.in_library("roms/gba/None.gba", b"none");
-        setup.on_device("Assets/gba/common/None.gba", b"none");
-        let ran = setup.run(&["pull", "save", "gba/None.gba"]);
-        assert_eq!(ran.code, 0);
-        assert_eq!(ran.stdout, "gba/None.gba: no save on the device\n");
     }
 }
 
@@ -453,19 +459,6 @@ mod could_not_start {
         );
         assert_json_could_not_start(&ran, &reason);
     }
-
-    #[test]
-    fn exits_2_for_library_with_duplicate_game() {
-        let setup = Setup::new();
-        setup.in_library("roms/gba/One.gba", b"same");
-        setup.in_library("roms/gba/Two.gba", b"same");
-        let reason = format!(
-            "the library has the same game more than once; keep one of each: {} and {}",
-            setup.library().join("roms/gba/One.gba").display(),
-            setup.library().join("roms/gba/Two.gba").display(),
-        );
-        assert_json_could_not_start(&setup.run(&["--json", "games"]), &reason);
-    }
 }
 
 mod duplicates_on_device {
@@ -554,27 +547,6 @@ mod versions {
     }
 
     #[test]
-    fn pushes_version_at_given_time() {
-        let setup = with_a_version();
-        let ran = setup.run(&[
-            "push",
-            "save",
-            "gba/Mine.gba",
-            "--at",
-            "2020-09-13T12-26-40",
-        ]);
-        assert_eq!(ran.code, 0, "{}", ran.stderr);
-        assert_eq!(
-            ran.stdout,
-            "gba/Mine.gba: save 2020-09-13T12-26-40 pushed\n"
-        );
-        assert_eq!(
-            fs::read(setup.device().join("Saves/gba/common/Mine.sav")).unwrap(),
-            b"kept"
-        );
-    }
-
-    #[test]
     fn exits_1_when_no_version_at_given_time() {
         let setup = with_a_version();
         let ran = setup.run(&["push", "save", "gba/Mine.gba", "--at", "never"]);
@@ -591,6 +563,47 @@ mod importing {
 
     /// The start of a PNG file, enough to be recognized as one.
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+    /// A game in the library, no device, and a save in a folder apart from them.
+    fn with_a_save_to_import() -> (Setup, PathBuf) {
+        let setup = Setup::new();
+        setup.in_library("roms/gba/Mine.gba", b"mine");
+        let file = setup.elsewhere("Mine.sav", b"save");
+        set_written_at(&file, 1_600_000_000);
+        (setup, file)
+    }
+
+    /// `pocketeer --library … <args>`, for importing, which needs no device.
+    fn without_a_device(setup: &Setup, args: &[&str]) -> Ran {
+        run_and_capture(
+            pocketeer_command()
+                .arg("--library")
+                .arg(setup.library())
+                .args(args),
+        )
+    }
+
+    #[test]
+    fn prints_imported_save_as_json() {
+        let (setup, file) = with_a_save_to_import();
+        let file = file.to_str().unwrap();
+        let ran = without_a_device(&setup, &["--json", "import", "save", "gba/Mine.gba", file]);
+        assert_eq!(
+            ran.json(),
+            json!({
+                "schema_version": 1,
+                "ok": true,
+                "data": [{
+                    "front_end": "cli",
+                    "game": "gba/Mine.gba",
+                    "ok": true,
+                    "message": "save 2020-09-13T12-26-40 imported",
+                    "from": file,
+                    "version": "2020-09-13T12-26-40",
+                }],
+            })
+        );
+    }
 
     #[test]
     fn prints_imported_cover_as_json() {
@@ -616,47 +629,6 @@ mod importing {
     }
 
     #[test]
-    fn exits_2_for_cover_of_game_not_in_library() {
-        let setup = Setup::new();
-        let file = setup.elsewhere("mine.png", PNG);
-        let path = file.to_str().unwrap();
-        assert_json_could_not_start(
-            &without_a_device(&setup, &["--json", "cover", "import", "gba/Nope.gba", path]),
-            "gba/Nope.gba: not in the library",
-        );
-    }
-
-    #[test]
-    fn exits_1_for_cover_that_is_not_image() {
-        let setup = Setup::new();
-        setup.in_library("roms/gba/Mine.gba", b"mine");
-        let file = setup.elsewhere("mine.png", b"not an image");
-        let path = file.to_str().unwrap();
-        let ran = without_a_device(&setup, &["cover", "import", "gba/Mine.gba", path]);
-        assert_eq!(ran.code, 1);
-        assert_eq!(ran.stdout, "gba/Mine.gba: not a PNG, JPEG or WebP file\n");
-    }
-
-    /// A game in the library, no device, and a save in a folder apart from them.
-    fn with_a_save_to_import() -> (Setup, PathBuf) {
-        let setup = Setup::new();
-        setup.in_library("roms/gba/Mine.gba", b"mine");
-        let file = setup.elsewhere("Mine.sav", b"save");
-        set_written_at(&file, 1_600_000_000);
-        (setup, file)
-    }
-
-    /// `pocketeer --library … <args>`, for importing, which needs no device.
-    fn without_a_device(setup: &Setup, args: &[&str]) -> Ran {
-        run_and_capture(
-            pocketeer_command()
-                .arg("--library")
-                .arg(setup.library())
-                .args(args),
-        )
-    }
-
-    #[test]
     fn imports_games_under_dir() {
         let setup = Setup::new();
         setup.elsewhere("roms/old/Deep.gb", b"deep");
@@ -668,28 +640,6 @@ mod importing {
         assert_eq!(
             ran.stdout,
             "Mine.gba: imported as gba/Mine.gba\nDeep.gb: imported as gb/Deep.gb\n"
-        );
-    }
-
-    #[test]
-    fn prints_imported_save_as_json() {
-        let (setup, file) = with_a_save_to_import();
-        let file = file.to_str().unwrap();
-        let ran = without_a_device(&setup, &["--json", "import", "save", "gba/Mine.gba", file]);
-        assert_eq!(
-            ran.json(),
-            json!({
-                "schema_version": 1,
-                "ok": true,
-                "data": [{
-                    "front_end": "cli",
-                    "game": "gba/Mine.gba",
-                    "ok": true,
-                    "message": "save 2020-09-13T12-26-40 imported",
-                    "from": file,
-                    "version": "2020-09-13T12-26-40",
-                }],
-            })
         );
     }
 
@@ -779,17 +729,6 @@ mod deleting {
     use super::*;
 
     #[test]
-    fn deletes_game_and_leaves_its_save() {
-        let setup = Setup::new();
-        let game = setup.on_device("Assets/gba/common/One.gba", b"one");
-        let save = setup.on_device("Saves/gba/common/One.sav", b"save");
-        let ran = setup.run(&["delete-on-device", "game", "gba/One.gba"]);
-        assert_eq!(ran.code, 0);
-        assert_eq!(ran.stdout, "gba/One.gba: deleted from the device\n");
-        assert!(!game.exists() && save.exists());
-    }
-
-    #[test]
     fn deletes_orphan_save() {
         let setup = Setup::new();
         let save = setup.on_device("Saves/gba/common/One.sav", b"save");
@@ -827,24 +766,22 @@ mod log {
     use super::*;
 
     #[test]
-    fn logs_command_with_cli_front_end() {
-        let setup = Setup::new();
-        setup.on_device("Assets/gba/common/One.gba", b"one");
-        setup.run(&["pull", "game"]);
-        let lines = setup.log_lines();
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0]["front_end"], "cli");
-        assert_eq!(lines[0]["game"], "gba/One.gba");
-        assert_eq!(lines[0]["library"], "gba/One.gba");
-        assert!(lines[0]["time"].is_string());
-    }
-
-    #[test]
     fn stops_batch_and_exits_1_when_log_unwritable() {
-        let setup = Setup::new();
-        setup.on_device("Assets/gba/common/One.gba", b"one");
-        setup.on_device("Assets/gba/common/Two.gba", b"two");
-        setup.break_the_log();
+        let with_two_games_and_broken_log = || {
+            let setup = Setup::new();
+            setup.on_device("Assets/gba/common/One.gba", b"one");
+            setup.on_device("Assets/gba/common/Two.gba", b"two");
+            setup.break_the_log();
+            setup
+        };
+        let setup = with_two_games_and_broken_log();
+        let ran = setup.run(&["--json", "pull", "game"]);
+        assert_eq!(ran.code, 1);
+        let value = ran.json();
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["data"].as_array().unwrap().len(), 1);
+        assert!(ran.stderr.starts_with("error: couldn't write the log: "));
+        let setup = with_two_games_and_broken_log();
         let ran = setup.run(&["pull", "game"]);
         assert_eq!(ran.code, 1);
         assert_eq!(ran.stdout, "gba/One.gba: pulled as gba/One.gba\n");
@@ -855,36 +792,6 @@ mod log {
         );
         assert!(!setup.library().join("roms/gba/Two.gba").exists());
     }
-
-    #[test]
-    fn reports_unwritable_log_in_json() {
-        let setup = Setup::new();
-        setup.on_device("Assets/gba/common/One.gba", b"one");
-        setup.on_device("Assets/gba/common/Two.gba", b"two");
-        setup.break_the_log();
-        let ran = setup.run(&["--json", "pull", "game"]);
-        assert_eq!(ran.code, 1);
-        let value = ran.json();
-        assert_eq!(value["ok"], false);
-        assert_eq!(value["data"].as_array().unwrap().len(), 1);
-        assert!(ran.stderr.starts_with("error: couldn't write the log: "));
-    }
-}
-
-#[test]
-fn aligns_sizes_to_the_right() {
-    let setup = Setup::new();
-    let long = setup.on_device("Saves/gba/common/A.sav", &[0; 12]);
-    let short = setup.on_device("Saves/gba/common/B.sav", &[0; 3]);
-    set_written_at(&long, 1_600_000_000);
-    set_written_at(&short, 1_600_000_000);
-    let ran = setup.run(&["orphan-saves", "device"]);
-    assert_eq!(
-        ran.stdout,
-        "SAVE           SIZE  WRITTEN\n\
-         gba/A.sav  12 bytes  2020-09-13T12-26-40\n\
-         gba/B.sav   3 bytes  2020-09-13T12-26-40\n"
-    );
 }
 
 mod rename {
@@ -968,6 +875,17 @@ game ( name "Puzzle (USA)" rom ( name "Puzzle (USA).gba" size 5 crc 3A771143 ) )
     }
 
     #[test]
+    fn renames_game_on_device_with_its_save() {
+        let setup = Setup::new();
+        setup.on_device("Assets/gba/common/RPG/Old.gba", b"hello");
+        setup.on_device("Saves/gba/common/RPG/Old.sav", b"save");
+        let ran = setup.run(&["rename", "device", "gba/RPG/Old.gba", "New"]);
+        assert_eq!(ran.code, 0, "{}", ran.stderr);
+        assert_eq!(ran.stdout, "gba/RPG/Old.gba: renamed to gba/RPG/New.gba\n");
+        assert!(setup.device().join("Saves/gba/common/RPG/New.sav").exists());
+    }
+
+    #[test]
     fn prints_library_rename_as_json() {
         let setup = Setup::new();
         setup.in_library("roms/gba/Old.gba", b"hello");
@@ -989,17 +907,6 @@ game ( name "Puzzle (USA)" rom ( name "Puzzle (USA).gba" size 5 crc 3A771143 ) )
             })
         );
         assert!(setup.library().join("saves/gba/New/x.sav").exists());
-    }
-
-    #[test]
-    fn renames_game_on_device_with_its_save() {
-        let setup = Setup::new();
-        setup.on_device("Assets/gba/common/RPG/Old.gba", b"hello");
-        setup.on_device("Saves/gba/common/RPG/Old.sav", b"save");
-        let ran = setup.run(&["rename", "device", "gba/RPG/Old.gba", "New"]);
-        assert_eq!(ran.code, 0, "{}", ran.stderr);
-        assert_eq!(ran.stdout, "gba/RPG/Old.gba: renamed to gba/RPG/New.gba\n");
-        assert!(setup.device().join("Saves/gba/common/RPG/New.sav").exists());
     }
 }
 

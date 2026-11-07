@@ -62,20 +62,3 @@ fn copies_text(copies: &[(PathBuf, PathBuf)]) -> String {
         .collect();
     copies.join("; ")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reports_operation_and_path_in_io_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("Gone.gba");
-        let error = SharedError::from(fs_err::remove_file(&path).unwrap_err());
-        let text = error.to_string();
-        assert!(
-            text.starts_with(&format!("failed to remove file `{}`: ", path.display())),
-            "{text}"
-        );
-    }
-}

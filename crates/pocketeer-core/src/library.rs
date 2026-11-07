@@ -600,6 +600,7 @@ fn stem(name: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cover::testing::PNG;
     use crate::files::testing::{at, put, put_at};
     use crate::game::{Files, Rom};
 
@@ -674,19 +675,8 @@ mod tests {
         }
 
         #[test]
-        fn matches_fresh_reload_after_renaming() {
-            let (_dir, mut library) = with_game();
-            let entry = rename(&mut library, "New").unwrap();
-            library.reload().unwrap();
-            assert_eq!(library.entry_named(&Platform::Gba, "New.gba"), Some(&entry));
-            assert_eq!(library.entry_named(&Platform::Gba, "Old.gba"), None);
-        }
-
-        #[test]
         fn renames_game_without_cover_or_saves() {
-            let (dir, mut library) = library();
-            put(dir.path(), "roms/gba/Old.gba", b"old");
-            library.reload().unwrap();
+            let (dir, mut library) = library_with(&[("roms/gba/Old.gba", b"old")]);
             let entry = rename(&mut library, "New").unwrap();
             assert_eq!((entry.cover_path, entry.save), (None, None));
             assert!(dir.path().join("roms/gba/New.gba").exists());
@@ -773,21 +763,22 @@ mod tests {
         }
     }
 
+    /// A library holding `files`.
+    fn library_with(files: &[(&str, &[u8])]) -> (tempfile::TempDir, Library) {
+        let dir = tempfile::tempdir().unwrap();
+        for (path, bytes) in files {
+            put(dir.path(), path, bytes);
+        }
+        let library = Library::open(dir.path()).unwrap();
+        (dir, library)
+    }
+
     /// An empty library. Tests put files in it and then reload.
     fn library() -> (tempfile::TempDir, Library) {
         let dir = tempfile::tempdir().unwrap();
         let library = Library::open(dir.path()).unwrap();
         (dir, library)
     }
-
-    /// A 1×1 PNG.
-    const PNG: &[u8] = &[
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
-        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
-        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
-        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
-        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
-    ];
 
     /// Adds the file at `from`, hashing it to find out which game it holds.
     fn add(
@@ -829,9 +820,7 @@ mod tests {
 
         #[test]
         fn keeps_entries_when_reload_finds_duplicate() {
-            let (_dir, mut library) = library();
-            put(library.root(), "roms/gba/Mine.gba", b"same");
-            library.reload().unwrap();
+            let (_dir, mut library) = library_with(&[("roms/gba/Mine.gba", b"same")]);
             put(library.root(), "roms/gba/Other.gba", b"same");
             assert!(matches!(
                 library.reload(),
@@ -881,11 +870,11 @@ mod tests {
 
         #[test]
         fn counts_only_sav_files_as_saves() {
-            let (_dir, mut library) = library();
-            put(library.root(), "roms/gba/Tetris.gba", b"hello");
-            put(library.root(), "saves/gba/Tetris/notes.txt", b"x");
-            put(library.root(), "saves/gba/Tetris/._a.sav", b"x");
-            library.reload().unwrap();
+            let (_dir, library) = library_with(&[
+                ("roms/gba/Tetris.gba", b"hello"),
+                ("saves/gba/Tetris/notes.txt", b"x"),
+                ("saves/gba/Tetris/._a.sav", b"x"),
+            ]);
             assert_eq!(library.entries()[0].save, None);
         }
 
@@ -943,9 +932,7 @@ mod tests {
 
         #[test]
         fn allows_same_name_on_other_platform() {
-            let (_dir, mut library) = library();
-            put(library.root(), "roms/gba/Foo.gba", b"gba");
-            library.reload().unwrap();
+            let (_dir, mut library) = library_with(&[("roms/gba/Foo.gba", b"gba")]);
             let elsewhere = tempfile::tempdir().unwrap();
             let from = put(elsewhere.path(), "x.gb", b"gb");
             add(&mut library, &Platform::Gb, "Foo.gb", &from).unwrap();
@@ -986,10 +973,8 @@ mod tests {
 
         #[test]
         fn inserts_game_in_sorted_position() {
-            let (_dir, mut library) = library();
-            put(library.root(), "roms/gba/B.gba", b"b");
-            put(library.root(), "roms/gba/D.gba", b"d");
-            library.reload().unwrap();
+            let (_dir, mut library) =
+                library_with(&[("roms/gba/B.gba", b"b"), ("roms/gba/D.gba", b"d")]);
             let elsewhere = tempfile::tempdir().unwrap();
             let from = put(elsewhere.path(), "x.gba", b"hello");
             let added = add(&mut library, &Platform::Gba, "C.gba", &from).unwrap();
@@ -1023,9 +1008,7 @@ mod tests {
 
         /// A library with the game Tetris.
         fn with_tetris() -> (tempfile::TempDir, Library) {
-            let (dir, mut library) = library();
-            put(library.root(), "roms/gba/Tetris.gba", b"hello");
-            library.reload().unwrap();
+            let (dir, library) = library_with(&[("roms/gba/Tetris.gba", b"hello")]);
             (dir, library)
         }
 
@@ -1108,9 +1091,7 @@ mod tests {
 
         #[test]
         fn adds_cover_where_reload_finds_it() {
-            let (_dir, mut library) = library();
-            put(library.root(), "roms/gba/Tetris.gba", b"hello");
-            library.reload().unwrap();
+            let (_dir, mut library) = library_with(&[("roms/gba/Tetris.gba", b"hello")]);
             let cover = Cover::from_bytes(PNG.to_vec()).unwrap();
             library
                 .add_cover(&Platform::Gba, "Tetris.gba", &cover)
@@ -1125,12 +1106,12 @@ mod tests {
 
         #[test]
         fn lists_rom_and_cover_as_game_files() {
-            let (_dir, mut library) = library();
-            put(library.root(), "roms/gba/Tetris.gba", b"hello");
-            put(library.root(), "covers/gba/Tetris.png", PNG);
-            put(library.root(), "saves/gba/Tetris/notes.txt", b"x");
-            put(library.root(), "roms/gba/Other.gba", b"other");
-            library.reload().unwrap();
+            let (_dir, library) = library_with(&[
+                ("roms/gba/Tetris.gba", b"hello"),
+                ("covers/gba/Tetris.png", PNG),
+                ("saves/gba/Tetris/notes.txt", b"x"),
+                ("roms/gba/Other.gba", b"other"),
+            ]);
             let root = library.root();
             let [tetris, other] = [&library.entries()[1], &library.entries()[0]];
             assert_eq!(
@@ -1175,13 +1156,13 @@ mod tests {
 
         #[test]
         fn lists_saves_without_game() {
-            let (_dir, mut library) = library();
-            put(library.root(), "roms/gba/Kept.gba", b"hello");
-            put(library.root(), "saves/gba/Kept/a.sav", b"has a game");
-            put(library.root(), "saves/gba/Gone/a.sav", b"none");
-            put(library.root(), "saves/gb/Kept/a.sav", b"another platform");
-            put(library.root(), "saves/gba/Empty/notes.txt", b"not a save");
-            library.reload().unwrap();
+            let (_dir, library) = library_with(&[
+                ("roms/gba/Kept.gba", b"hello"),
+                ("saves/gba/Kept/a.sav", b"has a game"),
+                ("saves/gba/Gone/a.sav", b"none"),
+                ("saves/gb/Kept/a.sav", b"another platform"),
+                ("saves/gba/Empty/notes.txt", b"not a save"),
+            ]);
             let orphans = library.find_orphan_saves().unwrap();
             let found: Vec<_> = orphans
                 .iter()

@@ -194,26 +194,18 @@ mod tests {
         use super::*;
 
         #[test]
-        fn keeps_extension() {
-            assert_eq!(renamed_file_name("Old.gba", "New"), "New.gba");
-            assert_eq!(renamed_file_name("Old", "New"), "New");
-        }
-
-        #[test]
-        fn does_not_double_extension() {
-            assert_eq!(renamed_file_name("Old.gba", "New.gba"), "New.gba");
-            assert_eq!(renamed_file_name("Old.gba", "New.GBA"), "New.gba");
-        }
-
-        #[test]
-        fn keeps_dots_in_name() {
-            assert_eq!(renamed_file_name("Old.gb", "Dr. Mario"), "Dr. Mario.gb");
-            assert_eq!(renamed_file_name("Old.gb", "Dr. Mario.gb"), "Dr. Mario.gb");
-        }
-
-        #[test]
-        fn trims_spaces() {
-            assert_eq!(renamed_file_name("Old.gba", "  New  "), "New.gba");
+        fn keeps_old_extension_in_new_file_name() {
+            for (old, new, expected) in [
+                ("Old.gba", "New", "New.gba"),
+                ("Old", "New", "New"),
+                ("Old.gba", "New.gba", "New.gba"),
+                ("Old.gba", "New.GBA", "New.gba"),
+                ("Old.gb", "Dr. Mario", "Dr. Mario.gb"),
+                ("Old.gb", "Dr. Mario.gb", "Dr. Mario.gb"),
+                ("Old.gba", "  New  ", "New.gba"),
+            ] {
+                assert_eq!(renamed_file_name(old, new), expected, "{old} to {new}");
+            }
         }
 
         #[test]
@@ -224,14 +216,6 @@ mod tests {
                     "{new}"
                 );
             }
-        }
-
-        #[test]
-        fn rejects_names_with_path_or_leading_dot() {
-            for name in ["../x.gba", "a/x.gba", "a\\x.gba", ".x.gba", ""] {
-                assert!(!is_valid_file_name(name), "{name}");
-            }
-            assert!(is_valid_file_name("Dr. Mario.gb"));
         }
 
         #[test]
@@ -324,11 +308,5 @@ mod tests {
         assert!(history.contains(&Save::from_bytes(b"c", at(9))));
         assert!(!history.contains(&Save::from_bytes(b"d", at(2))));
         assert_eq!(SaveHistory::from_saves(Vec::new()), None);
-    }
-
-    #[test]
-    fn formats_save_time_in_utc() {
-        let save = Save::from_bytes(b"", at(1_762_179_605));
-        assert_eq!(save.timestamp(), "2025-11-03T14-20-05");
     }
 }

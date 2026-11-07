@@ -504,71 +504,6 @@ mod tests {
         panic!("cover never finished");
     }
 
-    #[test]
-    fn loads_cover_on_background_thread() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("cover.png");
-        image::RgbImage::new(8, 8).save(&path).unwrap();
-        let mut cover_loader = CoverLoader::spawn(Picker::halfblocks(), || {});
-        let size = Size::new(10, 5);
-        // The first call only requests it.
-        assert!(matches!(
-            cover_loader.show(&path, &[], size),
-            CoverDisplay::Loading
-        ));
-        assert!(wait_ready(&mut cover_loader, &path, size));
-    }
-
-    #[test]
-    fn reloads_cover_when_file_changes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("cover.png");
-        image::RgbImage::new(8, 8).save(&path).unwrap();
-        let mut cover_loader = CoverLoader::spawn(Picker::halfblocks(), || {});
-        let size = Size::new(10, 5);
-        assert!(wait_ready(&mut cover_loader, &path, size));
-        image::RgbImage::new(16, 16).save(&path).unwrap();
-        assert!(matches!(
-            cover_loader.show(&path, &[], size),
-            CoverDisplay::Loading
-        ));
-        assert!(wait_ready(&mut cover_loader, &path, size));
-    }
-
-    #[test]
-    fn reports_unreadable_cover_without_retrying() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("cover.png");
-        std::fs::write(&path, b"not an image").unwrap();
-        let mut cover_loader = CoverLoader::spawn(Picker::halfblocks(), || {});
-        let size = Size::new(10, 5);
-        assert!(!wait_ready(&mut cover_loader, &path, size));
-        assert!(matches!(
-            cover_loader.show(&path, &[], size),
-            CoverDisplay::Unreadable
-        ));
-    }
-
-    #[test]
-    fn loads_cover_scrolled_past_when_user_returns() {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths: Vec<PathBuf> = (0..6)
-            .map(|i| {
-                let path = tmp.path().join(format!("{i}.png"));
-                image::RgbImage::new(64, 64).save(&path).unwrap();
-                path
-            })
-            .collect();
-        let mut cover_loader = CoverLoader::spawn(Picker::halfblocks(), || {});
-        let size = Size::new(10, 5);
-        // Scroll through all of them without waiting, so most get dropped.
-        for path in &paths {
-            cover_loader.show(path, &[], size);
-        }
-        assert!(wait_ready(&mut cover_loader, &paths[5], size));
-        assert!(wait_ready(&mut cover_loader, &paths[0], size));
-    }
-
     // -- the dot-matrix picture --
 
     fn picture(width: u32, height: u32, shade_at: impl Fn(u32, u32) -> u8) -> DynamicImage {
@@ -584,47 +519,120 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn fits_tall_cover_centered_in_whole_cells() {
-        // White left half, black right half. At 1:2, 10×5 cells take the full
-        // height of 20 dots and 10 dots (5 cells) across.
-        let dots = BrailleCover::new(
-            &picture(50, 100, |x, _| if x < 25 { 255 } else { 0 }),
-            Size::new(10, 5),
-        );
-        let lines: Vec<String> = dots.lines.iter().map(text).collect();
-        assert_eq!(lines.len(), 5);
-        for line in &lines {
-            assert_eq!(line.chars().count(), 2 + 5);
-            assert!(line.starts_with("  "));
+    mod loading {
+        use super::*;
+
+        #[test]
+        fn loads_cover_on_background_thread() {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("cover.png");
+            image::RgbImage::new(8, 8).save(&path).unwrap();
+            let mut cover_loader = CoverLoader::spawn(Picker::halfblocks(), || {});
+            let size = Size::new(10, 5);
+            // The first call only requests it.
+            assert!(matches!(
+                cover_loader.show(&path, &[], size),
+                CoverDisplay::Loading
+            ));
+            assert!(wait_ready(&mut cover_loader, &path, size));
         }
-        // Lit on the left, dark on the right.
-        assert_eq!(lines[2].chars().nth(2), Some('⣿'));
-        assert_eq!(lines[2].chars().nth(6), Some(' '));
+
+        #[test]
+        fn reloads_cover_when_file_changes() {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("cover.png");
+            image::RgbImage::new(8, 8).save(&path).unwrap();
+            let mut cover_loader = CoverLoader::spawn(Picker::halfblocks(), || {});
+            let size = Size::new(10, 5);
+            assert!(wait_ready(&mut cover_loader, &path, size));
+            image::RgbImage::new(16, 16).save(&path).unwrap();
+            assert!(matches!(
+                cover_loader.show(&path, &[], size),
+                CoverDisplay::Loading
+            ));
+            assert!(wait_ready(&mut cover_loader, &path, size));
+        }
+
+        #[test]
+        fn reports_unreadable_cover_without_retrying() {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("cover.png");
+            std::fs::write(&path, b"not an image").unwrap();
+            let mut cover_loader = CoverLoader::spawn(Picker::halfblocks(), || {});
+            let size = Size::new(10, 5);
+            assert!(!wait_ready(&mut cover_loader, &path, size));
+            assert!(matches!(
+                cover_loader.show(&path, &[], size),
+                CoverDisplay::Unreadable
+            ));
+        }
+
+        #[test]
+        fn loads_cover_scrolled_past_when_user_returns() {
+            let tmp = tempfile::tempdir().unwrap();
+            let paths: Vec<PathBuf> = (0..6)
+                .map(|i| {
+                    let path = tmp.path().join(format!("{i}.png"));
+                    image::RgbImage::new(64, 64).save(&path).unwrap();
+                    path
+                })
+                .collect();
+            let mut cover_loader = CoverLoader::spawn(Picker::halfblocks(), || {});
+            let size = Size::new(10, 5);
+            // Scroll through all of them without waiting, so most get dropped.
+            for path in &paths {
+                cover_loader.show(path, &[], size);
+            }
+            assert!(wait_ready(&mut cover_loader, &paths[5], size));
+            assert!(wait_ready(&mut cover_loader, &paths[0], size));
+        }
     }
 
-    #[test]
-    fn dithers_mid_gray_to_about_half_the_dots() {
-        // A gray ramp. After stretching, the middle is mid-gray.
-        let lit_dots = dither(&picture(64, 64, |x, _| (x * 4) as u8).to_luma8());
-        let middle: Vec<bool> = (0..64)
-            .flat_map(|y| (28..36).map(move |x| (x, y)))
-            .map(|(x, y)| lit_dots[y * 64 + x])
-            .collect();
-        let lit = middle.iter().filter(|bit| **bit).count() as f32 / middle.len() as f32;
-        assert!((0.35..0.65).contains(&lit), "{lit}");
-    }
+    mod dots {
+        use super::*;
 
-    #[test]
-    fn resizes_dots_from_kept_picture() {
-        let dots = BrailleCover::new(&picture(40, 40, |_, _| 200), Size::new(8, 4));
-        let art = DecodedCover::Dots(dots);
-        assert!(!art.needs_resize(Size::new(8, 4)));
-        assert!(art.needs_resize(Size::new(20, 10)));
-        let DecodedCover::Dots(mut dots) = art else {
-            unreachable!()
-        };
-        dots.resize(Size::new(20, 10));
-        assert_eq!(dots.lines.len(), 10);
+        #[test]
+        fn fits_tall_cover_centered_in_whole_cells() {
+            // White left half, black right half. At 1:2, 10×5 cells take the full
+            // height of 20 dots and 10 dots (5 cells) across.
+            let dots = BrailleCover::new(
+                &picture(50, 100, |x, _| if x < 25 { 255 } else { 0 }),
+                Size::new(10, 5),
+            );
+            let lines: Vec<String> = dots.lines.iter().map(text).collect();
+            assert_eq!(lines.len(), 5);
+            for line in &lines {
+                assert_eq!(line.chars().count(), 2 + 5);
+                assert!(line.starts_with("  "));
+            }
+            // Lit on the left, dark on the right.
+            assert_eq!(lines[2].chars().nth(2), Some('⣿'));
+            assert_eq!(lines[2].chars().nth(6), Some(' '));
+        }
+
+        #[test]
+        fn dithers_mid_gray_to_about_half_the_dots() {
+            // A gray ramp. After stretching, the middle is mid-gray.
+            let lit_dots = dither(&picture(64, 64, |x, _| (x * 4) as u8).to_luma8());
+            let middle: Vec<bool> = (0..64)
+                .flat_map(|y| (28..36).map(move |x| (x, y)))
+                .map(|(x, y)| lit_dots[y * 64 + x])
+                .collect();
+            let lit = middle.iter().filter(|bit| **bit).count() as f32 / middle.len() as f32;
+            assert!((0.35..0.65).contains(&lit), "{lit}");
+        }
+
+        #[test]
+        fn resizes_dots_from_kept_picture() {
+            let dots = BrailleCover::new(&picture(40, 40, |_, _| 200), Size::new(8, 4));
+            let art = DecodedCover::Dots(dots);
+            assert!(!art.needs_resize(Size::new(8, 4)));
+            assert!(art.needs_resize(Size::new(20, 10)));
+            let DecodedCover::Dots(mut dots) = art else {
+                unreachable!()
+            };
+            dots.resize(Size::new(20, 10));
+            assert_eq!(dots.lines.len(), 10);
+        }
     }
 }

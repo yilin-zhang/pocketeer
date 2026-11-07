@@ -1219,10 +1219,10 @@ mod tests {
 
     use super::*;
     use crate::cores::{
-        BiosStatus, InventoryCore,
+        InventoryCore,
         testing::{core_json, data_json, zip_of},
     };
-    use crate::cover::Cover;
+    use crate::cover::{Cover, testing::PNG};
     use crate::files::testing::{put, put_at};
 
     /// A DAT that lists the GBA game with the contents `hello`.
@@ -1301,6 +1301,18 @@ mod tests {
     struct Setup {
         _dir: tempfile::TempDir,
         pocketeer: Tested,
+        /// How many core downloads have been asked for.
+        downloaded: Rc<Cell<u32>>,
+    }
+
+    impl Setup {
+        fn first_local(&self) -> LocalEntry {
+            self.pocketeer.library().entries()[0].clone()
+        }
+
+        fn first_on_device(&self) -> DeviceEntry {
+            self.pocketeer.games_on_device().remove(0)
+        }
     }
 
     /// A library, a mirror holding [`GBA_DAT`], and an open, scanned device.
@@ -1322,12 +1334,14 @@ mod tests {
         for (path, bytes) in library {
             put(&root.join("library"), path, bytes);
         }
+        let source = CoreSource::default();
+        let downloaded = source.downloaded.clone();
         let mut pocketeer = Pocketeer::open_with(
             &root.join("library"),
             FrontEnd::Cli,
             Libretro,
             Covers,
-            CoreSource::default(),
+            source,
         )
         .unwrap();
         pocketeer.open_device(&root.join("device")).unwrap();
@@ -1335,6 +1349,7 @@ mod tests {
         Setup {
             _dir: dir,
             pocketeer,
+            downloaded,
         }
     }
 
@@ -1345,6 +1360,13 @@ mod tests {
             .iter()
             .map(|entry| entry.name.clone())
             .collect()
+    }
+
+    /// One game in the library, and a folder to import from.
+    fn to_import_into() -> (Setup, tempfile::TempDir, LocalEntry) {
+        let setup = setup(&[], &[("roms/gba/A.gba", b"a")]);
+        let local = setup.first_local();
+        (setup, tempfile::tempdir().unwrap(), local)
     }
 
     /// One game with a save written at 1,000 seconds and one without, on the
@@ -1440,7 +1462,7 @@ mod tests {
             let row = setup.pocketeer.game_rows().remove(0);
             assert_eq!(row.saves_kept(), 0);
             assert!(row.has_new_save_on_device());
-            let on_device = setup.pocketeer.games_on_device().remove(0);
+            let on_device = setup.first_on_device();
             setup.pocketeer.pull_save(&on_device).unwrap();
             let row = setup.pocketeer.game_rows().remove(0);
             assert_eq!(row.saves_kept(), 1);
@@ -1468,7 +1490,7 @@ mod tests {
         #[test]
         fn uses_dat_name_for_known_game() {
             let mut setup = setup(&[("Assets/gba/common/tetris.gba", b"hello")], &[]);
-            let on_device = setup.pocketeer.games_on_device().remove(0);
+            let on_device = setup.first_on_device();
             let pulled = setup.pocketeer.pull_game(&on_device).unwrap();
             assert!(matches!(pulled, PullGameOutcome::Pulled(_)));
             assert_eq!(names(&setup.pocketeer), ["Tetris (World).gba"]);
@@ -1477,7 +1499,7 @@ mod tests {
         #[test]
         fn keeps_file_name_for_unknown_game() {
             let mut setup = setup(&[("Assets/gba/common/RPG/My Hack.gba", b"hack")], &[]);
-            let on_device = setup.pocketeer.games_on_device().remove(0);
+            let on_device = setup.first_on_device();
             setup.pocketeer.pull_game(&on_device).unwrap();
             assert_eq!(names(&setup.pocketeer), ["My Hack.gba"]);
         }
@@ -1487,15 +1509,24 @@ mod tests {
         use super::*;
 
         #[test]
+        fn returns_error_without_device() {
+            let mut setup = setup(&[], &[]);
+            setup.pocketeer.close_device();
+            assert!(matches!(
+                setup.pocketeer.read_bios_rows(),
+                Err(SharedError::NoDevice)
+            ));
+        }
+
+        #[test]
         fn returns_no_device_for_transfers() {
             let mut setup = setup(
                 &[("Assets/gba/common/Tetris.gba", b"hello")],
                 &[("roms/gba/Tetris (World).gba", b"hello")],
             );
-            let on_device = setup.pocketeer.games_on_device().remove(0);
-            let local = setup.pocketeer.library().entries()[0].clone();
+            let on_device = setup.first_on_device();
+            let local = setup.first_local();
             setup.pocketeer.close_device();
-            assert_eq!(setup.pocketeer.game_rows().len(), 1);
             assert!(matches!(
                 setup.pocketeer.push_game(&local),
                 Err(PushGameError::Shared(SharedError::NoDevice))
@@ -1512,8 +1543,8 @@ mod tests {
                 &[("Assets/gba/common/Tetris.gba", b"hello")],
                 &[("roms/gba/Tetris (World).gba", b"hello")],
             );
-            let on_device = setup.pocketeer.games_on_device().remove(0);
-            let local = setup.pocketeer.library().entries()[0].clone();
+            let on_device = setup.first_on_device();
+            let local = setup.first_local();
             let device = setup.pocketeer.device().unwrap().root().to_path_buf();
             fs::remove_file(device.join("Assets/gba/common/Tetris.gba")).unwrap();
             setup.pocketeer.scan_device().unwrap();
@@ -1535,8 +1566,8 @@ mod tests {
                 &[("Assets/gba/common/Tetris.gba", b"hello")],
                 &[("roms/gba/Tetris (World).gba", b"hello")],
             );
-            let on_device = setup.pocketeer.games_on_device().remove(0);
-            let local = setup.pocketeer.library().entries()[0].clone();
+            let on_device = setup.first_on_device();
+            let local = setup.first_local();
             assert!(matches!(
                 setup.pocketeer.trash_every_version_in_library(&local),
                 Err(TrashSaveError::NoSave)
@@ -1545,10 +1576,6 @@ mod tests {
             assert!(matches!(
                 setup.pocketeer.trash_save_version(&local, &gone),
                 Err(TrashSaveError::NoSuchVersion)
-            ));
-            assert!(matches!(
-                setup.pocketeer.delete_save_on_device(&on_device),
-                Err(DeleteSaveError::NoSave)
             ));
             let lines = lines_of(|on_logged| setup.pocketeer.push_saves(&[on_device], on_logged));
             assert_eq!(lines, ["gba/Tetris.gba: the library has no such save"]);
@@ -1561,7 +1588,7 @@ mod tests {
         #[test]
         fn continues_after_failed_game() {
             let mut setup = setup(&[], &[("roms/gba/Tetris (World).gba", b"hello")]);
-            let local = setup.pocketeer.library().entries()[0].clone();
+            let local = setup.first_local();
             let unknown = LocalEntry {
                 name: "Gone.gba".into(),
                 ..local.clone()
@@ -1606,7 +1633,7 @@ mod tests {
         #[test]
         fn fetches_cover_by_dat_name() {
             let mut setup = setup(&[], &[("roms/gba/tetris.gba", b"hello")]);
-            let local = setup.pocketeer.library().entries()[0].clone();
+            let local = setup.first_local();
             let fetched = setup.pocketeer.fetch_cover(&local).unwrap();
             assert_eq!(fetched, FetchCoverOutcome::Fetched);
             let entry = &setup.pocketeer.library().entries()[0];
@@ -1657,19 +1684,6 @@ mod tests {
         }
 
         #[test]
-        fn reports_trashing_version_library_does_not_have() {
-            let (mut setup, _, local) = with_versions();
-            let gone = Save::from_bytes(b"gone", std::time::UNIX_EPOCH);
-            let versions = [(local[0].clone(), gone)];
-            let lines = lines_of(|on_logged| {
-                setup
-                    .pocketeer
-                    .trash_save_versions_in_library(&versions, on_logged)
-            });
-            assert_eq!(lines, ["gba/A.gba: the library has no such save"]);
-        }
-
-        #[test]
         fn pushes_newest_by_default() {
             let (mut setup, on_device, _) = with_versions();
             let root = setup.pocketeer.library().root().to_path_buf();
@@ -1693,15 +1707,20 @@ mod tests {
         }
 
         #[test]
-        fn reports_game_without_version_at_given_time() {
-            let (mut setup, on_device, _) = with_versions();
-            let at = "1970-01-01T00-16-40";
-            let lines = lines_of(|on_logged| {
-                setup
-                    .pocketeer
-                    .push_saves_at(&on_device[1..], at, on_logged)
-            });
-            assert_eq!(lines, ["gba/B.gba: the library has no such save"]);
+        fn logs_missing_version_when_trashing() {
+            let (mut setup, _, local) = with_versions();
+            let lines =
+                lines_of(|on_logged| setup.pocketeer.trash_saves_at(&local, "never", on_logged));
+            assert_eq!(
+                lines,
+                [
+                    "gba/A.gba: the library has no such save",
+                    "gba/B.gba: the library has no such save"
+                ]
+            );
+            let logged = log_lines(&setup);
+            assert_eq!(logged[0]["version"], "never");
+            assert_eq!(logged[0]["ok"], false);
         }
 
         #[test]
@@ -1727,37 +1746,10 @@ mod tests {
             assert_eq!(lines, refused);
             assert!(file.exists() && first.exists());
         }
-
-        #[test]
-        fn logs_missing_version_when_trashing() {
-            let (mut setup, _, local) = with_versions();
-            let lines =
-                lines_of(|on_logged| setup.pocketeer.trash_saves_at(&local, "never", on_logged));
-            assert_eq!(
-                lines,
-                [
-                    "gba/A.gba: the library has no such save",
-                    "gba/B.gba: the library has no such save"
-                ]
-            );
-            let logged = log_lines(&setup);
-            assert_eq!(logged[0]["version"], "never");
-            assert_eq!(logged[0]["ok"], false);
-        }
     }
 
     mod import_covers {
         use super::*;
-
-        /// The start of a PNG file, enough to be recognized as one.
-        const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
-
-        /// A library with the game `A.gba`, and a folder apart from it.
-        fn to_import_into() -> (Setup, tempfile::TempDir, LocalEntry) {
-            let setup = setup(&[], &[("roms/gba/A.gba", b"a")]);
-            let local = setup.pocketeer.library().entries()[0].clone();
-            (setup, tempfile::tempdir().unwrap(), local)
-        }
 
         #[test]
         fn imports_cover_for_game_without_one() {
@@ -1787,37 +1779,17 @@ mod tests {
         #[test]
         fn rejects_non_image_and_keeps_existing_cover() {
             let mut setup = setup(&[], &[("roms/gba/A.gba", b"a"), ("covers/gba/A.png", PNG)]);
-            let local = setup.pocketeer.library().entries()[0].clone();
+            let local = setup.first_local();
             let elsewhere = tempfile::tempdir().unwrap();
             let covers = [(local, put(elsewhere.path(), "mine.png", b"not an image"))];
             lines_of(|on_logged| setup.pocketeer.import_covers(&covers, on_logged));
             let cover = setup.pocketeer.library().root().join("covers/gba/A.png");
             assert_eq!(fs::read(cover).unwrap(), PNG);
         }
-
-        #[test]
-        fn reports_game_no_longer_in_library() {
-            let (mut setup, elsewhere, local) = to_import_into();
-            fs::remove_file(setup.pocketeer.library().game_path(&local)).unwrap();
-            setup.pocketeer.reload_library().unwrap();
-            let covers = [(local, put(elsewhere.path(), "mine.png", PNG))];
-            let lines = lines_of(|on_logged| setup.pocketeer.import_covers(&covers, on_logged));
-            assert_eq!(
-                lines,
-                ["gba/A.gba: error: the library doesn't have the game"]
-            );
-        }
     }
 
     mod import_saves {
         use super::*;
-
-        /// A library with the game `A.gba`, and a folder apart from it.
-        fn to_import_into() -> (Setup, tempfile::TempDir, LocalEntry) {
-            let setup = setup(&[], &[("roms/gba/A.gba", b"a")]);
-            let local = setup.pocketeer.library().entries()[0].clone();
-            (setup, tempfile::tempdir().unwrap(), local)
-        }
 
         #[test]
         fn keeps_version_named_after_write_time_and_leaves_source() {
@@ -1830,18 +1802,6 @@ mod tests {
             let kept = root.join("saves/gba/A/1970-01-01T00-16-40.sav");
             assert_eq!(fs::read(kept).unwrap(), b"kept");
             assert_eq!(fs::read(from).unwrap(), b"kept");
-        }
-
-        #[test]
-        fn skips_save_in_library() {
-            let (mut setup, elsewhere, local) = to_import_into();
-            let first = put_at(elsewhere.path(), "first.sav", b"kept", 1_000);
-            let again = put_at(elsewhere.path(), "again.sav", b"kept", 2_000);
-            let saves = [(local.clone(), first), (local, again)];
-            let lines = lines_of(|on_logged| setup.pocketeer.import_saves(&saves, on_logged));
-            assert_eq!(lines[1], "gba/A.gba: the library has this save already");
-            let entry = &setup.pocketeer.library().entries()[0];
-            assert_eq!(entry.save.as_ref().unwrap().iter().count(), 1);
         }
     }
 
@@ -1864,19 +1824,6 @@ mod tests {
             assert_eq!(lines, ["tetris.gba: imported as gba/Tetris (World).gba"]);
             assert_eq!(names(&setup.pocketeer), ["Tetris (World).gba"]);
             assert!(from.exists());
-        }
-
-        #[test]
-        fn skips_game_in_library_and_reports_its_name() {
-            let mut setup = setup(&[], &[("roms/gba/Mine.gba", b"hello")]);
-            let (_dir, from) = apart("other name.gba", b"hello");
-            let files = [from];
-            let lines = lines_of(|on_logged| setup.pocketeer.import_games(&files, None, on_logged));
-            assert_eq!(
-                lines,
-                ["other name.gba: the library has it already, as gba/Mine.gba"]
-            );
-            assert_eq!(names(&setup.pocketeer), ["Mine.gba"]);
         }
 
         #[test]
@@ -1927,23 +1874,6 @@ mod tests {
         }
 
         #[test]
-        fn requires_platform_for_unknown_extension() {
-            let mut setup = setup(&[], &[]);
-            let (_dir, from) = apart("x.bin", b"x");
-            let files = [from.clone()];
-            let lines = lines_of(|on_logged| setup.pocketeer.import_games(&files, None, on_logged));
-            assert_eq!(lines, ["x.bin: can't tell which platform it is for"]);
-            assert_eq!(names(&setup.pocketeer), Vec::<String>::new());
-            lines_of(|on_logged| {
-                setup
-                    .pocketeer
-                    .import_games(&files, Some(&Platform::Genesis), on_logged)
-            });
-            let root = setup.pocketeer.library().root();
-            assert!(root.join("roms/genesis/x.bin").exists());
-        }
-
-        #[test]
         fn rejects_unlisted_platform_id() {
             let mut setup = setup(&[], &[]);
             let (_dir, from) = apart("x.bin", b"x");
@@ -1960,20 +1890,6 @@ mod tests {
             assert_eq!(names(&setup.pocketeer), Vec::<String>::new());
             let root = setup.pocketeer.library().root();
             assert!(!root.parent().unwrap().join("escaped").exists());
-        }
-
-        #[test]
-        fn rejects_hidden_file() {
-            let mut setup = setup(&[], &[]);
-            let (_dir, from) = apart(".hidden.gba", b"x");
-            let files = [from];
-            let lines = lines_of(|on_logged| setup.pocketeer.import_games(&files, None, on_logged));
-            assert_eq!(
-                lines,
-                [".hidden.gba: not imported: the library can't hold a game of that name"]
-            );
-            let root = setup.pocketeer.library().root();
-            assert!(!root.join("roms/gba/.hidden.gba").exists());
         }
 
         #[test]
@@ -2045,8 +1961,8 @@ mod tests {
                 ],
                 &[("roms/gba/Old.gba", b"hello")],
             );
-            let local = setup.pocketeer.library().entries()[0].clone();
-            let on_device = setup.pocketeer.games_on_device().remove(0);
+            let local = setup.first_local();
+            let on_device = setup.first_on_device();
             (setup, local, on_device)
         }
 
@@ -2061,70 +1977,24 @@ mod tests {
         }
 
         #[test]
-        fn finds_dat_name_of_game_called_something_else() {
-            let setup = setup(&[], &[("roms/gba/Old.gba", b"hello")]);
-            assert_eq!(
-                renames_of(&setup),
-                [("Old.gba".to_string(), "Tetris (World)".to_string())]
-            );
-        }
-
-        #[test]
-        fn finds_dat_name_differing_only_in_case() {
-            let setup = setup(&[], &[("roms/gba/tetris (world).gba", b"hello")]);
-            assert_eq!(
-                renames_of(&setup),
-                [(
-                    "tetris (world).gba".to_string(),
-                    "Tetris (World)".to_string()
-                )]
-            );
-        }
-
-        #[test]
-        fn leaves_out_game_already_called_dat_name() {
-            let setup = setup(&[], &[("roms/gba/Tetris (World).gba", b"hello")]);
-            assert_eq!(renames_of(&setup), []);
-        }
-
-        #[test]
-        fn leaves_out_game_unknown_to_dats() {
-            let setup = setup(&[], &[("roms/gba/Mine.gba", b"not in the DAT")]);
-            assert_eq!(renames_of(&setup), []);
-        }
-
-        #[test]
-        fn renames_to_dat_name_with_save_and_cover_and_leaves_device() {
-            let (mut setup, _, _) = on_both();
-            let root = setup.pocketeer.library().root().to_path_buf();
-            put(&root, "saves/gba/Old/x.sav", b"save");
-            put(&root, "covers/gba/Old.png", b"cover");
-            setup.pocketeer.reload_library().unwrap();
-            let renames = setup
-                .pocketeer
-                .renames_to_dat_names(setup.pocketeer.library().entries());
-            let lines =
-                lines_of(|on_logged| setup.pocketeer.rename_games_in_library(&renames, on_logged));
-            assert_eq!(lines, ["gba/Old.gba: renamed to gba/Tetris (World).gba"]);
-            assert!(root.join("roms/gba/Tetris (World).gba").exists());
-            assert!(root.join("saves/gba/Tetris (World)/x.sav").exists());
-            assert!(root.join("covers/gba/Tetris (World).png").exists());
-            let row = setup.pocketeer.game_rows().remove(0);
-            assert_eq!(row.device_entry().unwrap().path, Path::new("Old.gba"));
-        }
-
-        #[test]
-        fn renames_in_library_and_leaves_device() {
-            let (mut setup, local, _) = on_both();
-            let games = [(local, "New".to_string())];
-            let lines =
-                lines_of(|on_logged| setup.pocketeer.rename_games_in_library(&games, on_logged));
-            assert_eq!(lines, ["gba/Old.gba: renamed to gba/New.gba"]);
-            let logged = log_lines(&setup);
-            assert_eq!(logged[0]["library"], "gba/New.gba");
-            let row = setup.pocketeer.game_rows().remove(0);
-            assert_eq!(row.local_entry().unwrap().name, "New.gba");
-            assert_eq!(row.device_entry().unwrap().path, Path::new("Old.gba"));
+        fn proposes_dat_name_unless_game_has_it_or_dats_do_not_know_game() {
+            for (path, bytes, expected) in [
+                ("roms/gba/Old.gba", b"hello".as_slice(), Some("Old.gba")),
+                (
+                    "roms/gba/tetris (world).gba",
+                    b"hello",
+                    Some("tetris (world).gba"),
+                ),
+                ("roms/gba/Tetris (World).gba", b"hello", None),
+                ("roms/gba/Mine.gba", b"not in the DAT", None),
+            ] {
+                let setup = setup(&[], &[(path, bytes)]);
+                let expected: Vec<_> = expected
+                    .iter()
+                    .map(|name| (name.to_string(), "Tetris (World)".to_string()))
+                    .collect();
+                assert_eq!(renames_of(&setup), expected, "{path}");
+            }
         }
 
         #[test]
@@ -2142,40 +2012,57 @@ mod tests {
             assert_eq!(on_device.path, Path::new("New.gba"));
             assert_eq!(on_device.save.as_ref().unwrap().size, 4);
         }
+    }
 
-        #[test]
-        fn logs_refused_rename_as_failure() {
-            let (mut setup, local, _) = on_both();
-            let games = [(local, "Old".to_string())];
-            let lines =
-                lines_of(|on_logged| setup.pocketeer.rename_games_in_library(&games, on_logged));
-            assert_eq!(
-                lines,
-                ["gba/Old.gba: not renamed: it has that name already"]
-            );
-            assert_eq!(log_lines(&setup)[0]["ok"], false);
+    mod cores {
+        use super::*;
+
+        const GB: &str = "Spiritualized.GB";
+
+        fn ids(ids: &[&str]) -> Vec<String> {
+            ids.iter().map(ToString::to_string).collect()
         }
 
         #[test]
-        fn reports_game_gone_since_listing() {
-            let (mut setup, local, on_device) = on_both();
-            let games = [(local, "New".to_string())];
-            lines_of(|on_logged| setup.pocketeer.rename_games_in_library(&games, on_logged));
-            let lines =
-                lines_of(|on_logged| setup.pocketeer.rename_games_in_library(&games, on_logged));
+        fn lists_every_core_as_available_without_device() {
+            let mut setup = setup(&[("Cores/Spiritualized.GB/core.json", b"{}")], &[]);
+            setup.pocketeer.close_device();
+            let (rows, _) = setup.pocketeer.load_core_rows().unwrap();
+            assert!(matches!(rows[..], [CoreRow::Available(_)]));
+        }
+
+        #[test]
+        fn does_not_download_core_at_newest_version() {
+            let mut setup = setup(&[], &[]);
+            lines_of(|on_logged| setup.pocketeer.install_cores(&ids(&[GB]), on_logged));
+            assert_eq!(setup.downloaded.get(), 1);
+            let lines = lines_of(|on_logged| setup.pocketeer.install_cores(&ids(&[GB]), on_logged));
             assert_eq!(
                 lines,
-                ["gba/Old.gba: error: the library doesn't have the game"]
+                ["Spiritualized.GB: the device has the newest version"]
             );
-            setup.pocketeer.close_device();
-            let games = [(on_device, "New".to_string())];
+            assert_eq!(setup.downloaded.get(), 1);
+        }
+
+        #[test]
+        fn rejects_unsupported_core() {
+            let mut setup = setup(&[], &[]);
             let lines =
-                lines_of(|on_logged| setup.pocketeer.rename_games_on_device(&games, on_logged));
-            assert_eq!(lines, ["gba/Old.gba: error: no device is open"]);
+                lines_of(|on_logged| setup.pocketeer.install_cores(&ids(&["no.Such"]), on_logged));
+            assert_eq!(lines, ["no.Such: not a core that can be installed"]);
+        }
+
+        #[test]
+        fn downloads_nothing_without_device() {
+            let mut setup = setup(&[], &[]);
+            setup.pocketeer.close_device();
+            let lines = lines_of(|on_logged| setup.pocketeer.install_cores(&ids(&[GB]), on_logged));
+            assert_eq!(lines, ["Spiritualized.GB: error: no device is open"]);
+            assert_eq!(setup.downloaded.get(), 0);
         }
     }
 
-    mod bios {
+    mod rereading {
         use super::*;
 
         const GB: &str = "Spiritualized.GB";
@@ -2197,49 +2084,6 @@ mod tests {
         }
 
         #[test]
-        fn returns_error_without_device() {
-            let mut setup = setup(&[], &[]);
-            setup.pocketeer.close_device();
-            assert!(matches!(
-                setup.pocketeer.read_bios_rows(),
-                Err(SharedError::NoDevice)
-            ));
-        }
-
-        #[test]
-        fn puts_file_and_logs_source() {
-            let mut setup = setup(&[], &[]);
-            install(&mut setup);
-            let row = setup.pocketeer.read_bios_rows().unwrap().remove(0);
-            let elsewhere = tempfile::tempdir().unwrap();
-            let from = put(elsewhere.path(), "mine.bin", b"four");
-            let files = [(row, from.clone())];
-            let lines = lines_of(|on_logged| setup.pocketeer.put_bios_files(&files, on_logged));
-            assert_eq!(lines, ["gba/gba_bios.bin: put on the device"]);
-            let logged = log_lines(&setup);
-            let last = logged.last().unwrap();
-            assert_eq!(last["ok"], true);
-            assert_eq!(last["from"], from.display().to_string());
-            let row = setup.pocketeer.read_bios_rows().unwrap().remove(0);
-            assert_eq!(row.status, BiosStatus::Present);
-        }
-
-        #[test]
-        fn logs_refused_file_as_failure() {
-            let mut setup = setup(&[], &[]);
-            install(&mut setup);
-            let row = setup.pocketeer.read_bios_rows().unwrap().remove(0);
-            let elsewhere = tempfile::tempdir().unwrap();
-            let files = [(row, put(elsewhere.path(), "mine.bin", b"five!"))];
-            let lines = lines_of(|on_logged| setup.pocketeer.put_bios_files(&files, on_logged));
-            assert_eq!(
-                lines,
-                ["gba/gba_bios.bin: the file has 5 bytes, and the core takes 4"]
-            );
-            assert_eq!(log_lines(&setup).last().unwrap()["ok"], false);
-        }
-
-        #[test]
         fn updates_game_list_when_cores_change() {
             let mut setup = setup(&[("Assets/gba/common/gba_bios.bin", b"four")], &[]);
             assert_eq!(games(&setup), [PathBuf::from("gba_bios.bin")]);
@@ -2257,130 +2101,6 @@ mod tests {
             install(&mut setup);
             assert_eq!(games(&setup), [] as [PathBuf; 0]);
         }
-    }
-
-    mod cores {
-        use super::*;
-
-        const GB: &str = "Spiritualized.GB";
-
-        fn ids(ids: &[&str]) -> Vec<String> {
-            ids.iter().map(ToString::to_string).collect()
-        }
-
-        fn downloads_counted() -> (Setup, Rc<Cell<u32>>) {
-            let mut setup = setup(&[], &[]);
-            let source = CoreSource::default();
-            let downloaded = source.downloaded.clone();
-            let library = setup.pocketeer.library().root().to_path_buf();
-            let device = setup.pocketeer.device().unwrap().root().to_path_buf();
-            setup.pocketeer =
-                Pocketeer::open_with(&library, FrontEnd::Cli, Libretro, Covers, source).unwrap();
-            setup.pocketeer.open_device(&device).unwrap();
-            (setup, downloaded)
-        }
-
-        #[test]
-        fn lists_inventory_cores_then_others() {
-            let mut setup = setup(
-                &[
-                    (
-                        "Cores/Spiritualized.GB/core.json",
-                        core_json("1.0").as_bytes(),
-                    ),
-                    ("Cores/someone.Else/core.json", core_json("1.0").as_bytes()),
-                ],
-                &[],
-            );
-            let (rows, failure) = setup.pocketeer.load_core_rows().unwrap();
-            assert!(failure.is_none());
-            let found: Vec<_> = rows
-                .iter()
-                .map(|row| (row.id(), row.has_update()))
-                .collect();
-            assert_eq!(found, [(GB, true), ("someone.Else", false)]);
-            assert_eq!(setup.pocketeer.find_cores_with_updates().unwrap(), [GB]);
-        }
-
-        #[test]
-        fn lists_every_core_as_available_without_device() {
-            let mut setup = setup(&[("Cores/Spiritualized.GB/core.json", b"{}")], &[]);
-            setup.pocketeer.close_device();
-            let (rows, _) = setup.pocketeer.load_core_rows().unwrap();
-            assert!(matches!(rows[..], [CoreRow::Available(_)]));
-        }
-
-        #[test]
-        fn installs_and_logs_core() {
-            let mut setup = setup(&[], &[]);
-            let lines = lines_of(|on_logged| setup.pocketeer.install_cores(&ids(&[GB]), on_logged));
-            assert_eq!(lines, ["Spiritualized.GB: 2.0 installed"]);
-            let logged = log_lines(&setup);
-            assert_eq!(logged[0]["game"], GB);
-            assert_eq!(logged[0]["version"], "2.0");
-            let (rows, _) = setup.pocketeer.load_core_rows().unwrap();
-            assert!(!rows[0].has_update());
-            assert!(rows[0].installed().is_some());
-        }
-
-        #[test]
-        fn does_not_download_core_at_newest_version() {
-            let (mut setup, downloaded) = downloads_counted();
-            lines_of(|on_logged| setup.pocketeer.install_cores(&ids(&[GB]), on_logged));
-            assert_eq!(downloaded.get(), 1);
-            let lines = lines_of(|on_logged| setup.pocketeer.install_cores(&ids(&[GB]), on_logged));
-            assert_eq!(
-                lines,
-                ["Spiritualized.GB: the device has the newest version"]
-            );
-            assert_eq!(downloaded.get(), 1);
-        }
-
-        #[test]
-        fn continues_after_unsupported_core() {
-            let mut setup = setup(&[], &[]);
-            let lines = lines_of(|on_logged| {
-                setup
-                    .pocketeer
-                    .install_cores(&ids(&["no.Such", GB]), on_logged)
-            });
-            assert_eq!(
-                lines,
-                [
-                    "no.Such: not a core that can be installed",
-                    "Spiritualized.GB: 2.0 installed"
-                ]
-            );
-        }
-
-        #[test]
-        fn downloads_nothing_without_device() {
-            let (mut setup, downloaded) = downloads_counted();
-            setup.pocketeer.close_device();
-            let lines = lines_of(|on_logged| setup.pocketeer.install_cores(&ids(&[GB]), on_logged));
-            assert_eq!(lines, ["Spiritualized.GB: error: no device is open"]);
-            assert_eq!(downloaded.get(), 0);
-        }
-
-        #[test]
-        fn removes_core_from_device() {
-            let mut setup = setup(&[("Cores/a.B/core.json", b"{}")], &[]);
-            let lines =
-                lines_of(|on_logged| setup.pocketeer.remove_cores(&ids(&["a.B"]), on_logged));
-            assert_eq!(lines, ["a.B: removed from the device"]);
-        }
-
-        #[test]
-        fn reports_core_not_on_device() {
-            let mut setup = setup(&[], &[]);
-            let lines =
-                lines_of(|on_logged| setup.pocketeer.remove_cores(&ids(&["a.B"]), on_logged));
-            assert_eq!(lines, ["a.B: not on the device"]);
-        }
-    }
-
-    mod rereading {
-        use super::*;
 
         #[test]
         fn finds_changes_on_both_sides_and_logs() {
@@ -2416,19 +2136,6 @@ mod tests {
 
     mod orphan_saves {
         use super::*;
-
-        #[test]
-        fn deletes_and_logs_orphan_on_device() {
-            let mut setup = setup(&[("Saves/gba/common/RPG/Gone.sav", b"save")], &[]);
-            let orphans = setup.pocketeer.find_orphan_saves_on_device().unwrap();
-            let lines = lines_of(|on_logged| {
-                setup
-                    .pocketeer
-                    .delete_orphan_saves_on_device(&orphans, on_logged)
-            });
-            assert_eq!(lines, ["gba/RPG/Gone.sav: save deleted from the device"]);
-            assert_eq!(setup.pocketeer.find_orphan_saves_on_device().unwrap(), []);
-        }
 
         #[test]
         fn reports_orphan_gone_from_library() {

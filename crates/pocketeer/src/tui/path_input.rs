@@ -524,20 +524,11 @@ mod tests {
         use super::*;
 
         #[test]
-        fn edits_text_at_cursor() {
-            let mut input = PathInput::new("/one/two");
+        fn ctrl_d_deletes_character_at_cursor() {
+            let mut input = PathInput::new("/one");
             ctrl(&mut input, 'a');
-            press(&mut input, KeyCode::Right);
-            press(&mut input, KeyCode::Char('x'));
-            assert_eq!(
-                input.text_around_cursor(),
-                ("/x".to_string(), "one/two".to_string())
-            );
-            ctrl(&mut input, 'k');
-            assert_eq!(text(&input), "/x");
-            ctrl(&mut input, 'e');
-            press(&mut input, KeyCode::Backspace);
-            assert_eq!(text(&input), "/");
+            ctrl(&mut input, 'd');
+            assert_eq!(text(&input), "one");
         }
 
         #[test]

@@ -518,6 +518,12 @@ mod tests {
         assert_eq!(synced.to_line(), "the DATs: 0 platforms updated");
         let failed = OperationReport::DeleteGame(on_device(), Err(SharedError::NoDevice));
         assert_eq!(failed.to_string(), "error: no device is open");
+        let refused =
+            OperationReport::RenameInLibrary(local(), Err(RenameInLibraryError::NameTaken));
+        assert_eq!(
+            refused.to_string(),
+            "not renamed: another game in the library has that name"
+        );
     }
 
     #[test]

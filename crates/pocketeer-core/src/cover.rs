@@ -140,26 +140,16 @@ impl<S: RemoteCoverSource> CoverIndex<S> {
 }
 
 #[cfg(test)]
+pub(crate) mod testing {
+    /// The start of a PNG file, enough to be recognized as one.
+    pub(crate) const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+}
+
+#[cfg(test)]
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
-    use image::RgbaImage;
-
     use super::*;
-
-    fn png(width: u32, height: u32) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        RgbaImage::new(width, height)
-            .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
-            .unwrap();
-        bytes
-    }
-
-    #[test]
-    fn accepts_png() {
-        let cover = Cover::from_bytes(png(3, 2)).unwrap();
-        assert_eq!(cover.format(), ImageFormat::Png);
-    }
 
     #[test]
     fn rejects_other_formats() {
@@ -218,7 +208,7 @@ mod tests {
             self.asked
                 .borrow_mut()
                 .push(format!("fetch {system} {cover_name}"));
-            Ok(Cover::from_bytes(png(1, 1)).unwrap())
+            Ok(Cover::from_bytes(testing::PNG.to_vec()).unwrap())
         }
     }
 

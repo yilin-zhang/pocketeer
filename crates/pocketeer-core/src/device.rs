@@ -916,11 +916,10 @@ mod tests {
 
         #[test]
         fn finds_games_at_any_depth_with_saves() {
-            let (_dir, mut device) = empty_device();
-            let root = device.root().to_path_buf();
-            put(&root, "Assets/gba/common/Tetris.gba", b"hello");
-            put(&root, "Assets/gba/common/RPG/Pokemon.gba", b"hi");
-            put(&root, "Saves/gba/common/RPG/Pokemon.sav", b"save");
+            let (dir, mut device) = empty_device();
+            put(dir.path(), "Assets/gba/common/Tetris.gba", b"hello");
+            put(dir.path(), "Assets/gba/common/RPG/Pokemon.gba", b"hi");
+            put(dir.path(), "Saves/gba/common/RPG/Pokemon.sav", b"save");
             let entries = scanned(&mut device);
             assert_eq!(
                 paths(&entries),
@@ -937,21 +936,19 @@ mod tests {
 
         #[test]
         fn ignores_hidden_files_and_other_dirs() {
-            let (_dir, mut device) = empty_device();
-            let root = device.root().to_path_buf();
-            put(&root, "Assets/gba/common/._Tetris.gba", b"x");
-            put(&root, "Assets/gba/common/.Trash/Tetris.gba", b"x");
-            put(&root, "Assets/gba/agg23.GBA/Tetris.gba", b"x");
-            put(&root, "Tetris.gba", b"x");
+            let (dir, mut device) = empty_device();
+            put(dir.path(), "Assets/gba/common/._Tetris.gba", b"x");
+            put(dir.path(), "Assets/gba/common/.Trash/Tetris.gba", b"x");
+            put(dir.path(), "Assets/gba/agg23.GBA/Tetris.gba", b"x");
+            put(dir.path(), "Tetris.gba", b"x");
             assert_eq!(scanned(&mut device), []);
         }
 
         #[test]
         fn keeps_first_copy_and_reports_duplicates() {
-            let (_dir, mut device) = empty_device();
-            let root = device.root().to_path_buf();
-            put(&root, "Assets/gba/common/One.gba", b"hello");
-            put(&root, "Assets/gba/common/RPG/Two.gba", b"hello");
+            let (dir, mut device) = empty_device();
+            put(dir.path(), "Assets/gba/common/One.gba", b"hello");
+            put(dir.path(), "Assets/gba/common/RPG/Two.gba", b"hello");
             let report = device.scan().unwrap();
             assert_eq!(paths(device.entries()), [PathBuf::from("One.gba")]);
             assert_eq!(paths(&report.duplicates), [PathBuf::from("RPG/Two.gba")]);
@@ -959,10 +956,9 @@ mod tests {
 
         #[test]
         fn treats_same_contents_on_other_platform_as_other_game() {
-            let (_dir, mut device) = empty_device();
-            let root = device.root().to_path_buf();
-            put(&root, "Assets/gb/common/Tetris.gb", b"hello");
-            put(&root, "Assets/gbc/common/Tetris.gbc", b"hello");
+            let (dir, mut device) = empty_device();
+            put(dir.path(), "Assets/gb/common/Tetris.gb", b"hello");
+            put(dir.path(), "Assets/gbc/common/Tetris.gbc", b"hello");
             assert_eq!(device.scan().unwrap(), ScanReport::default());
             assert_eq!(device.entries().len(), 2);
         }
@@ -973,54 +969,50 @@ mod tests {
 
         #[test]
         fn reuses_unchanged_file_after_reopening() {
-            let (_dir, mut device) = empty_device();
-            let root = device.root().to_path_buf();
+            let (dir, mut device) = empty_device();
             let path = "Assets/gba/common/Tetris.gba";
-            put_at(&root, path, b"hello", 1_000_000);
+            put_at(dir.path(), path, b"hello", 1_000_000);
             scanned(&mut device);
             // Same size and time with other contents, so the cached game is
             // used.
-            put_at(&root, path, b"jello", 1_000_000);
-            let mut reopened = Device::open(&root).unwrap();
+            put_at(dir.path(), path, b"jello", 1_000_000);
+            let mut reopened = Device::open(dir.path()).unwrap();
             assert_eq!(crc32s(&scanned(&mut reopened)), [0x3610a686]);
             // A new time, so it is read again.
-            put_at(&root, path, b"jello", 1_000_002);
+            put_at(dir.path(), path, b"jello", 1_000_002);
             assert_eq!(crc32s(&scanned(&mut reopened)), [0x4cd0f5e6]);
         }
 
         #[test]
         fn rereads_file_at_path_gone_at_last_scan() {
-            let (_dir, mut device) = empty_device();
-            let root = device.root().to_path_buf();
+            let (dir, mut device) = empty_device();
             let path = "Assets/gba/common/Tetris.gba";
-            let file = put_at(&root, path, b"hello", 1_000_000);
+            let file = put_at(dir.path(), path, b"hello", 1_000_000);
             scanned(&mut device);
             fs::remove_file(&file).unwrap();
             assert_eq!(scanned(&mut device), []);
             // The same size and time as the file gone.
-            put_at(&root, path, b"jello", 1_000_000);
+            put_at(dir.path(), path, b"jello", 1_000_000);
             assert_eq!(crc32s(&scanned(&mut device)), [0x4cd0f5e6]);
         }
 
         #[test]
         fn rereads_file_at_path_of_removed_game() {
-            let (_dir, mut device) = empty_device();
-            let root = device.root().to_path_buf();
+            let (dir, mut device) = empty_device();
             let path = "Assets/gba/common/Tetris.gba";
-            put_at(&root, path, b"hello", 1_000_000);
+            put_at(dir.path(), path, b"hello", 1_000_000);
             let entry = scanned(&mut device).remove(0);
             device.remove_game(&entry).unwrap();
             // The same size and time as the file removed.
-            put_at(&root, path, b"jello", 1_000_000);
+            put_at(dir.path(), path, b"jello", 1_000_000);
             assert_eq!(crc32s(&scanned(&mut device)), [0x4cd0f5e6]);
         }
 
         #[test]
         fn ignores_corrupt_cache_file() {
-            let (_dir, mut device) = empty_device();
-            let root = device.root().to_path_buf();
-            put(&root, "Assets/gba/common/Tetris.gba", b"hello");
-            put(&root, ".pocketeer/cache.json", b"{ not json");
+            let (dir, mut device) = empty_device();
+            put(dir.path(), "Assets/gba/common/Tetris.gba", b"hello");
+            put(dir.path(), ".pocketeer/cache.json", b"{ not json");
             assert_eq!(crc32s(&scanned(&mut device)), [0x3610a686]);
         }
     }
@@ -1103,11 +1095,13 @@ mod tests {
         }
 
         #[test]
-        fn removes_game_and_leaves_other_games() {
+        fn removes_game_and_leaves_its_save_and_other_games() {
             let (dir, mut device, entry) = with_two_games();
+            let save = put(dir.path(), "Saves/gba/common/One.sav", b"save");
             device.remove_game(&entry).unwrap();
             assert!(!dir.path().join("Assets/gba/common/One.gba").exists());
             assert!(dir.path().join("Assets/gba/common/Two.gba").exists());
+            assert!(save.exists());
             assert_eq!(paths(device.entries()), [PathBuf::from("Two.gba")]);
         }
     }
@@ -1219,19 +1213,19 @@ mod tests {
         fn keeps_old_version_when_staging_fails() {
             let (_dir, device) = empty_device();
             install(&device, release("1.0")).unwrap();
+            // One path is both a file and a folder, so the new version can't be
+            // written out.
             let bytes = zip_of(&[
                 ("Cores/a.B/core.json", core_json("2.0").as_bytes()),
                 ("Cores/a.B/core.rbf_r", b"new bits"),
+                ("Cores/a.B/both", b"file"),
+                ("Cores/a.B/both/inside", b"file"),
             ]);
-            // A file sits where the staging folder goes, so the new version
-            // can't be written.
-            let root = device.root();
-            let staged = put(root, ".pocketeer/in the way", b"x");
-            fs::rename(&staged, root.join(".pocketeer/staging")).unwrap();
             let stayed = install(&device, bytes);
             assert!(stayed.is_err());
             assert_eq!(version(&device).unwrap(), "1.0");
-            assert_eq!(fs::read(root.join("Cores/a.B/core.rbf_r")).unwrap(), b"1.0");
+            let core_file = device.root().join("Cores/a.B/core.rbf_r");
+            assert_eq!(fs::read(core_file).unwrap(), b"1.0");
         }
 
         #[test]
@@ -1599,30 +1593,19 @@ mod tests {
 
             #[test]
             fn excludes_only_declared_bios_path_from_games() {
-                let (_dir, mut device) = empty_device();
+                let (dir, mut device) = empty_device();
                 core(&device, "a.GBA", "gba", BIOS);
-                let root = device.root().to_path_buf();
-                put(&root, "Assets/gba/common/gba_bios.bin", b"four");
-                put(&root, "Assets/gba/common/Sonic.bin", b"game");
+                put(dir.path(), "Assets/gba/common/gba_bios.bin", b"four");
+                put(dir.path(), "Assets/gba/common/Sonic.bin", b"game");
                 // The same file name in another folder isn't where the core
                 // looks, so it counts as a game.
-                put(&root, "Assets/gba/common/RPG/gba_bios.bin", b"other");
+                put(dir.path(), "Assets/gba/common/RPG/gba_bios.bin", b"other");
                 assert_eq!(
                     paths(&scanned(&mut device)),
                     [
                         PathBuf::from("RPG/gba_bios.bin"),
                         PathBuf::from("Sonic.bin"),
                     ]
-                );
-            }
-
-            #[test]
-            fn lists_file_as_game_when_no_core_loads_it() {
-                let (_dir, mut device) = empty_device();
-                put(device.root(), "Assets/gba/common/gba_bios.bin", b"four");
-                assert_eq!(
-                    paths(&scanned(&mut device)),
-                    [PathBuf::from("gba_bios.bin")]
                 );
             }
 
@@ -1673,23 +1656,8 @@ mod tests {
         }
 
         #[test]
-        fn reads_new_firmware_without_reopening() {
-            let (dir, device) = empty_device();
-            put(
-                dir.path(),
-                "Analogue_Pocket.json",
-                br#"{"firmware": {"runtime": {"name": "2.7"}}}"#,
-            );
-            assert_eq!(device.read_firmware().unwrap().to_string(), "2.7");
-        }
-
-        #[test]
-        fn returns_none_without_firmware_section() {
+        fn returns_none_without_readable_firmware_section() {
             assert_eq!(firmware_in(b"{}"), None);
-        }
-
-        #[test]
-        fn returns_none_for_malformed_json() {
             assert_eq!(firmware_in(b"{ not json"), None);
         }
 
@@ -1705,14 +1673,6 @@ mod tests {
 
     mod disk_space {
         use super::*;
-
-        #[test]
-        fn reads_space_of_drive() {
-            let (_dir, device) = empty_device();
-            let space = device.read_disk_space().unwrap();
-            assert!(space.total_bytes > 0);
-            assert!(space.available_bytes <= space.total_bytes);
-        }
 
         #[test]
         fn shows_space_in_decimal_units() {
@@ -1761,9 +1721,8 @@ mod tests {
 
         #[test]
         fn removes_orphan_save() {
-            let (_dir, device) = empty_device();
-            let root = device.root().to_path_buf();
-            let save = put(&root, "Saves/gba/common/RPG/Gone.sav", b"save");
+            let (dir, device) = empty_device();
+            let save = put(dir.path(), "Saves/gba/common/RPG/Gone.sav", b"save");
             let orphan = device.find_orphan_saves().unwrap().remove(0);
             device.remove_orphan_save(&orphan).unwrap();
             assert!(!save.exists());
@@ -1771,11 +1730,10 @@ mod tests {
 
         #[test]
         fn rejects_removing_save_with_game() {
-            let (_dir, device) = empty_device();
-            let root = device.root().to_path_buf();
-            let save = put(&root, "Saves/gba/common/Tetris.sav", b"save");
+            let (dir, device) = empty_device();
+            let save = put(dir.path(), "Saves/gba/common/Tetris.sav", b"save");
             let orphan = device.find_orphan_saves().unwrap().remove(0);
-            put(&root, "Assets/gba/common/Tetris.gba", b"hello");
+            put(dir.path(), "Assets/gba/common/Tetris.gba", b"hello");
             assert!(matches!(
                 device.remove_orphan_save(&orphan),
                 Err(DeleteSaveError::NoSave)

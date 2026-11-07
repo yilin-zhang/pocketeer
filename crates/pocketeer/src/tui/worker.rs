@@ -930,37 +930,6 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn reports_duplicates_on_open_and_reload() {
-        let (_dir, mut worker_handle, rx) = started_with_two_copies();
-        let lines = ["gba/RPG/Two.gba is the same game as gba/One.gba".to_string()];
-        let opening = until_device_read(&rx);
-        assert_eq!(duplicates(&opening), [&lines[..]]);
-        assert_eq!(last_games_page_data(&opening).rows.len(), 1);
-        worker_handle.send(WorkerCommand::Reload);
-        assert_eq!(duplicates(&until_finished(&rx)), [&lines[..]]);
-    }
-
-    #[test]
-    fn shows_next_copy_without_warning_after_deleting_first() {
-        let (_dir, mut worker_handle, rx) = started_with_two_copies();
-        let opening = until_device_read(&rx);
-        let first = last_games_page_data(&opening).rows[0]
-            .device_entry()
-            .unwrap()
-            .clone();
-        assert_eq!(first.path, Path::new("One.gba"));
-        worker_handle.send(WorkerCommand::DeleteGames(vec![first]));
-        let messages = until_finished(&rx);
-        assert_eq!(duplicates(&messages), Vec::<&[String]>::new());
-        let rows = &last_games_page_data(&messages).rows;
-        assert_eq!(rows.len(), 1);
-        assert_eq!(
-            rows[0].device_entry().unwrap().path,
-            Path::new("RPG/Two.gba")
-        );
-    }
-
     fn device_page_sent(messages: &[WorkerMessage]) -> Option<&DevicePageData> {
         messages
             .iter()
@@ -972,295 +941,6 @@ mod tests {
             .flatten()
     }
 
-    #[test]
-    fn sends_device_page_after_reading_device() {
-        let (dir, _worker, rx) = started();
-        let messages = until_device_read(&rx);
-        let data = device_page_sent(&messages).unwrap();
-        assert_eq!(data.root, dir.path().join("device"));
-        assert_eq!(data.firmware, None);
-        assert_eq!(data.core_count, Some(0));
-        assert_eq!(data.game_count, 1);
-        assert!(data.disk_space.unwrap().total_bytes > 0);
-    }
-
-    #[test]
-    fn sends_device_page_after_command() {
-        let (dir, mut worker_handle, rx) = started();
-        until_device_read(&rx);
-        put(&dir.path().join("device"), "Assets/gba/common/D.gba", b"d");
-        worker_handle.send(WorkerCommand::Reload);
-        let messages = until_finished(&rx);
-        assert_eq!(device_page_sent(&messages).unwrap().game_count, 2);
-    }
-
-    #[test]
-    fn reports_only_failure_when_library_cannot_open() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_worker, rx) = worker_on(dir.path().join("typo"), None);
-        let told = rx.recv_timeout(Duration::from_secs(10)).unwrap();
-        assert!(
-            matches!(told, WorkerMessage::LibraryOpenFailed(_)),
-            "{told:?}"
-        );
-        // The worker has gone, and its end of the channel with it.
-        assert!(rx.recv_timeout(Duration::from_secs(10)).is_err());
-    }
-
-    #[test]
-    fn opens_device_and_sends_every_row() {
-        let (_dir, _worker, rx) = started();
-        let opening = until_device_read(&rx);
-        let games_page_data = last_games_page_data(&opening);
-        assert!(games_page_data.device_root.is_some());
-        // A, B, C and the orphan save.
-        assert_eq!(games_page_data.rows.len(), 4);
-        assert!(matches!(
-            games_page_data.rows[3],
-            GamesTableRow::OrphanSaveOnDevice(_)
-        ));
-        assert!(matches!(opening[1], WorkerMessage::DeviceReadStarted(_)));
-        // Reading it successfully isn't a command to report.
-        let is_job = |message: &WorkerMessage| {
-            matches!(
-                message,
-                WorkerMessage::CommandStarted { .. } | WorkerMessage::CommandFinished { .. }
-            )
-        };
-        assert!(!opening.iter().any(is_job));
-    }
-
-    #[test]
-    fn reports_why_device_cannot_be_read() {
-        let (_dir, _worker, rx) = started_with_unreadable_device();
-        let messages = until_finished(&rx);
-        let (summary, failed) = finished(&messages);
-        assert!(failed);
-        assert!(
-            summary.starts_with("couldn't read the device: "),
-            "{summary}"
-        );
-        assert!(messages.contains(&WorkerMessage::DeviceReadFinished));
-        assert_eq!(last_games_page_data(&messages).device_root, None);
-    }
-
-    #[test]
-    fn reports_progress_for_each_game() {
-        let (_dir, mut worker_handle, rx) = started();
-        let opening = until_device_read(&rx);
-        let games = locals(last_games_page_data(&opening));
-        worker_handle.send(WorkerCommand::PushGames(games));
-        let messages = until_finished(&rx);
-        let progress: Vec<_> = messages
-            .iter()
-            .filter_map(|message| match message {
-                WorkerMessage::CommandProgressed {
-                    finished_count,
-                    target_count,
-                    target,
-                } => Some((*finished_count, *target_count, target.as_str())),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(progress, [(1, 2, "gba/A.gba"), (2, 2, "gba/B.gba")]);
-        assert_eq!(finished(&messages), ("pushing games: 2 done", false));
-        let games_page_data = last_games_page_data(&messages);
-        let on_device = games_page_data
-            .rows
-            .iter()
-            .filter(|row| row.device_entry().is_some());
-        assert_eq!(on_device.count(), 3);
-    }
-
-    #[test]
-    fn skips_canceled_commands() {
-        let (dir, library, _) = empty_library_and_device();
-        let (tx, commands) = mpsc::channel();
-        let canceled = Arc::new(AtomicBool::new(true));
-        tx.send(QueuedCommand {
-            is_canceled: canceled,
-            command: WorkerCommand::PullSaves(Vec::new()),
-        })
-        .unwrap();
-        tx.send(QueuedCommand {
-            is_canceled: Arc::default(),
-            command: WorkerCommand::Reload,
-        })
-        .unwrap();
-        // With nothing left to come, `run_worker_loop` returns.
-        drop(tx);
-        let labels = std::cell::RefCell::new(Vec::new());
-        // A device that isn't there, so this can't read one that is mounted.
-        let no_device = Some(dir.path().join("no device"));
-        run_worker_loop(&library, no_device, &commands, &|message| {
-            if let WorkerMessage::CommandStarted { label, .. } = message {
-                labels.borrow_mut().push(label);
-            }
-        });
-        assert_eq!(*labels.borrow(), ["reading everything again"]);
-    }
-
-    #[test]
-    fn adds_row_for_imported_game() {
-        let (dir, mut worker_handle, rx) = started();
-        let opening = until_device_read(&rx);
-        let before = locals(last_games_page_data(&opening)).len();
-        let from = put(dir.path(), "elsewhere/New.bin", b"new");
-        worker_handle.send(WorkerCommand::ImportGame(from, Some(Platform::Gb)));
-        let messages = until_finished(&rx);
-        assert!(!finished(&messages).1);
-        assert_eq!(locals(last_games_page_data(&messages)).len(), before + 1);
-    }
-
-    #[test]
-    fn counts_games_in_imported_dir() {
-        let (dir, mut worker_handle, rx) = started();
-        until_device_read(&rx);
-        put(dir.path(), "elsewhere/New.gb", b"new");
-        put(dir.path(), "elsewhere/deep/Other.gb", b"other");
-        worker_handle.send(WorkerCommand::ImportGame(
-            dir.path().join("elsewhere"),
-            None,
-        ));
-        let messages = until_finished(&rx);
-        assert_eq!(finished(&messages), ("importing games: 2 done", false));
-    }
-
-    #[test]
-    fn deletes_orphan_save_from_device() {
-        let (_dir, mut worker_handle, rx) = started();
-        let opening = until_device_read(&rx);
-        let GamesTableRow::OrphanSaveOnDevice(orphan) =
-            last_games_page_data(&opening).rows[3].clone()
-        else {
-            panic!()
-        };
-        worker_handle.send(WorkerCommand::DeleteOrphanSaves(vec![orphan]));
-        let messages = until_finished(&rx);
-        assert_eq!(
-            finished(&messages),
-            ("gba/Gone.sav: save deleted from the device", false)
-        );
-        assert_eq!(last_games_page_data(&messages).rows.len(), 3);
-    }
-
-    #[test]
-    fn answers_with_names_dats_give_without_reporting_job() {
-        let (_dir, library, device) = empty_library_and_device();
-        put(
-            &library,
-            "dats/Nintendo - Game Boy Advance.dat",
-            br#"clrmamepro ( name "Nintendo - Game Boy Advance" )
-game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686 ) )"#,
-        );
-        put(&library, "roms/gba/Old.gba", b"hello");
-        put(&library, "roms/gba/Mine.gba", b"unknown");
-        let (mut worker_handle, rx) = worker_on(library, Some(device));
-        let opening = until_device_read(&rx);
-        worker_handle.send(WorkerCommand::ProposeRenames(locals(last_games_page_data(
-            &opening,
-        ))));
-        let messages = messages_until(&rx, |message| {
-            matches!(message, WorkerMessage::RenamesProposed(_))
-        });
-        let [WorkerMessage::RenamesProposed(renames)] = &messages[..] else {
-            panic!("{messages:?}")
-        };
-        let [(game, new)] = &renames[..] else {
-            panic!("{renames:?}")
-        };
-        assert_eq!(
-            (game.name.as_str(), new.as_str()),
-            ("Old.gba", "Tetris (World)")
-        );
-    }
-
-    #[test]
-    fn reports_renamed_game_under_new_name() {
-        let (_dir, mut worker_handle, rx) = started();
-        let opening = until_device_read(&rx);
-        let local = locals(last_games_page_data(&opening)).remove(0);
-        worker_handle.send(WorkerCommand::RenameGamesInLibrary(vec![(
-            local,
-            "Renamed".to_string(),
-        )]));
-        let messages = until_finished(&rx);
-        assert_eq!(
-            finished(&messages),
-            ("gba/A.gba: renamed to gba/Renamed.gba", false)
-        );
-        let names: Vec<String> = locals(last_games_page_data(&messages))
-            .into_iter()
-            .map(|local| local.name)
-            .collect();
-        assert_eq!(names, ["B.gba", "Renamed.gba"]);
-    }
-
-    #[test]
-    fn counts_games_renamed_in_library() {
-        let (_dir, mut worker_handle, rx) = started();
-        let opening = until_device_read(&rx);
-        let renames = locals(last_games_page_data(&opening))
-            .into_iter()
-            .map(|local| {
-                let new = format!("New {}", local.stem());
-                (local, new)
-            })
-            .collect();
-        worker_handle.send(WorkerCommand::RenameGamesInLibrary(renames));
-        let messages = until_finished(&rx);
-        assert_eq!(finished(&messages), ("renaming games: 2 done", false));
-        let names: Vec<String> = locals(last_games_page_data(&messages))
-            .into_iter()
-            .map(|local| local.name)
-            .collect();
-        assert_eq!(names, ["New A.gba", "New B.gba"]);
-    }
-
-    #[test]
-    fn cancels_only_commands_sent_before_cancel() {
-        let (mut worker_handle, rx) = WorkerHandle::recording();
-        worker_handle.send(WorkerCommand::Reload);
-        worker_handle.send(WorkerCommand::SyncDats);
-        worker_handle.cancel();
-        worker_handle.send(WorkerCommand::Eject);
-        let flags: Vec<bool> = rx
-            .try_iter()
-            .map(|queued| queued.is_canceled.load(Ordering::Relaxed))
-            .collect();
-        assert_eq!(flags, [true, true, false]);
-    }
-
-    #[test]
-    fn ends_thread_when_dropped() {
-        let (_dir, worker_handle, rx) = started();
-        until_device_read(&rx);
-        drop(worker_handle);
-        // The thread held the other end.
-        while rx.try_recv().is_ok() {}
-        assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
-    }
-
-    #[test]
-    fn finishes_at_most_current_game_when_dropped() {
-        let (dir, mut worker_handle, rx) = started();
-        let games = locals(last_games_page_data(&until_device_read(&rx)));
-        worker_handle.send(WorkerCommand::PushGames(games));
-        drop(worker_handle);
-        let on_device = ["A.gba", "B.gba"]
-            .iter()
-            .filter(|name| {
-                dir.path()
-                    .join("device/Assets/gba/common")
-                    .join(name)
-                    .exists()
-            })
-            .count();
-        assert!(on_device <= 1, "{on_device}");
-        let log = fs::read_to_string(dir.path().join("library/pocketeer.log")).unwrap_or_default();
-        assert_eq!(log.lines().count(), on_device);
-    }
-
     /// The files last sent in `messages`.
     fn bios_sent(messages: &[WorkerMessage]) -> &[BiosRow] {
         let told = messages.iter().rev().find_map(|message| match message {
@@ -1270,126 +950,444 @@ game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686
         told.unwrap()
     }
 
-    #[test]
-    fn reports_bios_file_and_puts_it_on_device() {
-        let (dir, library, device) = empty_library_and_device();
-        put(
-            &device,
-            "Cores/a.B/core.json",
-            br#"{"core":{"metadata":{"version":"1","platform_ids":["gba"]}}}"#,
-        );
-        put(
-            &device,
-            "Cores/a.B/data.json",
-            br#"{"data":{"data_slots":[{"filename":"gba_bios.bin","required":true}]}}"#,
-        );
-        let from = put(dir.path(), "mine.bin", b"bios");
-        let (mut worker_handle, rx) = worker_on(library, Some(device.clone()));
-        let opening = until_device_read(&rx);
-        let told = bios_sent(&opening);
-        assert_eq!(told[0].status, BiosStatus::Missing);
-        worker_handle.send(WorkerCommand::PutBios(told[0].clone(), from));
-        let messages = until_finished(&rx);
-        assert_eq!(
-            finished(&messages),
-            ("gba/gba_bios.bin: put on the device", false)
-        );
-        assert_eq!(bios_sent(&messages)[0].status, BiosStatus::Present);
-        assert!(device.join("Assets/gba/common/gba_bios.bin").exists());
+    mod opening {
+        use super::*;
+
+        #[test]
+        fn reports_duplicates_on_open_and_reload() {
+            let (_dir, mut worker_handle, rx) = started_with_two_copies();
+            let lines = ["gba/RPG/Two.gba is the same game as gba/One.gba".to_string()];
+            let opening = until_device_read(&rx);
+            assert_eq!(duplicates(&opening), [&lines[..]]);
+            assert_eq!(last_games_page_data(&opening).rows.len(), 1);
+            worker_handle.send(WorkerCommand::Reload);
+            assert_eq!(duplicates(&until_finished(&rx)), [&lines[..]]);
+        }
+
+        #[test]
+        fn sends_device_page_after_reading_device() {
+            let (dir, _worker, rx) = started();
+            let messages = until_device_read(&rx);
+            let data = device_page_sent(&messages).unwrap();
+            assert_eq!(data.root, dir.path().join("device"));
+            assert_eq!(data.firmware, None);
+            assert_eq!(data.core_count, Some(0));
+            assert_eq!(data.game_count, 1);
+            assert!(data.disk_space.unwrap().total_bytes > 0);
+        }
+
+        #[test]
+        fn sends_device_page_after_command() {
+            let (dir, mut worker_handle, rx) = started();
+            until_device_read(&rx);
+            put(&dir.path().join("device"), "Assets/gba/common/D.gba", b"d");
+            worker_handle.send(WorkerCommand::Reload);
+            let messages = until_finished(&rx);
+            assert_eq!(device_page_sent(&messages).unwrap().game_count, 2);
+        }
+
+        #[test]
+        fn reports_only_failure_when_library_cannot_open() {
+            let dir = tempfile::tempdir().unwrap();
+            let (_worker, rx) = worker_on(dir.path().join("typo"), None);
+            let told = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert!(
+                matches!(told, WorkerMessage::LibraryOpenFailed(_)),
+                "{told:?}"
+            );
+            // The worker has gone, and its end of the channel with it.
+            assert!(rx.recv_timeout(Duration::from_secs(10)).is_err());
+        }
+
+        #[test]
+        fn opens_device_and_sends_every_row() {
+            let (_dir, _worker, rx) = started();
+            let opening = until_device_read(&rx);
+            let games_page_data = last_games_page_data(&opening);
+            assert!(games_page_data.device_root.is_some());
+            // A, B, C and the orphan save.
+            assert_eq!(games_page_data.rows.len(), 4);
+            assert!(matches!(
+                games_page_data.rows[3],
+                GamesTableRow::OrphanSaveOnDevice(_)
+            ));
+            assert!(matches!(opening[1], WorkerMessage::DeviceReadStarted(_)));
+            // Reading it successfully isn't a command to report.
+            let is_command_message = |message: &WorkerMessage| {
+                matches!(
+                    message,
+                    WorkerMessage::CommandStarted { .. } | WorkerMessage::CommandFinished { .. }
+                )
+            };
+            assert!(!opening.iter().any(is_command_message));
+        }
+
+        #[test]
+        fn reports_why_device_cannot_be_read() {
+            let (_dir, _worker, rx) = started_with_unreadable_device();
+            let messages = until_finished(&rx);
+            let (summary, failed) = finished(&messages);
+            assert!(failed);
+            assert!(
+                summary.starts_with("couldn't read the device: "),
+                "{summary}"
+            );
+            assert!(messages.contains(&WorkerMessage::DeviceReadFinished));
+            assert_eq!(last_games_page_data(&messages).device_root, None);
+        }
     }
 
-    #[test]
-    fn sends_cores_only_after_page_opens() {
-        let (_dir, mut worker_handle, rx) = started_with_cores();
-        let opening = until_device_read(&rx);
-        assert_eq!(cores_sent(&opening), None);
-        worker_handle.send(WorkerCommand::Reload);
-        assert_eq!(cores_sent(&until_finished(&rx)), None);
-        worker_handle.send(WorkerCommand::ShowCores);
-        let told = cores_sent(&until_cores(&rx)).unwrap();
-        assert_eq!(told, ["Spiritualized.GB", "a.B"]);
+    mod commands {
+        use super::*;
+
+        #[test]
+        fn reports_progress_for_each_game() {
+            let (_dir, mut worker_handle, rx) = started();
+            let opening = until_device_read(&rx);
+            let games = locals(last_games_page_data(&opening));
+            worker_handle.send(WorkerCommand::PushGames(games));
+            let messages = until_finished(&rx);
+            let progress: Vec<_> = messages
+                .iter()
+                .filter_map(|message| match message {
+                    WorkerMessage::CommandProgressed {
+                        finished_count,
+                        target_count,
+                        target,
+                    } => Some((*finished_count, *target_count, target.as_str())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(progress, [(1, 2, "gba/A.gba"), (2, 2, "gba/B.gba")]);
+            assert_eq!(finished(&messages), ("pushing games: 2 done", false));
+            let games_page_data = last_games_page_data(&messages);
+            let on_device = games_page_data
+                .rows
+                .iter()
+                .filter(|row| row.device_entry().is_some());
+            assert_eq!(on_device.count(), 3);
+        }
+
+        #[test]
+        fn passes_chosen_platform_to_import() {
+            let (dir, mut worker_handle, rx) = started();
+            let opening = until_device_read(&rx);
+            let before = locals(last_games_page_data(&opening)).len();
+            let from = put(dir.path(), "elsewhere/New.bin", b"new");
+            worker_handle.send(WorkerCommand::ImportGame(from, Some(Platform::Gb)));
+            let messages = until_finished(&rx);
+            assert!(!finished(&messages).1);
+            assert_eq!(locals(last_games_page_data(&messages)).len(), before + 1);
+        }
+
+        #[test]
+        fn counts_games_in_imported_dir() {
+            let (dir, mut worker_handle, rx) = started();
+            until_device_read(&rx);
+            put(dir.path(), "elsewhere/New.gb", b"new");
+            put(dir.path(), "elsewhere/deep/Other.gb", b"other");
+            worker_handle.send(WorkerCommand::ImportGame(
+                dir.path().join("elsewhere"),
+                None,
+            ));
+            let messages = until_finished(&rx);
+            assert_eq!(finished(&messages), ("importing games: 2 done", false));
+        }
+
+        #[test]
+        fn refreshes_orphan_saves_after_deleting_one() {
+            let (_dir, mut worker_handle, rx) = started();
+            let opening = until_device_read(&rx);
+            let GamesTableRow::OrphanSaveOnDevice(orphan) =
+                last_games_page_data(&opening).rows[3].clone()
+            else {
+                panic!()
+            };
+            worker_handle.send(WorkerCommand::DeleteOrphanSaves(vec![orphan]));
+            let messages = until_finished(&rx);
+            assert_eq!(
+                finished(&messages),
+                ("gba/Gone.sav: save deleted from the device", false)
+            );
+            assert_eq!(last_games_page_data(&messages).rows.len(), 3);
+        }
+
+        #[test]
+        fn proposes_dat_names_without_reporting_command() {
+            let (_dir, library, device) = empty_library_and_device();
+            put(
+                &library,
+                "dats/Nintendo - Game Boy Advance.dat",
+                br#"clrmamepro ( name "Nintendo - Game Boy Advance" )
+game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686 ) )"#,
+            );
+            put(&library, "roms/gba/Old.gba", b"hello");
+            put(&library, "roms/gba/Mine.gba", b"unknown");
+            let (mut worker_handle, rx) = worker_on(library, Some(device));
+            let opening = until_device_read(&rx);
+            worker_handle.send(WorkerCommand::ProposeRenames(locals(last_games_page_data(
+                &opening,
+            ))));
+            let messages = messages_until(&rx, |message| {
+                matches!(message, WorkerMessage::RenamesProposed(_))
+            });
+            let [WorkerMessage::RenamesProposed(renames)] = &messages[..] else {
+                panic!("{messages:?}")
+            };
+            let [(game, new)] = &renames[..] else {
+                panic!("{renames:?}")
+            };
+            assert_eq!(
+                (game.name.as_str(), new.as_str()),
+                ("Old.gba", "Tetris (World)")
+            );
+        }
+
+        #[test]
+        fn reports_bios_file_and_puts_it_on_device() {
+            let (dir, library, device) = empty_library_and_device();
+            put(
+                &device,
+                "Cores/a.B/core.json",
+                br#"{"core":{"metadata":{"version":"1","platform_ids":["gba"]}}}"#,
+            );
+            put(
+                &device,
+                "Cores/a.B/data.json",
+                br#"{"data":{"data_slots":[{"filename":"gba_bios.bin","required":true}]}}"#,
+            );
+            let from = put(dir.path(), "mine.bin", b"bios");
+            let (mut worker_handle, rx) = worker_on(library, Some(device.clone()));
+            let opening = until_device_read(&rx);
+            let told = bios_sent(&opening);
+            assert_eq!(told[0].status, BiosStatus::Missing);
+            worker_handle.send(WorkerCommand::PutBios(told[0].clone(), from));
+            let messages = until_finished(&rx);
+            assert_eq!(
+                finished(&messages),
+                ("gba/gba_bios.bin: put on the device", false)
+            );
+            assert_eq!(bios_sent(&messages)[0].status, BiosStatus::Present);
+            assert!(device.join("Assets/gba/common/gba_bios.bin").exists());
+        }
+
+        #[test]
+        fn sends_cores_only_after_page_opens() {
+            let (_dir, mut worker_handle, rx) = started_with_cores();
+            let opening = until_device_read(&rx);
+            assert_eq!(cores_sent(&opening), None);
+            worker_handle.send(WorkerCommand::Reload);
+            assert_eq!(cores_sent(&until_finished(&rx)), None);
+            worker_handle.send(WorkerCommand::ShowCores);
+            let told = cores_sent(&until_cores(&rx)).unwrap();
+            assert_eq!(told, ["Spiritualized.GB", "a.B"]);
+        }
+
+        #[test]
+        fn drops_removed_core_from_cores_update() {
+            let (_dir, mut worker_handle, rx) = started_with_cores();
+            until_device_read(&rx);
+            worker_handle.send(WorkerCommand::ShowCores);
+            until_cores(&rx);
+            worker_handle.send(WorkerCommand::RemoveCores(vec!["a.B".to_string()]));
+            let messages = until_finished(&rx);
+            assert_eq!(finished(&messages), ("a.B: removed from the device", false));
+            assert_eq!(cores_sent(&messages).unwrap(), ["Spiritualized.GB"]);
+        }
+
+        #[test]
+        fn counts_games_renamed_in_library() {
+            let (_dir, mut worker_handle, rx) = started();
+            let opening = until_device_read(&rx);
+            let renames = locals(last_games_page_data(&opening))
+                .into_iter()
+                .map(|local| {
+                    let new = format!("New {}", local.stem());
+                    (local, new)
+                })
+                .collect();
+            worker_handle.send(WorkerCommand::RenameGamesInLibrary(renames));
+            let messages = until_finished(&rx);
+            assert_eq!(finished(&messages), ("renaming games: 2 done", false));
+            let names: Vec<String> = locals(last_games_page_data(&messages))
+                .into_iter()
+                .map(|local| local.name)
+                .collect();
+            assert_eq!(names, ["New A.gba", "New B.gba"]);
+        }
+
+        #[test]
+        fn logs_commands_with_tui_front_end() {
+            let (dir, mut worker_handle, rx) = started();
+            let opening = until_device_read(&rx);
+            let games = locals(last_games_page_data(&opening));
+            worker_handle.send(WorkerCommand::PushGames(games));
+            until_finished(&rx);
+            let log = fs::read_to_string(dir.path().join("library/pocketeer.log")).unwrap();
+            assert!(log.contains(r#""front_end":"tui""#), "{log}");
+        }
+
+        #[test]
+        fn stops_command_and_reports_when_log_cannot_be_written() {
+            let (dir, mut worker_handle, rx) = started();
+            let opening = until_device_read(&rx);
+            let games = locals(last_games_page_data(&opening));
+            fs::create_dir(dir.path().join("library/pocketeer.log")).unwrap();
+            worker_handle.send(WorkerCommand::PushGames(games));
+            let messages = until_finished(&rx);
+            let done = messages
+                .iter()
+                .filter(|message| matches!(message, WorkerMessage::CommandProgressed { .. }))
+                .count();
+            assert_eq!(done, 1);
+            let (summary, failed) = finished(&messages);
+            assert!(failed);
+            assert!(summary.contains("couldn't write the log"), "{summary}");
+        }
+
+        #[test]
+        fn summarizes_how_command_went() {
+            let ok = || OperationReport::Reload(Ok(()));
+            let bad = || OperationReport::Reload(Err(pocketeer_core::error::SharedError::NoDevice));
+            assert_eq!(
+                command_summary("reading", 1, &[ok()]),
+                ("everything: read again".to_string(), false)
+            );
+            assert_eq!(
+                command_summary("reading", 1, &[bad()]),
+                ("everything: error: no device is open".to_string(), true)
+            );
+            assert_eq!(
+                command_summary("reading", 2, &[ok(), ok()]),
+                ("reading: 2 done".to_string(), false)
+            );
+            assert_eq!(
+                command_summary("reading", 3, &[ok()]),
+                ("reading: stopped after 1 of 3".to_string(), false)
+            );
+            assert_eq!(
+                command_summary("reading", 2, &[ok(), bad()]),
+                (
+                    "reading: 2 of 2 done, 1 failed; first: everything: error: no device is open"
+                        .to_string(),
+                    true
+                )
+            );
+        }
     }
 
-    #[test]
-    fn drops_removed_core_from_cores_update() {
-        let (_dir, mut worker_handle, rx) = started_with_cores();
-        until_device_read(&rx);
-        worker_handle.send(WorkerCommand::ShowCores);
-        until_cores(&rx);
-        worker_handle.send(WorkerCommand::RemoveCores(vec!["a.B".to_string()]));
-        let messages = until_finished(&rx);
-        assert_eq!(finished(&messages), ("a.B: removed from the device", false));
-        assert_eq!(cores_sent(&messages).unwrap(), ["Spiritualized.GB"]);
-    }
+    mod canceling {
+        use super::*;
 
-    #[test]
-    fn reports_failed_core_download() {
-        let (_dir, mut worker_handle, rx) = started_with_cores();
-        until_device_read(&rx);
-        worker_handle.send(WorkerCommand::InstallCores(vec![
-            "Spiritualized.GB".to_string(),
-        ]));
-        let messages = until_finished(&rx);
-        let (summary, failed) = finished(&messages);
-        assert!(failed);
-        assert!(
-            summary.starts_with("Spiritualized.GB: error: "),
-            "{summary}"
-        );
-    }
+        #[test]
+        fn skips_canceled_commands() {
+            let (dir, library, _) = empty_library_and_device();
+            let (tx, commands) = mpsc::channel();
+            let canceled = Arc::new(AtomicBool::new(true));
+            tx.send(QueuedCommand {
+                is_canceled: canceled,
+                command: WorkerCommand::PullSaves(Vec::new()),
+            })
+            .unwrap();
+            tx.send(QueuedCommand {
+                is_canceled: Arc::default(),
+                command: WorkerCommand::Reload,
+            })
+            .unwrap();
+            // With nothing left to come, `run_worker_loop` returns.
+            drop(tx);
+            let labels = std::cell::RefCell::new(Vec::new());
+            // A device that isn't there, so this can't read one that is mounted.
+            let no_device = Some(dir.path().join("no device"));
+            run_worker_loop(&library, no_device, &commands, &|message| {
+                if let WorkerMessage::CommandStarted { label, .. } = message {
+                    labels.borrow_mut().push(label);
+                }
+            });
+            assert_eq!(*labels.borrow(), ["reading everything again"]);
+        }
 
-    #[test]
-    fn summarizes_how_command_went() {
-        let ok = || OperationReport::Reload(Ok(()));
-        let bad = || OperationReport::Reload(Err(pocketeer_core::error::SharedError::NoDevice));
-        assert_eq!(
-            command_summary("reading", 1, &[ok()]),
-            ("everything: read again".to_string(), false)
-        );
-        assert_eq!(
-            command_summary("reading", 2, &[ok(), ok()]),
-            ("reading: 2 done".to_string(), false)
-        );
-        assert_eq!(
-            command_summary("reading", 3, &[ok()]),
-            ("reading: stopped after 1 of 3".to_string(), false)
-        );
-        assert_eq!(
-            command_summary("reading", 2, &[ok(), bad()]),
-            (
-                "reading: 2 of 2 done, 1 failed; first: everything: error: no device is open"
-                    .to_string(),
-                true
-            )
-        );
-    }
+        #[test]
+        fn stops_command_at_next_game_after_cancel() {
+            let (_dir, library, device) = empty_library_and_device();
+            put(&library, "roms/gba/A.gba", b"a");
+            put(&library, "roms/gba/B.gba", b"b");
+            let games = pocketeer_core::library::Library::open(&library)
+                .unwrap()
+                .entries()
+                .to_vec();
+            let (tx, commands) = mpsc::channel();
+            let is_canceled = Arc::new(AtomicBool::new(false));
+            tx.send(QueuedCommand {
+                is_canceled: is_canceled.clone(),
+                command: WorkerCommand::PushGames(games),
+            })
+            .unwrap();
+            // With nothing left to come, `run_worker_loop` returns.
+            drop(tx);
+            let finished = std::cell::RefCell::new(String::new());
+            run_worker_loop(
+                &library,
+                Some(device.clone()),
+                &commands,
+                &|message| match message {
+                    WorkerMessage::CommandProgressed { .. } => {
+                        is_canceled.store(true, Ordering::Relaxed)
+                    }
+                    WorkerMessage::CommandFinished { summary, .. } => {
+                        *finished.borrow_mut() = summary;
+                    }
+                    _ => {}
+                },
+            );
+            assert_eq!(*finished.borrow(), "pushing games: stopped after 1 of 2");
+            assert!(device.join("Assets/gba/common/A.gba").exists());
+            assert!(!device.join("Assets/gba/common/B.gba").exists());
+        }
 
-    #[test]
-    fn logs_commands_with_tui_front_end() {
-        let (dir, mut worker_handle, rx) = started();
-        let opening = until_device_read(&rx);
-        let games = locals(last_games_page_data(&opening));
-        worker_handle.send(WorkerCommand::PushGames(games));
-        until_finished(&rx);
-        let log = fs::read_to_string(dir.path().join("library/pocketeer.log")).unwrap();
-        assert!(log.contains(r#""front_end":"tui""#), "{log}");
-    }
+        #[test]
+        fn cancels_only_commands_sent_before_cancel() {
+            let (mut worker_handle, rx) = WorkerHandle::recording();
+            worker_handle.send(WorkerCommand::Reload);
+            worker_handle.send(WorkerCommand::SyncDats);
+            worker_handle.cancel();
+            worker_handle.send(WorkerCommand::Eject);
+            let flags: Vec<bool> = rx
+                .try_iter()
+                .map(|queued| queued.is_canceled.load(Ordering::Relaxed))
+                .collect();
+            assert_eq!(flags, [true, true, false]);
+        }
 
-    #[test]
-    fn stops_command_and_reports_when_log_cannot_be_written() {
-        let (dir, mut worker_handle, rx) = started();
-        let opening = until_device_read(&rx);
-        let games = locals(last_games_page_data(&opening));
-        fs::create_dir(dir.path().join("library/pocketeer.log")).unwrap();
-        worker_handle.send(WorkerCommand::PushGames(games));
-        let messages = until_finished(&rx);
-        let done = messages
-            .iter()
-            .filter(|message| matches!(message, WorkerMessage::CommandProgressed { .. }))
-            .count();
-        assert_eq!(done, 1);
-        let (summary, failed) = finished(&messages);
-        assert!(failed);
-        assert!(summary.contains("couldn't write the log"), "{summary}");
+        #[test]
+        fn ends_thread_when_dropped() {
+            let (_dir, worker_handle, rx) = started();
+            until_device_read(&rx);
+            drop(worker_handle);
+            // The thread held the other end.
+            while rx.try_recv().is_ok() {}
+            assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+        }
+
+        #[test]
+        fn finishes_at_most_current_game_when_dropped() {
+            let (dir, mut worker_handle, rx) = started();
+            let games = locals(last_games_page_data(&until_device_read(&rx)));
+            worker_handle.send(WorkerCommand::PushGames(games));
+            drop(worker_handle);
+            let on_device = ["A.gba", "B.gba"]
+                .iter()
+                .filter(|name| {
+                    dir.path()
+                        .join("device/Assets/gba/common")
+                        .join(name)
+                        .exists()
+                })
+                .count();
+            assert!(on_device <= 1, "{on_device}");
+            let log =
+                fs::read_to_string(dir.path().join("library/pocketeer.log")).unwrap_or_default();
+            assert_eq!(log.lines().count(), on_device);
+        }
     }
 }

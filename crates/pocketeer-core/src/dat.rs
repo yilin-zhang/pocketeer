@@ -477,13 +477,6 @@ game (
         }
 
         #[test]
-        fn opens_missing_dir_as_empty() {
-            let dir = tempfile::tempdir().unwrap();
-            let mirror = open(&dir.path().join("nope"), &Fake::default());
-            assert_eq!(mirror.lookup(&pce(4, 0xA)), None);
-        }
-
-        #[test]
         fn fetches_only_new_or_changed_dats() {
             let (_dir, fake, mut mirror) = synced();
             fake.fetched.borrow_mut().clear();

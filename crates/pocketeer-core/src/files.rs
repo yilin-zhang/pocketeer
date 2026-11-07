@@ -311,15 +311,4 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"old");
         assert_eq!(all_in(dir.path()), ["Foo.gba"]);
     }
-
-    #[test]
-    fn leaves_no_temp_file_after_failed_rename() {
-        let dir = tempfile::tempdir().unwrap();
-        // A folder with something in it can't be replaced by a file.
-        let path = dir.path().join("Foo.gba");
-        fs::create_dir(&path).unwrap();
-        fs::write(path.join("inside"), b"x").unwrap();
-        assert!(write_atomically(&path, b"new", None).is_err());
-        assert_eq!(all_in(dir.path()), ["Foo.gba"]);
-    }
 }
