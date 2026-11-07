@@ -718,7 +718,7 @@ impl Device {
             let path = self.layout.game(&row.platform, &row.path);
             row.status = match fs::metadata(&path) {
                 Ok(meta) if row.size_exact.is_some_and(|size| size != meta.len()) => {
-                    BiosStatus::WrongSize { size: meta.len() }
+                    BiosStatus::WrongSize(meta.len())
                 }
                 Ok(_) => BiosStatus::Present,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => BiosStatus::Missing,
@@ -1525,7 +1525,7 @@ mod tests {
             let file = put(device.root(), "Assets/gba/common/gba_bios.bin", b"four");
             assert_eq!(status(&device), BiosStatus::Present);
             fs::write(file, b"five!").unwrap();
-            assert_eq!(status(&device), BiosStatus::WrongSize { size: 5 });
+            assert_eq!(status(&device), BiosStatus::WrongSize(5));
         }
 
         mod putting {

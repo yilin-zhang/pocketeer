@@ -2057,7 +2057,7 @@ mod tests {
                 press(app, "3");
                 app.handle_worker_message(WorkerMessage::BiosFilesChanged(vec![
                     bios_row("there.bin", BiosStatus::Present),
-                    bios_row("short.bin", BiosStatus::WrongSize { size: 1 }),
+                    bios_row("short.bin", BiosStatus::WrongSize(1)),
                     bios_row("gone.bin", BiosStatus::Missing),
                 ]));
             }

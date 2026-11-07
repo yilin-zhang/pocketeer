@@ -392,7 +392,7 @@ fn core_table_row(row: &CoreRow) -> TableRow<'static> {
 fn draw_bios_status(frame: &mut Frame, app: &App, area: Rect) {
     let rows = app.bios.rows();
     let missing = |row: &&BiosRow| row.status == BiosStatus::Missing;
-    let is_wrong = |row: &&BiosRow| matches!(row.status, BiosStatus::WrongSize { .. });
+    let is_wrong = |row: &&BiosRow| matches!(row.status, BiosStatus::WrongSize(_));
     let wrong = rows.iter().filter(is_wrong).count();
     let line = if app.device_root().is_none() {
         Palette::Faint.span(" no device")
@@ -459,7 +459,7 @@ fn draw_bios_page(frame: &mut Frame, app: &mut App, area: Rect) {
 fn bios_table_row(row: &BiosRow) -> TableRow<'static> {
     let (status, palette) = match row.status {
         BiosStatus::Present => ("present", Palette::Good),
-        BiosStatus::WrongSize { .. } => ("wrong size", Palette::Bad),
+        BiosStatus::WrongSize(_) => ("wrong size", Palette::Bad),
         BiosStatus::Missing if row.is_required() => ("missing", Palette::Bad),
         BiosStatus::Missing => ("missing", Palette::Warn),
     };

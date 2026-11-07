@@ -329,7 +329,7 @@ impl OperationReport {
     ) -> Self {
         let mut fields = Vec::new();
         let message = match result {
-            Ok(InstallCoreOutcome::Installed { version }) => {
+            Ok(InstallCoreOutcome::Installed(version)) => {
                 fields.push(("version", version.clone()));
                 format!("{version} installed")
             }
@@ -993,9 +993,7 @@ mod tests {
                 check("a.B", report(result), is_ok, message, fields);
             };
             check(
-                Ok(InstallCoreOutcome::Installed {
-                    version: "1.2".into(),
-                }),
+                Ok(InstallCoreOutcome::Installed("1.2".into())),
                 true,
                 "1.2 installed",
                 &[("version", "1.2")],

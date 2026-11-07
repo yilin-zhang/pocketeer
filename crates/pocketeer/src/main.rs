@@ -1140,7 +1140,7 @@ impl CliSession {
             .map(|row| {
                 let (status, size) = match row.status {
                     BiosStatus::Present => ("present", None),
-                    BiosStatus::WrongSize { size } => ("wrong_size", Some(size)),
+                    BiosStatus::WrongSize(size) => ("wrong_size", Some(size)),
                     BiosStatus::Missing => ("missing", None),
                 };
                 let needed_by = row.needed_by.iter().map(|(core, required)| NeededBy {

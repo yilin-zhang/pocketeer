@@ -900,9 +900,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         }
         let mut zip = self.cores.download(&latest)?;
         device.install_core(&mut zip)?;
-        Ok(InstallCoreOutcome::Installed {
-            version: zip.version().to_string(),
-        })
+        Ok(InstallCoreOutcome::Installed(zip.version().to_string()))
     }
 
     /// Deletes each core from the device for good.

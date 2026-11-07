@@ -145,7 +145,8 @@ pub struct CoreList {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallCoreOutcome {
-    Installed { version: String },
+    /// Installed at this version.
+    Installed(String),
     AlreadyCurrent,
 }
 
@@ -183,9 +184,7 @@ pub(crate) struct CoreFile {
 pub enum BiosStatus {
     Present,
     /// The file exists, but the core won't load it at this size.
-    WrongSize {
-        size: u64,
-    },
+    WrongSize(u64),
     Missing,
 }
 
