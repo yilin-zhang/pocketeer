@@ -19,7 +19,7 @@ use crossterm::event::{self, Event as TerminalEvent, KeyEvent, KeyEventKind};
 use ratatui_image::picker::Picker;
 
 use app::App;
-use covers::Covers;
+use covers::CoverLoader;
 use path_input::DirReader;
 use worker::{Worker, WorkerMessage};
 
@@ -34,7 +34,7 @@ enum Event {
 }
 
 /// How often the spinner moves while something is running.
-const SPIN: Duration = Duration::from_millis(150);
+const SPINNER_INTERVAL: Duration = Duration::from_millis(150);
 
 pub fn run(library: PathBuf, device: Option<PathBuf>) -> ExitCode {
     // Ask the terminal which image protocol it speaks before entering the
@@ -81,13 +81,13 @@ fn start_threads(
         let _ = to_ui.send(Event::Worker(Box::new(message)));
     });
     let to_ui = tx.clone();
-    let covers = Covers::spawn(picker, move || {
+    let cover_loader = CoverLoader::spawn(picker, move || {
         let _ = to_ui.send(Event::CoverReady);
     });
     let paths = DirReader::spawn(move || {
         let _ = tx.send(Event::DirRead);
     });
-    (App::new(worker, covers, paths), rx)
+    (App::new(worker, cover_loader, paths), rx)
 }
 
 /// Runs until the user quits, or returns the reason if the library can't be
@@ -99,9 +99,9 @@ fn run_event_loop(
 ) -> io::Result<Option<String>> {
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
-        // Only a running job has anything to animate.
+        // Only a running command has anything to animate.
         let next = if app.is_busy() {
-            rx.recv_timeout(SPIN)
+            rx.recv_timeout(SPINNER_INTERVAL)
         } else {
             rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
         };

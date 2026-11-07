@@ -84,23 +84,23 @@ impl PathEntry {
 pub struct PathInput {
     input: Input,
     /// The folder last requested.
-    asked: Option<PathBuf>,
+    requested_dir: Option<PathBuf>,
     /// The folder `entries` came from.
-    listed: Option<PathBuf>,
+    entries_dir: Option<PathBuf>,
     /// Sorted by name.
     entries: Vec<PathEntry>,
     /// Which of the matches the arrow keys moved to.
-    picked: Option<usize>,
+    picked_match_index: Option<usize>,
 }
 
 impl PathInput {
     pub fn new(start: &str) -> Self {
         Self {
             input: Input::new(start.to_string()),
-            asked: None,
-            listed: None,
+            requested_dir: None,
+            entries_dir: None,
             entries: Vec::new(),
-            picked: None,
+            picked_match_index: None,
         }
     }
 
@@ -114,39 +114,39 @@ impl PathInput {
     }
 
     /// What is typed after the last `/`.
-    pub fn partial(&self) -> &str {
-        &self.input.value()[self.partial_start()..]
+    pub fn typed_name(&self) -> &str {
+        &self.input.value()[self.typed_name_start()..]
     }
 
     /// Whether the text ends in `/`, which means it can only be a folder.
-    pub fn is_dir(&self) -> bool {
-        self.partial().is_empty() && !self.input.value().is_empty()
+    pub fn ends_with_slash(&self) -> bool {
+        self.typed_name().is_empty() && !self.input.value().is_empty()
     }
 
     /// Whether the text names a folder, judging by what has been read of its
     /// parent.
     pub fn names_dir(&self) -> bool {
-        let is_it = |entry: &&PathEntry| entry.is_dir && entry.name == self.partial();
-        self.is_dir() || self.matches().iter().any(is_it)
+        let is_named_dir = |entry: &&PathEntry| entry.is_dir && entry.name == self.typed_name();
+        self.ends_with_slash() || self.matches().iter().any(is_named_dir)
     }
 
-    pub fn picked(&self) -> Option<usize> {
-        self.picked
+    pub fn picked_match_index(&self) -> Option<usize> {
+        self.picked_match_index
     }
 
     /// The entries matching the text, best first. Hidden ones only appear once
     /// a `.` is typed. None until the folder has been read.
     pub fn matches(&self) -> Vec<&PathEntry> {
-        if self.listed.as_deref() != Some(self.dir().as_path()) {
+        if self.entries_dir.as_deref() != Some(self.dir().as_path()) {
             return Vec::new();
         }
-        let partial = self.partial();
-        let hidden = partial.starts_with('.');
+        let typed_name = self.typed_name();
+        let hidden = typed_name.starts_with('.');
         let mut found: Vec<(u16, &PathEntry)> = self
             .entries
             .iter()
             .filter(|entry| hidden || !entry.name.starts_with('.'))
-            .filter_map(|entry| Some((fuzzy_match(partial, &entry.name)?.0, entry)))
+            .filter_map(|entry| Some((fuzzy_match(typed_name, &entry.name)?.0, entry)))
             .collect();
         found.sort_by_key(|(score, _)| Reverse(*score));
         found.into_iter().map(|(_, entry)| entry).collect()
@@ -155,30 +155,32 @@ impl PathInput {
     /// The folder to read now, unless it has already been requested.
     pub fn dir_to_read(&mut self) -> Option<PathBuf> {
         let dir = self.dir();
-        if self.asked.as_ref() == Some(&dir) {
+        if self.requested_dir.as_ref() == Some(&dir) {
             return None;
         }
-        self.asked = Some(dir.clone());
+        self.requested_dir = Some(dir.clone());
         Some(dir)
     }
 
     /// Stores what a folder holds, unless the text has moved on from it.
     pub fn set_entries(&mut self, dir: PathBuf, entries: Vec<PathEntry>) {
         if dir == self.dir() {
-            self.listed = Some(dir);
+            self.entries_dir = Some(dir);
             self.entries = entries;
-            self.picked = None;
+            self.picked_match_index = None;
         }
     }
 
     /// Clears the picked match and returns whether there was one.
     pub fn unpick(&mut self) -> bool {
-        self.picked.take().is_some()
+        self.picked_match_index.take().is_some()
     }
 
     /// Puts the picked match in the text and returns whether there was one.
     pub fn fill_in_picked(&mut self) -> bool {
-        let picked = self.picked.and_then(|i| self.matches().get(i).copied());
+        let picked = self
+            .picked_match_index
+            .and_then(|i| self.matches().get(i).copied());
         let Some(entry) = picked.cloned() else {
             return false;
         };
@@ -198,19 +200,19 @@ impl PathInput {
             KeyCode::Char('w') if ctrl => self.cut_word(),
             _ => {
                 if edit(&mut self.input, key) {
-                    self.picked = None;
+                    self.picked_match_index = None;
                 }
             }
         }
     }
 
     /// Where what is typed after the last `/` starts.
-    fn partial_start(&self) -> usize {
+    fn typed_name_start(&self) -> usize {
         self.input.value().rfind('/').map_or(0, |i| i + 1)
     }
 
     fn dir(&self) -> PathBuf {
-        match self.partial_start() {
+        match self.typed_name_start() {
             0 => PathBuf::from("."),
             slash_index => expand_tilde(&self.input.value()[..slash_index]),
         }
@@ -218,11 +220,12 @@ impl PathInput {
 
     fn pick_next(&mut self) {
         let last = self.matches().len().checked_sub(1);
-        self.picked = last.map(|last| self.picked.map_or(0, |i| (i + 1).min(last)));
+        self.picked_match_index =
+            last.map(|last| self.picked_match_index.map_or(0, |i| (i + 1).min(last)));
     }
 
     fn pick_previous(&mut self) {
-        self.picked = self.picked.and_then(|i| i.checked_sub(1));
+        self.picked_match_index = self.picked_match_index.and_then(|i| i.checked_sub(1));
     }
 
     /// Completes to the picked or only match, or else as far as all matches
@@ -237,10 +240,10 @@ impl PathInput {
             self.fill_in(&only);
             return;
         }
-        let partial = self.partial().to_lowercase();
+        let typed_name = self.typed_name().to_lowercase();
         let mut starting = matches
             .iter()
-            .filter(|entry| entry.name.to_lowercase().starts_with(&partial))
+            .filter(|entry| entry.name.to_lowercase().starts_with(&typed_name))
             .map(|entry| entry.name.as_str());
         let Some(first) = starting.next() else {
             return;
@@ -250,20 +253,20 @@ impl PathInput {
             let bytes = same.map(|(character, _)| character.len_utf8()).sum();
             &common[..bytes]
         });
-        if common.chars().count() > partial.chars().count() {
-            self.set_partial(common.to_string());
+        if common.chars().count() > typed_name.chars().count() {
+            self.set_typed_name(common.to_string());
         }
     }
 
     fn fill_in(&mut self, entry: &PathEntry) {
         let slash = if entry.is_dir { "/" } else { "" };
-        self.set_partial(format!("{}{slash}", entry.name));
+        self.set_typed_name(format!("{}{slash}", entry.name));
     }
 
-    fn set_partial(&mut self, partial: String) {
-        let dir = &self.input.value()[..self.partial_start()];
-        self.input = Input::new(format!("{dir}{partial}"));
-        self.picked = None;
+    fn set_typed_name(&mut self, typed_name: String) {
+        let dir = &self.input.value()[..self.typed_name_start()];
+        self.input = Input::new(format!("{dir}{typed_name}"));
+        self.picked_match_index = None;
     }
 
     /// Cuts the word before the cursor. A word ends at `/` or a space.
@@ -273,7 +276,7 @@ impl PathInput {
         let word = before.trim_end_matches(is_end);
         let kept = &word[..word.rfind(is_end).map_or(0, |i| i + 1)];
         self.input = Input::new(format!("{kept}{after}")).with_cursor(kept.chars().count());
-        self.picked = None;
+        self.picked_match_index = None;
     }
 }
 
@@ -287,13 +290,13 @@ impl DirReader {
     /// Starts the thread. `wake` is called when a folder has been read.
     pub fn spawn(wake: impl Fn() + Send + 'static) -> Self {
         let (tx, requests) = mpsc::channel::<PathBuf>();
-        let (done, rx) = mpsc::channel();
+        let (entries_tx, rx) = mpsc::channel();
         thread::spawn(move || {
             while let Ok(first) = requests.recv() {
                 // Only the latest request matters.
                 let dir = requests.try_iter().last().unwrap_or(first);
                 let entries = read_dir(&dir);
-                if done.send((dir, entries)).is_err() {
+                if entries_tx.send((dir, entries)).is_err() {
                     return;
                 }
                 wake();
@@ -499,10 +502,10 @@ mod tests {
             press(&mut input, KeyCode::Down);
             press(&mut input, KeyCode::Down);
             press(&mut input, KeyCode::Down);
-            assert_eq!(input.picked(), Some(1));
+            assert_eq!(input.picked_match_index(), Some(1));
             press(&mut input, KeyCode::Tab);
             assert_eq!(text(&input), "/a/two");
-            assert_eq!(input.picked(), None);
+            assert_eq!(input.picked_match_index(), None);
         }
 
         #[test]
@@ -510,10 +513,10 @@ mod tests {
             let mut input = input("/a/", &[entry("one", false)]);
             press(&mut input, KeyCode::Down);
             press(&mut input, KeyCode::Up);
-            assert_eq!(input.picked(), None);
+            assert_eq!(input.picked_match_index(), None);
             press(&mut input, KeyCode::Down);
             press(&mut input, KeyCode::Char('o'));
-            assert_eq!(input.picked(), None);
+            assert_eq!(input.picked_match_index(), None);
         }
     }
 

@@ -24,7 +24,7 @@ use strum::{EnumIter, IntoEnumIterator};
 use tui_input::Input;
 
 use super::{
-    covers::Covers,
+    covers::CoverLoader,
     path_input::{self, DirReader, PathInput},
     worker::{DevicePageData, GamesPageData, GamesTableRow, Worker, WorkerCommand, WorkerMessage},
 };
@@ -34,12 +34,12 @@ use super::{
 // ============================================================================
 
 /// What the screen shows of a command under way.
-pub struct JobStatus {
-    pub description: String,
-    pub done_count: usize,
-    pub total_count: usize,
-    /// The game last finished.
-    pub last_game: Option<String>,
+pub struct CommandStatus {
+    pub label: String,
+    pub finished_count: usize,
+    pub target_count: usize,
+    /// The target last finished.
+    pub last_target: Option<String>,
     pub is_canceling: bool,
 }
 
@@ -286,7 +286,7 @@ impl GamesPage {
     }
 
     /// The version selected in the saves panel, if it is open.
-    pub fn selected_version(&self) -> Option<usize> {
+    pub fn selected_version_index(&self) -> Option<usize> {
         match self.focus {
             GamesPageFocus::SavesPanel(selected) => Some(selected),
             GamesPageFocus::List | GamesPageFocus::Search => None,
@@ -346,28 +346,30 @@ impl GamesPage {
 
     /// Stores the rows the worker sent, keeping the selection on its row.
     fn set_rows(&mut self, rows: Vec<GamesTableRow>) {
-        let keep = self.selected_row().map(key_of);
+        let selected_key = self.selected_row().map(key_of);
         self.rows = Some(rows);
-        self.refresh_visible_rows(keep);
+        self.refresh_visible_rows(selected_key);
     }
 
     /// Recomputes the visible rows, keeping the selection on the row `keep`.
-    fn refresh_visible_rows(&mut self, keep: Option<RowKey>) {
+    fn refresh_visible_rows(&mut self, selected_key: Option<RowKey>) {
         let found = self.rows().iter().enumerate().filter(|(_, row)| {
             self.filter.shows(row) && matches_query(row, self.search_input.value())
         });
         let visible: Vec<usize> = found.map(|(i, _)| i).collect();
-        let kept =
-            keep.and_then(|key| visible.iter().position(|&i| key_of(&self.rows()[i]) == key));
-        let selected = kept.or(self.table_state.selected()).unwrap_or(0);
+        let new_selected_row = selected_key
+            .and_then(|key| visible.iter().position(|&i| key_of(&self.rows()[i]) == key));
+        let selected = new_selected_row
+            .or(self.table_state.selected())
+            .unwrap_or(0);
         self.visible_row_indices = visible;
         self.select_row(selected);
     }
 
     fn show_next_filter(&mut self) {
-        let keep = self.selected_row().map(key_of);
+        let selected_key = self.selected_row().map(key_of);
         self.filter = self.filter.next();
-        self.refresh_visible_rows(keep);
+        self.refresh_visible_rows(selected_key);
     }
 
     fn move_selection_by(&mut self, by: isize) {
@@ -411,7 +413,7 @@ impl GamesPage {
             .iter()
             .filter(|row| self.is_marked(row))
             .collect();
-        if marked.is_empty() || self.selected_version().is_some() {
+        if marked.is_empty() || self.selected_version_index().is_some() {
             self.selected_row().into_iter().collect()
         } else {
             marked
@@ -473,9 +475,12 @@ impl CoresPage {
 
     /// Stores the cores the worker sent, keeping the selection on its core.
     fn set_rows(&mut self, rows: Vec<CoreRow>, inventory_failure: Option<String>) {
-        let keep = self.selected_row().map(|row| row.id().to_string());
-        let kept = keep.and_then(|id| rows.iter().position(|row| row.id() == id));
-        let selected = kept.or(self.table_state.selected()).unwrap_or(0);
+        let selected_id = self.selected_row().map(|row| row.id().to_string());
+        let new_selected_row =
+            selected_id.and_then(|id| rows.iter().position(|row| row.id() == id));
+        let selected = new_selected_row
+            .or(self.table_state.selected())
+            .unwrap_or(0);
         self.core_list = Some(CoreList {
             rows,
             inventory_failure,
@@ -515,9 +520,12 @@ impl BiosPage {
     /// Stores the files the worker sent, keeping the selection on its file.
     fn set_rows(&mut self, rows: Vec<BiosRow>) {
         let same = |a: &BiosRow, b: &BiosRow| a.platform == b.platform && a.path == b.path;
-        let keep = self.selected_row().cloned();
-        let kept = keep.and_then(|key| rows.iter().position(|row| same(row, &key)));
-        let selected = kept.or(self.table_state.selected()).unwrap_or(0);
+        let selected_row = self.selected_row().cloned();
+        let new_selected_row =
+            selected_row.and_then(|key| rows.iter().position(|row| same(row, &key)));
+        let selected = new_selected_row
+            .or(self.table_state.selected())
+            .unwrap_or(0);
         self.rows = rows;
         self.select_row(selected);
     }
@@ -545,7 +553,7 @@ const NOT_ON_BOTH: &str = "nothing here is both in the library and on the device
 pub struct App {
     // Threads.
     worker: Worker,
-    pub covers: Covers,
+    pub cover_loader: CoverLoader,
     dir_reader: DirReader,
     // Pages.
     current_page: Page,
@@ -561,7 +569,7 @@ pub struct App {
     prompt: Option<Prompt>,
     // Status.
     device_status: DeviceStatus,
-    job_status: Option<JobStatus>,
+    command_status: Option<CommandStatus>,
     status_message: Option<StatusMessage>,
     /// How many rows the command just sent doesn't apply to, reported with its
     /// summary.
@@ -570,10 +578,10 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(worker: Worker, covers: Covers, dir_reader: DirReader) -> Self {
+    pub fn new(worker: Worker, cover_loader: CoverLoader, dir_reader: DirReader) -> Self {
         Self {
             worker,
-            covers,
+            cover_loader,
             dir_reader,
             current_page: Page::Games,
             games: GamesPage::default(),
@@ -584,7 +592,7 @@ impl App {
             next_dialog: None,
             prompt: None,
             device_status: DeviceStatus::NoDevice,
-            job_status: None,
+            command_status: None,
             status_message: None,
             inapplicable_row_count: 0,
             should_quit: false,
@@ -596,7 +604,7 @@ impl App {
     }
 
     pub fn is_busy(&self) -> bool {
-        self.job_status.is_some() || matches!(self.device_status, DeviceStatus::Reading(_))
+        self.command_status.is_some() || matches!(self.device_status, DeviceStatus::Reading(_))
     }
 
     pub fn device_status(&self) -> &DeviceStatus {
@@ -611,8 +619,8 @@ impl App {
         }
     }
 
-    pub fn job_status(&self) -> Option<&JobStatus> {
-        self.job_status.as_ref()
+    pub fn command_status(&self) -> Option<&CommandStatus> {
+        self.command_status.as_ref()
     }
 
     pub fn status_message(&self) -> Option<&StatusMessage> {
@@ -634,7 +642,7 @@ impl App {
     // ---- Events from the threads -----------------------------------------------
 
     pub fn on_cover_ready(&mut self) {
-        self.covers.collect_finished();
+        self.cover_loader.collect_finished();
     }
 
     pub fn on_dir_read(&mut self) {
@@ -665,22 +673,33 @@ impl App {
                     self.device_status = DeviceStatus::NoDevice;
                 }
             }
-            WorkerMessage::CommandStarted { label, total } => {
-                self.job_status = Some(JobStatus {
-                    description: label,
-                    done_count: 0,
-                    total_count: total,
-                    last_game: None,
+            WorkerMessage::CommandStarted {
+                label,
+                target_count,
+            } => {
+                self.command_status = Some(CommandStatus {
+                    label,
+                    finished_count: 0,
+                    target_count,
+                    last_target: None,
                     is_canceling: false,
                 });
             }
-            WorkerMessage::CommandProgressed { done, total, game } => {
-                if let Some(job) = &mut self.job_status {
-                    (job.done_count, job.total_count, job.last_game) = (done, total, Some(game));
+            WorkerMessage::CommandProgressed {
+                finished_count,
+                target_count,
+                target,
+            } => {
+                if let Some(command_status) = &mut self.command_status {
+                    (
+                        command_status.finished_count,
+                        command_status.target_count,
+                        command_status.last_target,
+                    ) = (finished_count, target_count, Some(target));
                 }
             }
             WorkerMessage::CommandFinished { summary, failed } => {
-                self.job_status = None;
+                self.command_status = None;
                 let summary = match std::mem::take(&mut self.inapplicable_row_count) {
                     0 => summary,
                     left_out_count => format!("{summary} ({left_out_count} left out)"),
@@ -746,7 +765,7 @@ impl App {
             Page::Device => return self.handle_device_page_key(key),
         }
         match self.games.focus {
-            GamesPageFocus::List => self.handle_list_key(key),
+            GamesPageFocus::List => self.handle_games_list_key(key),
             GamesPageFocus::Search => self.handle_search_key(key),
             GamesPageFocus::SavesPanel(selected) => self.handle_saves_panel_key(key, selected),
         }
@@ -755,11 +774,11 @@ impl App {
     /// Closes what is open, or else stops what is running.
     fn handle_escape(&mut self) {
         if !self.games.search_input.value().is_empty() {
-            let keep = self.games.selected_row().map(key_of);
+            let selected_key = self.games.selected_row().map(key_of);
             self.games.search_input.reset();
-            self.games.refresh_visible_rows(keep);
-        } else if let Some(job) = &mut self.job_status {
-            job.is_canceling = true;
+            self.games.refresh_visible_rows(selected_key);
+        } else if let Some(command_status) = &mut self.command_status {
+            command_status.is_canceling = true;
             self.worker.cancel();
         }
     }
@@ -767,7 +786,7 @@ impl App {
     // ---- Keys on the Games page ------------------------------------------------
 
     fn handle_search_key(&mut self, key: KeyEvent) {
-        let keep = self.games.selected_row().map(key_of);
+        let selected_key = self.games.selected_row().map(key_of);
         match key.code {
             KeyCode::Enter => self.games.focus = GamesPageFocus::List,
             KeyCode::Esc => {
@@ -776,22 +795,22 @@ impl App {
             }
             KeyCode::Down | KeyCode::Up | KeyCode::PageDown | KeyCode::PageUp => {
                 self.games.focus = GamesPageFocus::List;
-                self.handle_list_key(key);
+                self.handle_games_list_key(key);
                 return;
             }
             _ => {
                 path_input::edit(&mut self.games.search_input, key);
             }
         }
-        self.games.refresh_visible_rows(keep);
+        self.games.refresh_visible_rows(selected_key);
     }
 
-    fn handle_list_key(&mut self, key: KeyEvent) {
+    fn handle_games_list_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => self.games.move_selection_by(1),
             KeyCode::Up | KeyCode::Char('k') => self.games.move_selection_by(-1),
-            KeyCode::PageDown => self.games.move_selection_by(PAGE),
-            KeyCode::PageUp => self.games.move_selection_by(-PAGE),
+            KeyCode::PageDown => self.games.move_selection_by(PAGE_KEY_ROW_COUNT),
+            KeyCode::PageUp => self.games.move_selection_by(-PAGE_KEY_ROW_COUNT),
             KeyCode::Char('g') | KeyCode::Home => self.games.select_row(0),
             KeyCode::Char('G') | KeyCode::End => self.games.select_row(usize::MAX),
             KeyCode::Char('m') => self.games.toggle_mark_and_move_on(),
@@ -812,7 +831,7 @@ impl App {
             KeyCode::Char('d') => self.worker.send(WorkerCommand::SyncDats),
             KeyCode::Char('E') => self.eject(),
             KeyCode::Char('r') => self.worker.send(WorkerCommand::Reload),
-            KeyCode::Enter | KeyCode::Right => self.open_panel(),
+            KeyCode::Enter | KeyCode::Right => self.open_saves_panel(),
             KeyCode::Tab | KeyCode::Char('2') => self.show_cores(),
             KeyCode::Char('3') => self.current_page = Page::Bios,
             KeyCode::Char('4') => self.current_page = Page::Device,
@@ -850,7 +869,7 @@ impl App {
         }
     }
 
-    fn open_panel(&mut self) {
+    fn open_saves_panel(&mut self) {
         if let Some(GamesTableRow::Game(_)) = self.games.selected_row() {
             self.games.focus = GamesPageFocus::SavesPanel(0);
         }
@@ -999,7 +1018,7 @@ impl App {
         let takes_dir = matches!(import.target, ImportTarget::Game);
         if key.code != KeyCode::Enter {
             import.input.handle_key(key);
-        } else if !import.input.fill_in_picked() && (takes_dir || !import.input.is_dir()) {
+        } else if !import.input.fill_in_picked() && (takes_dir || !import.input.ends_with_slash()) {
             self.import_input_path();
             return;
         }
@@ -1320,8 +1339,8 @@ impl App {
             .iter()
             .map(|entry| entry.path.display().to_string())
             .collect();
-        let one = entries.len() == 1;
-        let (it, them) = if one {
+        let is_single = entries.len() == 1;
+        let (it, them) = if is_single {
             ("it", "It isn't")
         } else {
             ("them", "Some aren't")
@@ -1337,7 +1356,7 @@ impl App {
         if only_here {
             lines.push(format!("{them} in the library."));
         }
-        lines.push(if one {
+        lines.push(if is_single {
             "Its save stays on the device.".to_string()
         } else {
             "Their saves stay on the device.".to_string()
@@ -1503,7 +1522,7 @@ impl App {
 // ============================================================================
 
 /// How far a page key moves.
-const PAGE: isize = 20;
+const PAGE_KEY_ROW_COUNT: isize = 20;
 
 fn pluralized(count: usize, what: &str) -> String {
     match count {
@@ -1596,8 +1615,8 @@ fn row_after_key(key: KeyEvent, at: usize) -> Option<usize> {
     Some(match key.code {
         KeyCode::Down | KeyCode::Char('j') => at + 1,
         KeyCode::Up | KeyCode::Char('k') => at.saturating_sub(1),
-        KeyCode::PageDown => at + PAGE as usize,
-        KeyCode::PageUp => at.saturating_sub(PAGE as usize),
+        KeyCode::PageDown => at + PAGE_KEY_ROW_COUNT as usize,
+        KeyCode::PageUp => at.saturating_sub(PAGE_KEY_ROW_COUNT as usize),
         KeyCode::Char('g') | KeyCode::Home => 0,
         KeyCode::Char('G') | KeyCode::End => usize::MAX,
         _ => return None,
@@ -1708,9 +1727,9 @@ mod tests {
 
     fn app() -> (App, Receiver<QueuedCommand>) {
         let (worker, rx) = Worker::recording();
-        let covers = Covers::spawn(Picker::halfblocks(), || {});
+        let cover_loader = CoverLoader::spawn(Picker::halfblocks(), || {});
         let paths = DirReader::spawn(|| {});
-        let mut app = App::new(worker, covers, paths);
+        let mut app = App::new(worker, cover_loader, paths);
         app.handle_worker_message(WorkerMessage::GamesPageChanged(GamesPageData {
             rows: rows(),
             device_root: Some(PathBuf::from("/Volumes/POCKET")),
@@ -1849,7 +1868,7 @@ mod tests {
         assert_eq!(game.name, "Both.gba");
         assert_eq!(version, &app.games.selected_save_versions()[1]);
         press(&mut app, "\x1b");
-        assert_eq!(app.games.selected_version(), None);
+        assert_eq!(app.games.selected_version_index(), None);
     }
 
     #[test]
@@ -1860,11 +1879,11 @@ mod tests {
         assert!(!is_canceled.load(Ordering::Relaxed));
         app.handle_worker_message(WorkerMessage::CommandStarted {
             label: "pulling games".into(),
-            total: 2,
+            target_count: 2,
         });
         press(&mut app, "\x1b");
         assert!(is_canceled.load(Ordering::Relaxed));
-        assert!(app.job_status().unwrap().is_canceling);
+        assert!(app.command_status().unwrap().is_canceling);
         app.handle_worker_message(WorkerMessage::CommandFinished {
             summary: "stopped".into(),
             failed: false,
@@ -2417,10 +2436,10 @@ mod tests {
             let Some(Prompt::Import(import)) = app.prompt() else {
                 panic!()
             };
-            assert_eq!(import.input.picked(), None);
+            assert_eq!(import.input.picked_match_index(), None);
             press(&mut app, "\x1b");
             assert!(app.prompt().is_none());
-            assert_eq!(app.games.selected_version(), Some(0));
+            assert_eq!(app.games.selected_version_index(), Some(0));
             assert!(sent(&rx).is_empty());
         }
 
@@ -2491,7 +2510,7 @@ mod tests {
             let (mut app, rx) = app();
             app.handle_worker_message(WorkerMessage::CommandStarted {
                 label: "pulling games".to_string(),
-                total: 1,
+                target_count: 1,
             });
             press(&mut app, "t");
             assert!(sent(&rx).is_empty());
@@ -2868,7 +2887,7 @@ mod tests {
             app.handle_worker_message(WorkerMessage::DeviceReadStarted(root.clone()));
             assert_eq!(app.device_root(), None);
             assert!(app.is_busy());
-            assert!(app.job_status().is_none());
+            assert!(app.command_status().is_none());
             let top = header(&mut app);
             assert!(top.contains("reading OTHER…"), "{top}");
             // In the order the worker sends them.
@@ -3097,7 +3116,7 @@ mod tests {
                 press(&mut app, "\x1b");
                 app.handle_worker_message(WorkerMessage::CommandStarted {
                     label: "pushing".into(),
-                    total: 3,
+                    target_count: 3,
                 });
                 draw(&mut app);
                 app.handle_worker_message(WorkerMessage::CommandFinished {

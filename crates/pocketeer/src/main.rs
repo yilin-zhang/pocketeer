@@ -74,17 +74,17 @@ enum Command {
     /// List the saves with no game
     OrphanSaves {
         #[command(subcommand)]
-        place: OrphanSaves,
+        place: OrphanSavesCommand,
     },
     /// Copy from the device into the library
     Pull {
         #[command(subcommand)]
-        what: Pull,
+        what: PullCommand,
     },
     /// Copy from the library onto the device
     Push {
         #[command(subcommand)]
-        what: Push,
+        what: PushCommand,
     },
     /// List the devices mounted
     Device,
@@ -95,48 +95,48 @@ enum Command {
     /// Update the DATs, which name games
     Dat {
         #[command(subcommand)]
-        what: Dat,
+        what: DatCommand,
     },
     /// Give a game another name, keeping its extension. Its saves and cover
     /// move with it, and the other side keeps its own name
     Rename {
         #[command(subcommand)]
-        what: Rename,
+        what: RenameCommand,
     },
     /// Bring things from the computer into the library
     Import {
         #[command(subcommand)]
-        what: Import,
+        what: ImportCommand,
     },
     /// Put things in the library in the system's trash
     Trash {
         #[command(subcommand)]
-        what: Trash,
+        what: TrashCommand,
     },
     /// Delete from the device for good. The library's copies stay
     DeleteOnDevice {
         #[command(subcommand)]
-        what: DeleteOnDevice,
+        what: DeleteOnDeviceCommand,
     },
     /// Covers of games in the library
     Cover {
         #[command(subcommand)]
-        what: Cover,
+        what: CoverCommand,
     },
     /// The cores on the device, and those that can be installed
     Cores {
         #[command(subcommand)]
-        what: Cores,
+        what: CoresCommand,
     },
     /// The files the cores on the device need, which you provide
     Bios {
         #[command(subcommand)]
-        what: Bios,
+        what: BiosCommand,
     },
 }
 
 #[derive(Subcommand)]
-enum Rename {
+enum RenameCommand {
     /// A game in the library
     Library {
         /// The game, as <platform>/<name>
@@ -162,7 +162,7 @@ enum Rename {
 }
 
 #[derive(Subcommand)]
-enum Bios {
+enum BiosCommand {
     /// List the files the cores on the device load, and which it has
     List,
     /// Copy a file of yours to where a core loads it from. The file stays, and
@@ -176,7 +176,7 @@ enum Bios {
 }
 
 #[derive(Subcommand)]
-enum Cores {
+enum CoresCommand {
     /// List the cores that can be installed and those on the device
     List,
     /// Put the newest release of cores on the device
@@ -201,7 +201,7 @@ enum Cores {
 }
 
 #[derive(Subcommand)]
-enum Pull {
+enum PullCommand {
     /// Games on the device
     Game {
         /// Games on the device, as <platform>/<path> [default: every one the
@@ -216,7 +216,7 @@ enum Pull {
 }
 
 #[derive(Subcommand)]
-enum Push {
+enum PushCommand {
     /// Games in the library
     Game {
         /// Games in the library, as <platform>/<name>
@@ -236,7 +236,7 @@ enum Push {
 }
 
 #[derive(Subcommand)]
-enum OrphanSaves {
+enum OrphanSavesCommand {
     /// In the library
     Library,
     /// On the device
@@ -244,7 +244,7 @@ enum OrphanSaves {
 }
 
 #[derive(Subcommand)]
-enum Trash {
+enum TrashCommand {
     /// Games and their covers. Their saves stay
     Game {
         /// Games in the library, as <platform>/<name>
@@ -269,7 +269,7 @@ enum Trash {
 }
 
 #[derive(Subcommand)]
-enum DeleteOnDevice {
+enum DeleteOnDeviceCommand {
     /// Games, even those the library doesn't have. Their saves stay
     Game {
         /// Games on the device, as <platform>/<path>
@@ -291,7 +291,7 @@ enum DeleteOnDevice {
 }
 
 #[derive(Subcommand)]
-enum Import {
+enum ImportCommand {
     /// Games from files, or from folders containing games at any depth. Each
     /// gets its DAT name if known and its file name otherwise. The files stay
     Game {
@@ -312,13 +312,13 @@ enum Import {
 }
 
 #[derive(Subcommand)]
-enum Dat {
+enum DatCommand {
     /// Download the DATs that changed
     Sync,
 }
 
 #[derive(Subcommand)]
-enum Cover {
+enum CoverCommand {
     /// Download a cover for each game that has none
     Fetch {
         /// Games in the library, as <platform>/<name> [default: every one
@@ -387,9 +387,9 @@ fn print_json(ok: bool, data: Value) {
     print_envelope(json!({ "ok": ok, "data": data }));
 }
 
-fn print_envelope(mut out: Value) {
-    out["schema_version"] = json!(1);
-    println!("{out}");
+fn print_envelope(mut envelope: Value) {
+    envelope["schema_version"] = json!(1);
+    println!("{envelope}");
 }
 
 /// Opens the terminal UI when no command is given, if this is a terminal.
@@ -419,63 +419,87 @@ fn run_command(cli: &Cli, command: &Command, format: PrintFormat) -> CliResult<(
     let open = |device_use| CliSession::open(cli, device_use, format);
     match command {
         Command::Device => print_devices(format),
-        Command::Status => open(DeviceUse::Scanned)?.print_status(),
-        Command::Games => open(DeviceUse::IfMounted)?.print_games(),
-        Command::Saves { game } => open(DeviceUse::None)?.print_saves(game),
+        Command::Status => open(DeviceUse::ScannedRequired)?.print_status(),
+        Command::Games => open(DeviceUse::ScannedIfMounted)?.print_games(),
+        Command::Saves { game } => open(DeviceUse::NotNeeded)?.print_saves(game),
         Command::OrphanSaves { place } => match place {
-            OrphanSaves::Library => open(DeviceUse::None)?.print_orphan_saves_in_library(),
-            OrphanSaves::Device => open(DeviceUse::Unscanned)?.print_orphan_saves_on_device(),
+            OrphanSavesCommand::Library => {
+                open(DeviceUse::NotNeeded)?.print_orphan_saves_in_library()
+            }
+            OrphanSavesCommand::Device => {
+                open(DeviceUse::UnscannedRequired)?.print_orphan_saves_on_device()
+            }
         },
         Command::Pull { what } => match what {
-            Pull::Game { games } => open(DeviceUse::Scanned)?.pull_games(games),
-            Pull::Save { games } => open(DeviceUse::Scanned)?.pull_saves(games),
+            PullCommand::Game { games } => open(DeviceUse::ScannedRequired)?.pull_games(games),
+            PullCommand::Save { games } => open(DeviceUse::ScannedRequired)?.pull_saves(games),
         },
         Command::Push { what } => match what {
-            Push::Game { games } => open(DeviceUse::Scanned)?.push_games(games),
-            Push::Save { games, at } => open(DeviceUse::Scanned)?.push_saves(games, at.as_deref()),
+            PushCommand::Game { games } => open(DeviceUse::ScannedRequired)?.push_games(games),
+            PushCommand::Save { games, at } => {
+                open(DeviceUse::ScannedRequired)?.push_saves(games, at.as_deref())
+            }
         },
         Command::Import { what } => match what {
-            Import::Game { paths, platform } => {
-                open(DeviceUse::None)?.import_games(paths, platform.as_deref())
+            ImportCommand::Game { paths, platform } => {
+                open(DeviceUse::NotNeeded)?.import_games(paths, platform.as_deref())
             }
-            Import::Save { game, file } => open(DeviceUse::None)?.import_save(game, file),
+            ImportCommand::Save { game, file } => {
+                open(DeviceUse::NotNeeded)?.import_save(game, file)
+            }
         },
         Command::Trash { what } => match what {
-            Trash::Game { games } => open(DeviceUse::None)?.trash_games(games),
-            Trash::Save { games, at } => open(DeviceUse::None)?.trash_saves(games, at.as_deref()),
-            Trash::OrphanSave { saves } => open(DeviceUse::None)?.trash_orphan_saves(saves),
+            TrashCommand::Game { games } => open(DeviceUse::NotNeeded)?.trash_games(games),
+            TrashCommand::Save { games, at } => {
+                open(DeviceUse::NotNeeded)?.trash_saves(games, at.as_deref())
+            }
+            TrashCommand::OrphanSave { saves } => {
+                open(DeviceUse::NotNeeded)?.trash_orphan_saves(saves)
+            }
         },
         Command::DeleteOnDevice { what } => match what {
-            DeleteOnDevice::Game { games } => open(DeviceUse::Scanned)?.delete_games(games),
-            DeleteOnDevice::Save { games } => open(DeviceUse::Scanned)?.delete_saves(games),
-            DeleteOnDevice::OrphanSave { saves } => {
-                open(DeviceUse::Unscanned)?.delete_orphan_saves(saves)
+            DeleteOnDeviceCommand::Game { games } => {
+                open(DeviceUse::ScannedRequired)?.delete_games(games)
+            }
+            DeleteOnDeviceCommand::Save { games } => {
+                open(DeviceUse::ScannedRequired)?.delete_saves(games)
+            }
+            DeleteOnDeviceCommand::OrphanSave { saves } => {
+                open(DeviceUse::UnscannedRequired)?.delete_orphan_saves(saves)
             }
         },
         Command::Cores { what } => match what {
-            Cores::List => open(DeviceUse::IfMountedUnscanned)?.print_cores(),
-            Cores::Install { ids } => open(DeviceUse::Unscanned)?.install_cores(ids),
-            Cores::Update { ids } => open(DeviceUse::Unscanned)?.update_cores(ids),
-            Cores::Remove { ids } => open(DeviceUse::Unscanned)?.remove_cores(ids),
+            CoresCommand::List => open(DeviceUse::UnscannedIfMounted)?.print_cores(),
+            CoresCommand::Install { ids } => open(DeviceUse::UnscannedRequired)?.install_cores(ids),
+            CoresCommand::Update { ids } => open(DeviceUse::UnscannedRequired)?.update_cores(ids),
+            CoresCommand::Remove { ids } => open(DeviceUse::UnscannedRequired)?.remove_cores(ids),
         },
         Command::Rename { what } => match what {
-            Rename::Library { game, name } => {
-                open(DeviceUse::None)?.rename_game_in_library(game, name)
+            RenameCommand::Library { game, name } => {
+                open(DeviceUse::NotNeeded)?.rename_game_in_library(game, name)
             }
-            Rename::Device { game, name } => {
-                open(DeviceUse::Scanned)?.rename_game_on_device(game, name)
+            RenameCommand::Device { game, name } => {
+                open(DeviceUse::ScannedRequired)?.rename_game_on_device(game, name)
             }
-            Rename::Standard { games } => open(DeviceUse::None)?.rename_games_to_dat_names(games),
+            RenameCommand::Standard { games } => {
+                open(DeviceUse::NotNeeded)?.rename_games_to_dat_names(games)
+            }
         },
         Command::Bios { what } => match what {
-            Bios::List => open(DeviceUse::Unscanned)?.print_bios(),
-            Bios::Put { bios, file } => open(DeviceUse::Unscanned)?.put_bios(bios, file),
+            BiosCommand::List => open(DeviceUse::UnscannedRequired)?.print_bios(),
+            BiosCommand::Put { bios, file } => {
+                open(DeviceUse::UnscannedRequired)?.put_bios(bios, file)
+            }
         },
-        Command::Eject => open(DeviceUse::Unscanned)?.eject(),
-        Command::Dat { what: Dat::Sync } => open(DeviceUse::None)?.sync_dats(),
+        Command::Eject => open(DeviceUse::UnscannedRequired)?.eject(),
+        Command::Dat {
+            what: DatCommand::Sync,
+        } => open(DeviceUse::NotNeeded)?.sync_dats(),
         Command::Cover { what } => match what {
-            Cover::Fetch { games } => open(DeviceUse::None)?.fetch_covers(games),
-            Cover::Import { game, image } => open(DeviceUse::None)?.import_cover(game, image),
+            CoverCommand::Fetch { games } => open(DeviceUse::NotNeeded)?.fetch_covers(games),
+            CoverCommand::Import { game, image } => {
+                open(DeviceUse::NotNeeded)?.import_cover(game, image)
+            }
         },
     }
 }
@@ -483,15 +507,15 @@ fn run_command(cli: &Cli, command: &Command, format: PrintFormat) -> CliResult<(
 /// What a command needs from the device. Opening and especially scanning can be
 /// slow, so commands that need neither skip them.
 enum DeviceUse {
-    None,
+    NotNeeded,
     /// Its games if there is one. No device is fine.
-    IfMounted,
+    ScannedIfMounted,
     /// Its games. No device is an error.
-    Scanned,
+    ScannedRequired,
     /// Its folders but not its games. No device is an error.
-    Unscanned,
+    UnscannedRequired,
     /// Its folders but not its games, if there is one. No device is fine.
-    IfMountedUnscanned,
+    UnscannedIfMounted,
 }
 
 fn print_devices(format: PrintFormat) -> CliResult<()> {
@@ -525,14 +549,14 @@ impl CliSession {
     fn open(cli: &Cli, device_use: DeviceUse, format: PrintFormat) -> CliResult<Self> {
         let mut pocketeer = Pocketeer::open(&library_path(cli)?, FrontEnd::Cli)?;
         let mut duplicates = Vec::new();
-        if !matches!(device_use, DeviceUse::None) {
+        if !matches!(device_use, DeviceUse::NotNeeded) {
             let opened = match &cli.device {
                 Some(device) => pocketeer.open_device(device).map(|()| true)?,
                 None => pocketeer.open_mounted_device()?,
             };
             match (opened, device_use) {
-                (false, DeviceUse::IfMounted | DeviceUse::IfMountedUnscanned)
-                | (true, DeviceUse::Unscanned | DeviceUse::IfMountedUnscanned) => {}
+                (false, DeviceUse::ScannedIfMounted | DeviceUse::UnscannedIfMounted)
+                | (true, DeviceUse::UnscannedRequired | DeviceUse::UnscannedIfMounted) => {}
                 (false, _) => {
                     return Err(CliError::CouldNotStart(
                         "no device found; give one with --device".to_string(),
@@ -766,18 +790,18 @@ impl CliSession {
         Ok(())
     }
 
-    fn pull_games(&mut self, refs: &[String]) -> CliResult<()> {
-        let games = match refs {
+    fn pull_games(&mut self, game_refs: &[String]) -> CliResult<()> {
+        let games = match game_refs {
             [] => self.pocketeer.games_only_on_device(),
-            refs => self.entries_on_device(refs)?,
+            game_refs => self.entries_on_device(game_refs)?,
         };
         self.run_batch(|pocketeer, on_logged| pocketeer.pull_games(&games, on_logged))
     }
 
-    fn pull_saves(&mut self, refs: &[String]) -> CliResult<()> {
-        let games = match refs {
+    fn pull_saves(&mut self, game_refs: &[String]) -> CliResult<()> {
+        let games = match game_refs {
             [] => self.games_with_saves_to_pull(),
-            refs => self.entries_on_device(refs)?,
+            game_refs => self.entries_on_device(game_refs)?,
         };
         self.run_batch(|pocketeer, on_logged| pocketeer.pull_saves(&games, on_logged))
     }
@@ -801,15 +825,15 @@ impl CliSession {
         self.pocketeer.games_on_device_in_library()
     }
 
-    fn push_games(&mut self, refs: &[String]) -> CliResult<()> {
-        let games = self.entries_in_library(refs)?;
+    fn push_games(&mut self, game_refs: &[String]) -> CliResult<()> {
+        let games = self.entries_in_library(game_refs)?;
         self.run_batch(|pocketeer, on_logged| pocketeer.push_games(&games, on_logged))
     }
 
-    fn push_saves(&mut self, refs: &[String], at: Option<&str>) -> CliResult<()> {
-        let games = self.entries_in_library(refs)?;
+    fn push_saves(&mut self, game_refs: &[String], at: Option<&str>) -> CliResult<()> {
+        let games = self.entries_in_library(game_refs)?;
         let device = self.pocketeer.device().expect("the device is open");
-        let copies = refs
+        let copies = game_refs
             .iter()
             .zip(&games)
             .map(|(game_ref, game)| {
@@ -841,49 +865,49 @@ impl CliSession {
         self.run_batch(|pocketeer, on_logged| pocketeer.import_covers(&covers, on_logged))
     }
 
-    fn trash_games(&mut self, refs: &[String]) -> CliResult<()> {
-        let games = self.entries_in_library(refs)?;
+    fn trash_games(&mut self, game_refs: &[String]) -> CliResult<()> {
+        let games = self.entries_in_library(game_refs)?;
         self.run_batch(|pocketeer, on_logged| pocketeer.trash_games_in_library(&games, on_logged))
     }
 
-    fn trash_saves(&mut self, refs: &[String], at: Option<&str>) -> CliResult<()> {
-        let games = self.entries_in_library(refs)?;
+    fn trash_saves(&mut self, game_refs: &[String], at: Option<&str>) -> CliResult<()> {
+        let games = self.entries_in_library(game_refs)?;
         self.run_batch(|pocketeer, on_logged| match at {
             Some(at) => pocketeer.trash_saves_at(&games, at, on_logged),
             None => pocketeer.trash_saves_in_library(&games, on_logged),
         })
     }
 
-    fn trash_orphan_saves(&mut self, refs: &[String]) -> CliResult<()> {
+    fn trash_orphan_saves(&mut self, orphan_refs: &[String]) -> CliResult<()> {
         let orphans = self.pocketeer.find_orphan_saves_in_library()?;
-        let orphans = pick_orphans(refs, &orphans, library_orphan_ref)?;
+        let orphans = pick_orphans(orphan_refs, &orphans, library_orphan_ref)?;
         self.run_batch(|pocketeer, on_logged| {
             pocketeer.trash_orphan_saves_in_library(&orphans, on_logged)
         })
     }
 
-    fn delete_games(&mut self, refs: &[String]) -> CliResult<()> {
-        let games = self.entries_on_device(refs)?;
+    fn delete_games(&mut self, game_refs: &[String]) -> CliResult<()> {
+        let games = self.entries_on_device(game_refs)?;
         self.run_batch(|pocketeer, on_logged| pocketeer.delete_games_on_device(&games, on_logged))
     }
 
-    fn delete_saves(&mut self, refs: &[String]) -> CliResult<()> {
-        let games = self.entries_on_device(refs)?;
+    fn delete_saves(&mut self, game_refs: &[String]) -> CliResult<()> {
+        let games = self.entries_on_device(game_refs)?;
         self.run_batch(|pocketeer, on_logged| pocketeer.delete_saves_on_device(&games, on_logged))
     }
 
-    fn delete_orphan_saves(&mut self, refs: &[String]) -> CliResult<()> {
+    fn delete_orphan_saves(&mut self, orphan_refs: &[String]) -> CliResult<()> {
         let orphans = self.pocketeer.find_orphan_saves_on_device()?;
-        let orphans = pick_orphans(refs, &orphans, device_orphan_ref)?;
+        let orphans = pick_orphans(orphan_refs, &orphans, device_orphan_ref)?;
         self.run_batch(|pocketeer, on_logged| {
             pocketeer.delete_orphan_saves_on_device(&orphans, on_logged)
         })
     }
 
-    fn fetch_covers(&mut self, refs: &[String]) -> CliResult<()> {
-        let games = match refs {
+    fn fetch_covers(&mut self, game_refs: &[String]) -> CliResult<()> {
+        let games = match game_refs {
             [] => self.pocketeer.games_without_covers(),
-            refs => self.entries_in_library(refs)?,
+            game_refs => self.entries_in_library(game_refs)?,
         };
         self.run_batch(|pocketeer, on_logged| pocketeer.fetch_covers(&games, on_logged))
     }
@@ -990,38 +1014,38 @@ impl CliSession {
         Ok(())
     }
 
-    fn install_cores(&mut self, ids: &[String]) -> CliResult<()> {
-        if let Some(id) = ids.iter().find(|id| !SUPPORTED.contains(&id.as_str())) {
+    fn install_cores(&mut self, core_ids: &[String]) -> CliResult<()> {
+        if let Some(id) = core_ids.iter().find(|id| !SUPPORTED.contains(&id.as_str())) {
             let message = format!("{id}: not a core that can be installed, as `cores list` shows");
             return Err(CliError::CouldNotStart(message));
         }
-        self.run_batch(|pocketeer, on_logged| pocketeer.install_cores(ids, on_logged))
+        self.run_batch(|pocketeer, on_logged| pocketeer.install_cores(core_ids, on_logged))
     }
 
-    fn update_cores(&mut self, ids: &[String]) -> CliResult<()> {
-        let ids = match ids {
+    fn update_cores(&mut self, core_ids: &[String]) -> CliResult<()> {
+        let core_ids = match core_ids {
             [] => self.pocketeer.find_cores_with_updates()?,
-            ids => {
-                self.ensure_cores_on_device(ids)?;
-                ids.to_vec()
+            core_ids => {
+                self.ensure_cores_on_device(core_ids)?;
+                core_ids.to_vec()
             }
         };
-        if ids.is_empty() && matches!(self.format, PrintFormat::Text) {
+        if core_ids.is_empty() && matches!(self.format, PrintFormat::Text) {
             println!("every core is up to date");
         }
-        self.run_batch(|pocketeer, on_logged| pocketeer.install_cores(&ids, on_logged))
+        self.run_batch(|pocketeer, on_logged| pocketeer.install_cores(&core_ids, on_logged))
     }
 
-    fn remove_cores(&mut self, ids: &[String]) -> CliResult<()> {
-        self.ensure_cores_on_device(ids)?;
-        self.run_batch(|pocketeer, on_logged| pocketeer.remove_cores(ids, on_logged))
+    fn remove_cores(&mut self, core_ids: &[String]) -> CliResult<()> {
+        self.ensure_cores_on_device(core_ids)?;
+        self.run_batch(|pocketeer, on_logged| pocketeer.remove_cores(core_ids, on_logged))
     }
 
     /// Refuses cores the device doesn't have.
-    fn ensure_cores_on_device(&self, ids: &[String]) -> CliResult<()> {
+    fn ensure_cores_on_device(&self, core_ids: &[String]) -> CliResult<()> {
         let device = self.pocketeer.device().expect("the device is open");
         let cores = device.installed_cores()?;
-        match ids
+        match core_ids
             .iter()
             .find(|id| !cores.iter().any(|core| core.id == **id))
         {
@@ -1035,10 +1059,10 @@ impl CliSession {
         self.run_batch(|pocketeer, on_logged| pocketeer.rename_games_in_library(&games, on_logged))
     }
 
-    fn rename_games_to_dat_names(&mut self, refs: &[String]) -> CliResult<()> {
-        let games = match refs {
+    fn rename_games_to_dat_names(&mut self, game_refs: &[String]) -> CliResult<()> {
+        let games = match game_refs {
             [] => self.pocketeer.library().entries().to_vec(),
-            refs => self.entries_in_library(refs)?,
+            game_refs => self.entries_in_library(game_refs)?,
         };
         let renames = self.pocketeer.renames_to_dat_names(&games);
         if renames.is_empty() && matches!(self.format, PrintFormat::Text) {
@@ -1188,12 +1212,13 @@ impl CliSession {
 
     fn sync_dats(&mut self) -> CliResult<()> {
         let report = self.pocketeer.sync_dats()?;
-        let ids = |ps: &[Platform]| {
-            ps.iter()
+        let platform_ids = |platforms: &[Platform]| {
+            platforms
+                .iter()
                 .map(|platform| platform.id().to_string())
                 .collect::<Vec<_>>()
         };
-        let (updated, missing) = (ids(&report.updated), ids(&report.missing));
+        let (updated, missing) = (platform_ids(&report.updated), platform_ids(&report.missing));
         match self.format {
             PrintFormat::Json => {
                 print_json(true, json!({ "updated": updated, "missing": missing }));
@@ -1212,18 +1237,19 @@ impl CliSession {
         Ok(())
     }
 
-    /// The device's games named in `refs`. A copy the scan left out is refused,
-    /// so that nothing meant for one file happens to another.
-    fn entries_on_device(&self, refs: &[String]) -> CliResult<Vec<DeviceEntry>> {
+    /// The device's games named in `game_refs`. A copy the scan left out is
+    /// refused, so that nothing meant for one file happens to another.
+    fn entries_on_device(&self, game_refs: &[String]) -> CliResult<Vec<DeviceEntry>> {
         let device = self.pocketeer.device().expect("the device is open");
-        refs.iter()
+        game_refs
+            .iter()
             .map(|game_ref| {
                 let (platform, path) = split_ref(game_ref)?;
                 let path = Path::new(path);
-                let is_it = |on_device: &&DeviceEntry| {
+                let is_named_copy = |on_device: &&DeviceEntry| {
                     on_device.game.platform == platform && on_device.path == path
                 };
-                if let Some(duplicate) = self.duplicates.iter().find(is_it) {
+                if let Some(duplicate) = self.duplicates.iter().find(is_named_copy) {
                     let first = device_ref(self.first_copy(duplicate));
                     let message =
                         format!("{game_ref}: the same game as {first}, the copy that is used");
@@ -1235,8 +1261,9 @@ impl CliSession {
             .collect()
     }
 
-    fn entries_in_library(&self, refs: &[String]) -> CliResult<Vec<LocalEntry>> {
-        refs.iter()
+    fn entries_in_library(&self, game_refs: &[String]) -> CliResult<Vec<LocalEntry>> {
+        game_refs
+            .iter()
             .map(|game_ref| self.local_entry(game_ref).cloned())
             .collect()
     }
@@ -1255,14 +1282,15 @@ fn not_on_device(game_ref: &str) -> CliError {
     CliError::CouldNotStart(format!("{game_ref}: not on the device"))
 }
 
-/// The orphan saves named in `refs`, as `orphan-saves` shows them. Nothing else
-/// is accepted, so a game's save can't be taken for an orphan.
+/// The orphan saves named in `orphan_refs`, as `orphan-saves` shows them.
+/// Nothing else is accepted, so a game's save can't be taken for an orphan.
 fn pick_orphans<T: Clone>(
-    refs: &[String],
+    orphan_refs: &[String],
     orphans: &[T],
     ref_of: fn(&T) -> String,
 ) -> CliResult<Vec<T>> {
-    refs.iter()
+    orphan_refs
+        .iter()
         .map(|game_ref| {
             let found = orphans
                 .iter()
@@ -1282,10 +1310,13 @@ fn parse_platform(id: &str) -> CliResult<Platform> {
     Platform::iter()
         .find(|platform| platform.id() == id)
         .ok_or_else(|| {
-            let ids: Vec<String> = Platform::iter()
+            let platform_ids: Vec<String> = Platform::iter()
                 .map(|platform| platform.id().to_string())
                 .collect();
-            let message = format!("{id}: not a platform; these are: {}", ids.join(", "));
+            let message = format!(
+                "{id}: not a platform; these are: {}",
+                platform_ids.join(", ")
+            );
             CliError::CouldNotStart(message)
         })
 }
@@ -1293,8 +1324,8 @@ fn parse_platform(id: &str) -> CliResult<Platform> {
 /// Splits `<platform>/<rest>` into the platform and the rest.
 fn split_ref(game_ref: &str) -> CliResult<(Platform, &str)> {
     let (id, rest) = game_ref.split_once('/').ok_or_else(|| {
-        let how = "write a game as <platform>/<name>, as `pocketeer games` shows it";
-        CliError::CouldNotStart(format!("{game_ref}: {how}"))
+        let format_hint = "write a game as <platform>/<name>, as `pocketeer games` shows it";
+        CliError::CouldNotStart(format!("{game_ref}: {format_hint}"))
     })?;
     Ok((Platform::from_id(id), rest))
 }
@@ -1331,9 +1362,9 @@ fn table_right_aligned<const N: usize>(
             .collect();
         format!("{}\n", padded.join("  ").trim_end())
     };
-    let mut out = line(header.to_vec());
+    let mut table_text = line(header.to_vec());
     for row in rows {
-        out.push_str(&line(row.iter().map(String::as_str).collect()));
+        table_text.push_str(&line(row.iter().map(String::as_str).collect()));
     }
-    out
+    table_text
 }

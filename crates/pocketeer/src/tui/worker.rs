@@ -25,7 +25,7 @@ use pocketeer_core::{
 };
 
 /// How often it checks for a device being plugged in or removed while idle.
-const WATCH: Duration = Duration::from_secs(2);
+const DEVICE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkerCommand {
@@ -141,13 +141,13 @@ pub enum WorkerMessage {
     DeviceReadFinished,
     CommandStarted {
         label: String,
-        total: usize,
+        target_count: usize,
     },
-    /// One game of the command under way is done.
+    /// One target of the command under way is finished.
     CommandProgressed {
-        done: usize,
-        total: usize,
-        game: String,
+        finished_count: usize,
+        target_count: usize,
+        target: String,
     },
     /// The command is over. `failed` is set if part of it failed.
     CommandFinished {
@@ -179,7 +179,7 @@ pub struct Worker {
     tx: Option<mpsc::Sender<QueuedCommand>>,
     /// The flag every command sent until the next cancel carries. Once true it
     /// stays true, and a cancel creates a new one for later commands.
-    cancel_token: Arc<AtomicBool>,
+    is_canceled: Arc<AtomicBool>,
     /// None once it is dropped, or for a worker with no thread.
     thread: Option<JoinHandle<()>>,
 }
@@ -196,7 +196,7 @@ impl Worker {
         let thread = thread::spawn(move || run_worker_loop(&library, device, &rx, &send_message));
         Self {
             tx: Some(tx),
-            cancel_token: Arc::default(),
+            is_canceled: Arc::default(),
             thread: Some(thread),
         }
     }
@@ -207,7 +207,7 @@ impl Worker {
         let (tx, rx) = mpsc::channel();
         let worker = Worker {
             tx: Some(tx),
-            cancel_token: Arc::default(),
+            is_canceled: Arc::default(),
             thread: None,
         };
         (worker, rx)
@@ -216,7 +216,7 @@ impl Worker {
     pub fn send(&mut self, command: WorkerCommand) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(QueuedCommand {
-                is_canceled: self.cancel_token.clone(),
+                is_canceled: self.is_canceled.clone(),
                 command,
             });
         }
@@ -225,8 +225,8 @@ impl Worker {
     /// Stops the running command after its current game and drops the commands
     /// waiting.
     pub fn cancel(&mut self) {
-        self.cancel_token.store(true, Ordering::Relaxed);
-        self.cancel_token = Arc::default();
+        self.is_canceled.store(true, Ordering::Relaxed);
+        self.is_canceled = Arc::default();
     }
 }
 
@@ -243,7 +243,7 @@ impl Drop for Worker {
 
 fn run_worker_loop(
     library: &Path,
-    pinned: Option<PathBuf>,
+    device_from_command_line: Option<PathBuf>,
     rx: &mpsc::Receiver<QueuedCommand>,
     send_message: &dyn Fn(WorkerMessage),
 ) {
@@ -256,16 +256,16 @@ fn run_worker_loop(
     };
     let mut worker_state = WorkerState {
         send_message,
-        pinned,
-        seen: Vec::new(),
+        device_from_command_line,
+        last_found_devices: Vec::new(),
         orphan_saves: OrphanSaves::default(),
-        cores_wanted: false,
+        is_cores_page_opened: false,
     };
     worker_state.refresh_orphans(&pocketeer);
     worker_state.send_games_page_data(&pocketeer);
     worker_state.sync_mounted_device(&mut pocketeer);
     loop {
-        match rx.recv_timeout(WATCH) {
+        match rx.recv_timeout(DEVICE_CHECK_INTERVAL) {
             Ok(QueuedCommand {
                 is_canceled,
                 command,
@@ -289,13 +289,13 @@ struct OrphanSaves {
 struct WorkerState<'a> {
     send_message: &'a dyn Fn(WorkerMessage),
     /// The device given on the command line, if any.
-    pinned: Option<PathBuf>,
+    device_from_command_line: Option<PathBuf>,
     /// The devices found by the last check, to notice changes.
-    seen: Vec<PathBuf>,
+    last_found_devices: Vec<PathBuf>,
     orphan_saves: OrphanSaves,
     /// Whether the Cores page has been opened. Until then nothing goes online
     /// for it.
-    cores_wanted: bool,
+    is_cores_page_opened: bool,
 }
 
 impl WorkerState<'_> {
@@ -313,8 +313,8 @@ impl WorkerState<'_> {
         self.orphan_saves.on_device = pocketeer.find_orphan_saves_on_device().unwrap_or_default();
     }
 
-    fn send_cores(&self, pocketeer: &mut Pocketeer) {
-        if !self.cores_wanted {
+    fn send_cores_page_data(&self, pocketeer: &mut Pocketeer) {
+        if !self.is_cores_page_opened {
             return;
         }
         let (rows, failure) = match pocketeer.load_core_rows() {
@@ -324,13 +324,13 @@ impl WorkerState<'_> {
         (self.send_message)(WorkerMessage::CoreListChanged { rows, failure });
     }
 
-    fn send_bios(&self, pocketeer: &Pocketeer) {
+    fn send_bios_page_data(&self, pocketeer: &Pocketeer) {
         (self.send_message)(WorkerMessage::BiosFilesChanged(
             pocketeer.read_bios_rows().unwrap_or_default(),
         ));
     }
 
-    fn send_device_page(&self, pocketeer: &Pocketeer) {
+    fn send_device_page_data(&self, pocketeer: &Pocketeer) {
         let data = pocketeer.device().map(|device| DevicePageData {
             root: device.root().to_path_buf(),
             firmware: device.read_firmware(),
@@ -343,20 +343,20 @@ impl WorkerState<'_> {
 
     /// Opens a device that appeared and closes one that disappeared.
     fn sync_mounted_device(&mut self, pocketeer: &mut Pocketeer) {
-        let found = match &self.pinned {
+        let found = match &self.device_from_command_line {
             Some(path) if Device::is_device(path) => vec![path.clone()],
             Some(_) => Vec::new(),
             None => Device::find_mounted(),
         };
         let open = pocketeer.device().map(|device| device.root().to_path_buf());
-        if found == self.seen
+        if found == self.last_found_devices
             && open
                 .as_ref()
                 .is_none_or(|open_root| found.contains(open_root))
         {
             return;
         }
-        self.seen = found.clone();
+        self.last_found_devices = found.clone();
         if open
             .as_ref()
             .is_some_and(|open_root| found.contains(open_root))
@@ -398,9 +398,9 @@ impl WorkerState<'_> {
         };
         self.refresh_orphans(pocketeer);
         self.send_games_page_data(pocketeer);
-        self.send_cores(pocketeer);
-        self.send_bios(pocketeer);
-        self.send_device_page(pocketeer);
+        self.send_cores_page_data(pocketeer);
+        self.send_bios_page_data(pocketeer);
+        self.send_device_page_data(pocketeer);
         (self.send_message)(WorkerMessage::DeviceReadFinished);
         if let Some(summary) = failure {
             (self.send_message)(WorkerMessage::CommandFinished {
@@ -413,9 +413,9 @@ impl WorkerState<'_> {
     fn finish_with_refresh(&mut self, pocketeer: &mut Pocketeer, summary: String, failed: bool) {
         self.refresh_orphans(pocketeer);
         self.send_games_page_data(pocketeer);
-        self.send_cores(pocketeer);
-        self.send_bios(pocketeer);
-        self.send_device_page(pocketeer);
+        self.send_cores_page_data(pocketeer);
+        self.send_bios_page_data(pocketeer);
+        self.send_device_page_data(pocketeer);
         (self.send_message)(WorkerMessage::CommandFinished { summary, failed });
     }
 
@@ -423,11 +423,11 @@ impl WorkerState<'_> {
         &mut self,
         pocketeer: &mut Pocketeer,
         command: WorkerCommand,
-        cancel_token: &AtomicBool,
+        is_canceled: &AtomicBool,
     ) {
         if command == WorkerCommand::ShowCores {
-            self.cores_wanted = true;
-            self.send_cores(pocketeer);
+            self.is_cores_page_opened = true;
+            self.send_cores_page_data(pocketeer);
             return;
         }
         if let WorkerCommand::ProposeRenames(games) = &command {
@@ -436,128 +436,150 @@ impl WorkerState<'_> {
             ));
             return;
         }
-        let mut running_command = RunningCommand {
+        let mut command_progress = CommandProgress {
             send_message: self.send_message,
             orphan_saves: &self.orphan_saves,
-            cancel_token,
-            total: target_count(&command),
+            is_canceled,
+            target_count: target_count(&command),
             reports: Vec::new(),
         };
-        let label = job_label(&command);
+        let label = command_label(&command);
         (self.send_message)(WorkerMessage::CommandStarted {
             label: label.to_string(),
-            total: running_command.total,
+            target_count: command_progress.target_count,
         });
-        // A non-batch command reports through `running_command` by hand,
+        // A non-batch command reports through `command_progress` by hand,
         // because it has no log entry, only its result.
         let batch_result = match command {
-            WorkerCommand::PullGames(games) => pocketeer
-                .pull_games(&games, |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
-                }),
-            WorkerCommand::PullSaves(games) => pocketeer
-                .pull_saves(&games, |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
-                }),
-            WorkerCommand::PushGames(games) => pocketeer
-                .push_games(&games, |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
-                }),
-            WorkerCommand::PushSaves(games) => pocketeer
-                .push_saves(&games, |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
-                }),
-            WorkerCommand::PushSaveVersion(game, version) => pocketeer
-                .push_save_versions(&[(game, version)], |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
-                }),
-            WorkerCommand::FetchCovers(games) => pocketeer
-                .fetch_covers(&games, |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
-                }),
+            WorkerCommand::PullGames(games) => {
+                pocketeer.pull_games(&games, |pocketeer, log_entry| {
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
+                })
+            }
+            WorkerCommand::PullSaves(games) => {
+                pocketeer.pull_saves(&games, |pocketeer, log_entry| {
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
+                })
+            }
+            WorkerCommand::PushGames(games) => {
+                pocketeer.push_games(&games, |pocketeer, log_entry| {
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
+                })
+            }
+            WorkerCommand::PushSaves(games) => {
+                pocketeer.push_saves(&games, |pocketeer, log_entry| {
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
+                })
+            }
+            WorkerCommand::PushSaveVersion(game, version) => {
+                pocketeer.push_save_versions(&[(game, version)], |pocketeer, log_entry| {
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
+                })
+            }
+            WorkerCommand::FetchCovers(games) => {
+                pocketeer.fetch_covers(&games, |pocketeer, log_entry| {
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
+                })
+            }
             WorkerCommand::ImportGame(path, platform) => {
                 pocketeer_core::pocketeer::expand_import_paths(&[path]).and_then(|files| {
-                    running_command.total = files.len();
+                    command_progress.target_count = files.len();
                     pocketeer.import_games(&files, platform.as_ref(), |pocketeer, log_entry| {
-                        running_command.report_step(pocketeer, log_entry.report)
+                        command_progress.record_finished_target(pocketeer, log_entry.report)
                     })
                 })
             }
-            WorkerCommand::ImportSave(game, from) => pocketeer
-                .import_saves(&[(game, from)], |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
-                }),
-            WorkerCommand::ImportCover(game, from) => pocketeer
-                .import_covers(&[(game, from)], |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
-                }),
-            WorkerCommand::TrashGames(games) => pocketeer
-                .trash_games_in_library(&games, |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
-                }),
+            WorkerCommand::ImportSave(game, from) => {
+                pocketeer.import_saves(&[(game, from)], |pocketeer, log_entry| {
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
+                })
+            }
+            WorkerCommand::ImportCover(game, from) => {
+                pocketeer.import_covers(&[(game, from)], |pocketeer, log_entry| {
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
+                })
+            }
+            WorkerCommand::TrashGames(games) => {
+                pocketeer.trash_games_in_library(&games, |pocketeer, log_entry| {
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
+                })
+            }
             WorkerCommand::TrashSaveVersion(game, version) => pocketeer
                 .trash_save_versions_in_library(&[(game, version)], |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
                 }),
             WorkerCommand::TrashOrphanSaves(orphan_saves) => pocketeer
                 .trash_orphan_saves_in_library(&orphan_saves, |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
                 }),
-            WorkerCommand::DeleteGames(games) => pocketeer
-                .delete_games_on_device(&games, |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
-                }),
-            WorkerCommand::DeleteSaves(games) => pocketeer
-                .delete_saves_on_device(&games, |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
-                }),
+            WorkerCommand::DeleteGames(games) => {
+                pocketeer.delete_games_on_device(&games, |pocketeer, log_entry| {
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
+                })
+            }
+            WorkerCommand::DeleteSaves(games) => {
+                pocketeer.delete_saves_on_device(&games, |pocketeer, log_entry| {
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
+                })
+            }
             WorkerCommand::DeleteOrphanSaves(orphan_saves) => pocketeer
                 .delete_orphan_saves_on_device(&orphan_saves, |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
                 }),
-            // Handled above, since they aren't jobs to report.
+            // Handled above, since they aren't commands to report.
             WorkerCommand::ShowCores | WorkerCommand::ProposeRenames(_) => {
                 Ok(ControlFlow::Continue(()))
             }
-            WorkerCommand::InstallCores(ids) => pocketeer
-                .install_cores(&ids, |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
-                }),
-            WorkerCommand::RemoveCores(ids) => pocketeer
-                .remove_cores(&ids, |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
-                }),
-            WorkerCommand::PutBios(row, from) => pocketeer
-                .put_bios_files(&[(row, from)], |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
-                }),
-            WorkerCommand::RenameGamesInLibrary(games) => pocketeer
-                .rename_games_in_library(&games, |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
-                }),
-            WorkerCommand::RenameOnDevice(game, new) => pocketeer
-                .rename_games_on_device(&[(game, new)], |pocketeer, log_entry| {
-                    running_command.report_step(pocketeer, log_entry.report)
-                }),
+            WorkerCommand::InstallCores(ids) => {
+                pocketeer.install_cores(&ids, |pocketeer, log_entry| {
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
+                })
+            }
+            WorkerCommand::RemoveCores(ids) => {
+                pocketeer.remove_cores(&ids, |pocketeer, log_entry| {
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
+                })
+            }
+            WorkerCommand::PutBios(row, from) => {
+                pocketeer.put_bios_files(&[(row, from)], |pocketeer, log_entry| {
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
+                })
+            }
+            WorkerCommand::RenameGamesInLibrary(games) => {
+                pocketeer.rename_games_in_library(&games, |pocketeer, log_entry| {
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
+                })
+            }
+            WorkerCommand::RenameOnDevice(game, new) => {
+                pocketeer.rename_games_on_device(&[(game, new)], |pocketeer, log_entry| {
+                    command_progress.record_finished_target(pocketeer, log_entry.report)
+                })
+            }
             WorkerCommand::SyncDats => {
                 let synced = pocketeer.sync_dats();
-                Ok(running_command.report_step(pocketeer, OperationReport::SyncDats(synced)))
+                Ok(command_progress
+                    .record_finished_target(pocketeer, OperationReport::SyncDats(synced)))
             }
             WorkerCommand::Reload => {
                 let read = pocketeer.reload();
                 let read = read.map(|report| {
                     send_duplicates(self.send_message, pocketeer, &report.duplicates)
                 });
-                Ok(running_command.report_step(pocketeer, OperationReport::Reload(read)))
+                Ok(command_progress
+                    .record_finished_target(pocketeer, OperationReport::Reload(read)))
             }
             WorkerCommand::Eject => {
                 let root = pocketeer.device().map(|device| device.root().to_path_buf());
                 let ejected = pocketeer.eject_device();
-                Ok(running_command.report_step(pocketeer, OperationReport::Eject(root, ejected)))
+                Ok(command_progress
+                    .record_finished_target(pocketeer, OperationReport::Eject(root, ejected)))
             }
         };
-        let (mut summary, mut failed) =
-            command_summary(label, running_command.total, &running_command.reports);
+        let (mut summary, mut failed) = command_summary(
+            label,
+            command_progress.target_count,
+            &command_progress.reports,
+        );
         if let Err(error) = batch_result {
             summary.push_str(&format!("; {error}"));
             failed = true;
@@ -566,30 +588,34 @@ impl WorkerState<'_> {
     }
 }
 
-struct RunningCommand<'a> {
+struct CommandProgress<'a> {
     send_message: &'a dyn Fn(WorkerMessage),
     orphan_saves: &'a OrphanSaves,
-    cancel_token: &'a AtomicBool,
-    total: usize,
+    is_canceled: &'a AtomicBool,
+    target_count: usize,
     reports: Vec<OperationReport>,
 }
 
-impl RunningCommand<'_> {
+impl CommandProgress<'_> {
     /// Records how one game went and sends the current state. Breaks if the
     /// command was canceled.
-    fn report_step(&mut self, pocketeer: &Pocketeer, report: OperationReport) -> ControlFlow<()> {
-        let game = report.subject();
+    fn record_finished_target(
+        &mut self,
+        pocketeer: &Pocketeer,
+        report: OperationReport,
+    ) -> ControlFlow<()> {
+        let target = report.subject();
         self.reports.push(report);
         (self.send_message)(WorkerMessage::GamesPageChanged(games_page_data(
             pocketeer,
             self.orphan_saves,
         )));
         (self.send_message)(WorkerMessage::CommandProgressed {
-            done: self.reports.len(),
-            total: self.total,
-            game,
+            finished_count: self.reports.len(),
+            target_count: self.target_count,
+            target,
         });
-        if self.cancel_token.load(Ordering::Relaxed) {
+        if self.is_canceled.load(Ordering::Relaxed) {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
@@ -597,20 +623,26 @@ impl RunningCommand<'_> {
     }
 }
 
-/// Summarizes a command labeled `label` meant for `total` games, and says
-/// whether any of it failed.
-fn command_summary(label: &str, total: usize, reports: &[OperationReport]) -> (String, bool) {
-    let done = reports.len();
+/// Summarizes a command labeled `label` meant for `target_count` targets, and
+/// says whether any of it failed.
+fn command_summary(
+    label: &str,
+    target_count: usize,
+    reports: &[OperationReport],
+) -> (String, bool) {
+    let finished_count = reports.len();
     let failed = reports.iter().filter(|report| !report.is_ok()).count();
     let first_failure = reports.iter().find(|report| !report.is_ok());
-    let summary = match (total, first_failure, reports.last()) {
+    let summary = match (target_count, first_failure, reports.last()) {
         (1, _, Some(last)) => last.to_line(),
         (_, Some(first), _) => format!(
-            "{label}: {done} of {total} done, {failed} failed; first: {}",
+            "{label}: {finished_count} of {target_count} done, {failed} failed; first: {}",
             first.to_line()
         ),
-        _ if done < total => format!("{label}: stopped after {done} of {total}"),
-        _ => format!("{label}: {done} done"),
+        _ if finished_count < target_count => {
+            format!("{label}: stopped after {finished_count} of {target_count}")
+        }
+        _ => format!("{label}: {finished_count} done"),
     };
     (summary, failed > 0)
 }
@@ -661,7 +693,7 @@ fn send_duplicates(
     send_message(WorkerMessage::DuplicateGamesSkipped(lines.collect()));
 }
 
-fn job_label(command: &WorkerCommand) -> &'static str {
+fn command_label(command: &WorkerCommand) -> &'static str {
     match command {
         WorkerCommand::PullGames(_) => "pulling games",
         WorkerCommand::PullSaves(_) => "backing up saves",
@@ -970,7 +1002,7 @@ mod tests {
             GamesTableRow::OrphanSaveOnDevice(_)
         ));
         assert!(matches!(opening[1], WorkerMessage::DeviceReadStarted(_)));
-        // Reading it successfully isn't a job to report.
+        // Reading it successfully isn't a command to report.
         let is_job = |message: &WorkerMessage| {
             matches!(
                 message,
@@ -1004,9 +1036,11 @@ mod tests {
         let progress: Vec<_> = messages
             .iter()
             .filter_map(|message| match message {
-                WorkerMessage::CommandProgressed { done, total, game } => {
-                    Some((*done, *total, game.as_str()))
-                }
+                WorkerMessage::CommandProgressed {
+                    finished_count,
+                    target_count,
+                    target,
+                } => Some((*finished_count, *target_count, target.as_str())),
                 _ => None,
             })
             .collect();

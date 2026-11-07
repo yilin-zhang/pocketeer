@@ -29,13 +29,13 @@ use super::{
         App, DeviceStatus, GamesFilter, ImportPrompt, ImportTarget, Page, PlatformPrompt, Prompt,
         RenamePrompt, RenameTarget, StatusMessage, name_of,
     },
-    covers::{self, Cover},
+    covers::{self, CoverDisplay},
     path_input::{PathEntry, PathInput},
     worker::GamesTableRow,
 };
 
 /// Width of the label column in the details.
-const LABEL: usize = 10;
+const DETAILS_LABEL_WIDTH: usize = 10;
 
 /// The palette. Analogue OS is black and white, so the UI is gray, and color is
 /// kept for state so that it means something when it appears. Indexed colors
@@ -149,14 +149,17 @@ fn keycap(key: &str, tint: Palette) -> Span<'static> {
 /// One of four frames, by the clock, showing that something is running.
 fn spinner_frame() -> &'static str {
     const FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
-    let ms = SystemTime::now()
+    let milliseconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis());
-    FRAMES[((ms / 150) % 4) as usize]
+    FRAMES[((milliseconds / 150) % 4) as usize]
 }
 
 fn labeled(label: &str, value: Span<'static>) -> Line<'static> {
-    Line::from(vec![Palette::Faint.span(format!("{label:<LABEL$}")), value])
+    Line::from(vec![
+        Palette::Faint.span(format!("{label:<DETAILS_LABEL_WIDTH$}")),
+        value,
+    ])
 }
 
 fn labeled_text(label: &str, value: impl Into<String>) -> Line<'static> {
@@ -184,17 +187,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         Page::Games => {
             draw_search(frame, app, search);
-            draw_body(frame, app, body);
+            draw_games_page(frame, app, body);
         }
         Page::Cores => {
             draw_cores_status(frame, app, search);
-            draw_cores(frame, app, body);
+            draw_cores_page(frame, app, body);
         }
         Page::Bios => {
             draw_bios_status(frame, app, search);
-            draw_bios(frame, app, body);
+            draw_bios_page(frame, app, body);
         }
-        Page::Device => draw_device(frame, app, body),
+        Page::Device => draw_device_page(frame, app, body),
     }
     draw_footer(frame, app, footer);
     match app.prompt() {
@@ -339,7 +342,7 @@ fn draw_cores_status(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn draw_cores(frame: &mut Frame, app: &mut App, area: Rect) {
+fn draw_cores_page(frame: &mut Frame, app: &mut App, area: Rect) {
     let Some(cores) = app.cores.core_list() else {
         let reading = Palette::Muted.span(" reading the cores…");
         frame.render_widget(Paragraph::new(reading).block(panel_block("CORES")), area);
@@ -409,7 +412,7 @@ fn draw_bios_status(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn draw_device(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_device_page(frame: &mut Frame, app: &App, area: Rect) {
     let known = |value: Option<String>| value.unwrap_or_else(|| "unknown".to_string());
     let lines = match (app.device_status(), &app.device_page) {
         (DeviceStatus::Reading(_), _) => vec![Line::from(
@@ -432,7 +435,7 @@ fn draw_device(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(panel_block("DEVICE")), area);
 }
 
-fn draw_bios(frame: &mut Frame, app: &mut App, area: Rect) {
+fn draw_bios_page(frame: &mut Frame, app: &mut App, area: Rect) {
     let rows: Vec<TableRow> = app.bios.rows().iter().map(bios_table_row).collect();
     let files = app
         .bios
@@ -473,11 +476,11 @@ fn bios_table_row(row: &BiosRow) -> TableRow<'static> {
     ])
 }
 
-fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
+fn draw_games_page(frame: &mut Frame, app: &mut App, area: Rect) {
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
-    draw_table(frame, app, left);
-    match app.games.selected_version() {
+    draw_games_table(frame, app, left);
+    match app.games.selected_version_index() {
         Some(selected) => draw_saves(frame, app, right, selected),
         None => {
             let [cover, details] =
@@ -489,7 +492,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
+fn draw_games_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let compact = area.width < 60;
     let rows: Vec<TableRow> = app
         .games
@@ -615,18 +618,18 @@ fn draw_cover(frame: &mut Frame, app: &mut App, area: Rect) {
         draw_cover_placeholder(frame, inner, what, keys);
         return;
     };
-    match app.covers.show(&path, &around, inner.as_size()) {
-        Cover::Dots(lines) => frame.render_widget(Paragraph::new(lines.to_vec()), inner),
-        Cover::Image(proto) => frame.render_stateful_widget(
-            StatefulImage::<StatefulProtocol>::new().resize(covers::RESIZE),
+    match app.cover_loader.show(&path, &around, inner.as_size()) {
+        CoverDisplay::Dots(lines) => frame.render_widget(Paragraph::new(lines.to_vec()), inner),
+        CoverDisplay::Image(proto) => frame.render_stateful_widget(
+            StatefulImage::<StatefulProtocol>::new().resize(covers::COVER_RESIZE_MODE),
             inner,
             proto,
         ),
-        Cover::Loading => frame.render_widget(
+        CoverDisplay::Loading => frame.render_widget(
             Paragraph::new(Palette::Muted.span("loading cover…")).centered(),
             inner,
         ),
-        Cover::Unreadable => frame.render_widget(
+        CoverDisplay::Unreadable => frame.render_widget(
             Paragraph::new(Palette::Muted.span("cover file unreadable")).centered(),
             inner,
         ),
@@ -726,7 +729,7 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize) {
+fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version_index: usize) {
     let versions = app.games.selected_save_versions();
     let on_device = app
         .games
@@ -751,7 +754,7 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize)
                 Palette::Warn.span("  not backed up")
             };
             Line::from(vec![
-                Palette::Faint.span(format!("{:<LABEL$}", "Device")),
+                Palette::Faint.span(format!("{:<DETAILS_LABEL_WIDTH$}", "Device")),
                 Span::raw(save.timestamp()),
                 state,
             ])
@@ -770,10 +773,10 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize)
         .iter()
         .enumerate()
         .map(|(i, version)| {
-            let on_it = on_device
+            let is_on_device = on_device
                 .as_ref()
                 .is_some_and(|device_save| device_save.has_same_contents_as(version));
-            let note = match (i, on_it) {
+            let note = match (i, is_on_device) {
                 (0, true) => "newest, on the device",
                 (0, false) => "newest",
                 (_, true) => "on the device",
@@ -805,26 +808,26 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version: usize)
     .row_highlight_style(selected_style())
     .highlight_symbol("▸ ");
     let mut state =
-        TableState::default().with_selected(Some(selected_version.min(versions.len() - 1)));
+        TableState::default().with_selected(Some(selected_version_index.min(versions.len() - 1)));
     frame.render_stateful_widget(table, list, &mut state);
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let [status, library_keys, device_keys, general_keys] =
         Layout::vertical([Constraint::Length(1); 4]).areas(area);
-    let mut line = match (app.job_status(), app.status_message()) {
-        (Some(job), _) => {
-            let progress = match job.total_count {
+    let mut line = match (app.command_status(), app.status_message()) {
+        (Some(command_status), _) => {
+            let progress = match command_status.target_count {
                 0 | 1 => String::new(),
-                total => format!("  {}/{total}", job.done_count),
+                target_count => format!("  {}/{target_count}", command_status.finished_count),
             };
-            let game = job.last_game.clone().unwrap_or_default();
+            let last_target = command_status.last_target.clone().unwrap_or_default();
             let mut line = Line::from(Palette::Ink.span(format!(
-                " {} {}{progress}  {game}  ",
+                " {} {}{progress}  {last_target}  ",
                 spinner_frame(),
-                job.description
+                command_status.label
             )));
-            if job.is_canceling {
+            if command_status.is_canceling {
                 line.push_span(Palette::Muted.span("stopping…"));
             } else {
                 line.push_span(keycap("Esc", Palette::Keycap));
@@ -906,7 +909,7 @@ fn legend(app: &App) -> Legend {
     }
     let page_keys = vec![("r", "reload"), ("?", "help"), ("q", "quit")];
     match app.current_page() {
-        Page::Games if app.games.selected_version().is_some() => Legend {
+        Page::Games if app.games.selected_version_index().is_some() => Legend {
             library: vec![("i", "import"), ("s", "save"), ("x", "trash")],
             device: vec![NO_KEY, ("S", "push"), ("X", "delete")],
             general: vec![("Esc", "back"), ("?", "help"), ("q", "quit")],
@@ -1168,9 +1171,9 @@ fn match_lines(input: &PathInput, area: Rect) -> Vec<Line<'static>> {
     } else {
         height
     };
-    let picked = input.picked();
+    let picked = input.picked_match_index();
     let first = picked.map_or(0, |i| (i + 1).saturating_sub(room));
-    let typed = input.partial();
+    let typed = input.typed_name();
     let width = area.width as usize;
     let mut lines: Vec<Line> = matches
         .iter()
