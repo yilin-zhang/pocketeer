@@ -4,7 +4,6 @@ use std::{
     collections::HashSet,
     fmt, io,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use bytesize::ByteSize;
@@ -17,10 +16,11 @@ use crate::{
         parse_core_files, parse_core_json,
     },
     error::BasicError,
-    files::{
-        Cache, copy_atomically, list_dir, list_files_recursive, safe_rename_all, write_atomically,
+    game::{Game, RomCache, Save, renamed_file_name},
+    os::{
+        copy_atomically, eject_volume, is_valid_fat_name, list_dir, list_files_recursive,
+        mounted_volumes, safe_rename_all, write_atomically,
     },
-    game::{Game, Save, is_valid_fat_name, renamed_file_name},
     platform::Platform,
 };
 
@@ -281,7 +281,7 @@ impl fmt::Display for DiskSpace {
 #[derive(Debug, Clone)]
 pub struct Device {
     layout: DeviceLayout,
-    cache: Cache,
+    cache: RomCache,
     /// What the last scan found, sorted by platform id and path with each game
     /// once, plus what Pocketeer has put on the device since.
     entries: Vec<DeviceEntry>,
@@ -317,7 +317,7 @@ impl Device {
         if !layout.is_device() {
             return Err(OpenDeviceError::NotADevice { path: layout.root });
         }
-        let cache = Cache::load(&layout.root, &layout.cache());
+        let cache = RomCache::load(&layout.root, &layout.cache());
         Ok(Self {
             layout,
             cache,
@@ -799,83 +799,15 @@ impl Device {
 
     /// Has the system eject the device, as its file manager would.
     pub fn eject(&self) -> Result<(), EjectDeviceError> {
-        let root = self.root();
-        match std::env::consts::OS {
-            "macos" => run_command(Command::new("diskutil").arg("eject").arg(root)),
-            "linux" => {
-                let mut findmnt = Command::new("findmnt");
-                findmnt.args(["-n", "-o", "SOURCE", "--target"]).arg(root);
-                let block = run_command(&mut findmnt)?;
-                let block = block.trim();
-                run_command(Command::new("udisksctl").args(["unmount", "-b", block]))?;
-                run_command(Command::new("udisksctl").args(["power-off", "-b", block]))
-            }
-            "windows" => {
-                // The drive, e.g. `E:`, as Explorer's Eject wants it.
-                let drive = root.to_string_lossy();
-                let drive = drive.trim_end_matches(['\\', '/']);
-                let script = format!(
-                    "(New-Object -ComObject Shell.Application).Namespace(17).ParseName('{drive}').InvokeVerb('Eject')"
-                );
-                run_command(Command::new("powershell").args(["-NoProfile", "-Command", &script]))
-            }
-            os => Err(EjectDeviceError::EjectFailed {
-                message: format!("ejecting a device is not supported on {os}"),
-            }),
-        }
-        .map(drop)
+        eject_volume(self.root()).map_err(|message| EjectDeviceError::EjectFailed { message })
     }
-}
-
-/// Every volume mounted now, by each system's conventions. On Windows these are
-/// the drives, and elsewhere the folders inside the folders that volumes are
-/// mounted in.
-fn mounted_volumes() -> Vec<PathBuf> {
-    let in_dirs = |dirs: &[PathBuf]| -> Vec<PathBuf> {
-        dirs.iter()
-            .filter_map(|dir| fs::read_dir(dir).ok())
-            .flatten()
-            .filter_map(|entry| entry.ok().map(|dir_entry| dir_entry.path()))
-            .collect()
-    };
-    match std::env::consts::OS {
-        "macos" => in_dirs(&[PathBuf::from("/Volumes")]),
-        "linux" => {
-            let user = std::env::var("USER").unwrap_or_default();
-            in_dirs(&[
-                Path::new("/media").join(&user),
-                Path::new("/run/media").join(&user),
-                PathBuf::from("/media"),
-                PathBuf::from("/mnt"),
-            ])
-        }
-        "windows" => (b'A'..=b'Z')
-            .map(|drive_letter| PathBuf::from(format!("{}:\\", drive_letter as char)))
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// Runs `command` and returns what it printed if it succeeded.
-fn run_command(command: &mut Command) -> Result<String, EjectDeviceError> {
-    let eject_failed = |message: String| EjectDeviceError::EjectFailed { message };
-    let out = command
-        .output()
-        .map_err(|error| eject_failed(error.to_string()))?;
-    if !out.status.success() {
-        let said = [&out.stderr[..], &out.stdout[..]].concat();
-        return Err(eject_failed(
-            String::from_utf8_lossy(&said).trim().to_string(),
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::files::testing::{at, put, put_at};
     use crate::game::Files;
+    use crate::os::testing::{at, put, put_at};
 
     fn scanned(device: &mut Device) -> Vec<DeviceEntry> {
         device.scan().unwrap();

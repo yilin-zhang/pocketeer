@@ -9,7 +9,7 @@ use fs_err as fs;
 use image::ImageFormat;
 use serde::{Deserialize, Serialize};
 
-use crate::{error::BasicError, files::write_atomically, platform::Platform};
+use crate::{error::BasicError, os::write_atomically, platform::Platform};
 
 /// A game's cover image, kept as the file it came in. Drawing it is up to the
 /// front end.

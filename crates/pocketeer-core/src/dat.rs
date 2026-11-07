@@ -14,8 +14,8 @@ use strum::IntoEnumIterator;
 
 use crate::{
     error::BasicError,
-    files::write_atomically,
     game::{Files, Game, Rom},
+    os::write_atomically,
     platform::Platform,
 };
 

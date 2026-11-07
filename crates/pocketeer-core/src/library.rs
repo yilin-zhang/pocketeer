@@ -13,8 +13,11 @@ use image::ImageFormat;
 use crate::{
     cover::Cover,
     error::BasicError,
-    files::{Cache, copy_atomically, list_dir, safe_rename_all, write_atomically},
-    game::{Game, Save, is_valid_fat_name, is_valid_file_name, renamed_file_name},
+    game::{Game, RomCache, Save, renamed_file_name},
+    os::{
+        copy_atomically, is_valid_fat_name, is_valid_file_name, list_dir, safe_rename_all,
+        write_atomically,
+    },
     platform::Platform,
 };
 
@@ -262,7 +265,7 @@ impl LibraryLayout {
 
 pub struct Library {
     layout: LibraryLayout,
-    cache: Cache,
+    cache: RomCache,
     /// Sorted by platform id and name.
     entries: Vec<LocalEntry>,
 }
@@ -281,7 +284,7 @@ impl Library {
         };
         let roms = layout.roms();
         fs::create_dir_all(&roms).map_err(BasicError::from)?;
-        let cache = Cache::load(&layout.root, &layout.cache());
+        let cache = RomCache::load(&layout.root, &layout.cache());
         let mut library = Self {
             layout,
             cache,
@@ -759,8 +762,8 @@ fn stem(name: &str) -> &str {
 mod tests {
     use super::*;
     use crate::cover::testing::PNG;
-    use crate::files::testing::{at, put, put_at};
     use crate::game::{Files, Rom};
+    use crate::os::testing::{at, put, put_at};
 
     mod renaming {
         use super::*;

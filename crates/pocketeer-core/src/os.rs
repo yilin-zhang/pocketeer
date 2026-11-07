@@ -1,22 +1,16 @@
-//! Helpers for files on disk, shared by the device, the library and the DAT
-//! mirror.
+//! Talking to the operating system: files on disk and mounted volumes.
 
 use std::{
-    collections::{HashMap, HashSet},
     ffi::OsString,
     io,
     path::{Path, PathBuf},
+    process::Command,
     time::SystemTime,
 };
 
 use fs_err as fs;
-use serde::{Deserialize, Serialize};
 
-use crate::{
-    error::BasicError,
-    game::{Files, Game, Rom},
-    platform::Platform,
-};
+use crate::error::BasicError;
 
 /// What is in a folder, by name, sorted.
 #[derive(Default)]
@@ -63,6 +57,19 @@ pub(crate) fn list_files_recursive(dir: &Path) -> Result<Vec<PathBuf>, BasicErro
     }
     paths.sort();
     Ok(paths)
+}
+
+/// Whether a file can be called `name` in a folder. Other names would put it
+/// elsewhere, or hide it from [`list_dir`] so that it can't be found again.
+pub(crate) fn is_valid_file_name(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with('.') && !name.contains(['/', '\\'])
+}
+
+/// Whether a file can have `name` on a FAT file system, which devices use.
+/// FAT doesn't allow these characters, and macOS silently writes something
+/// else instead of refusing them.
+pub(crate) fn is_valid_fat_name(name: &str) -> bool {
+    is_valid_file_name(name) && !name.contains([':', '?', '*', '"', '<', '>', '|'])
 }
 
 /// Replaces the file at `path` with `bytes`, last written at `modified` if
@@ -127,106 +134,71 @@ fn replace_atomically(
     Ok(replaced?)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Cached {
-    /// The file's size. A NES ROM's [`Rom`] is smaller because it leaves out
-    /// the header.
-    size: u64,
-    modified: SystemTime,
-    rom: Rom,
-}
-
-/// What was read of a device's or library's games. Each file's [`Rom`] is kept
-/// while its size and time stay the same. The cache only saves time, so one
-/// that can't be read counts as empty and a failed write is ignored.
-#[derive(Debug, Clone)]
-pub(crate) struct Cache {
-    /// The root of the device or library.
-    root: PathBuf,
-    /// The file it is kept in.
-    path: PathBuf,
-    /// Paths are relative to `root`, so entries hold wherever the device is
-    /// mounted.
-    files: HashMap<PathBuf, Cached>,
-}
-
-impl Cache {
-    /// The cache of the files under `root`, kept in the file at `path`.
-    pub(crate) fn load(root: &Path, path: &Path) -> Self {
-        let files = fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
-        Self {
-            root: root.to_path_buf(),
-            path: path.to_path_buf(),
-            files,
+/// Every volume mounted now, by each system's conventions. On Windows these are
+/// the drives, and elsewhere the folders inside the folders that volumes are
+/// mounted in.
+pub(crate) fn mounted_volumes() -> Vec<PathBuf> {
+    let in_dirs = |dirs: &[PathBuf]| -> Vec<PathBuf> {
+        dirs.iter()
+            .filter_map(|dir| fs::read_dir(dir).ok())
+            .flatten()
+            .filter_map(|entry| entry.ok().map(|dir_entry| dir_entry.path()))
+            .collect()
+    };
+    match std::env::consts::OS {
+        "macos" => in_dirs(&[PathBuf::from("/Volumes")]),
+        "linux" => {
+            let user = std::env::var("USER").unwrap_or_default();
+            in_dirs(&[
+                Path::new("/media").join(&user),
+                Path::new("/run/media").join(&user),
+                PathBuf::from("/media"),
+                PathBuf::from("/mnt"),
+            ])
         }
-    }
-
-    pub(crate) fn save(&self) {
-        if let Ok(json) = serde_json::to_vec(&self.files) {
-            let _ = write_atomically(&self.path, &json, None);
-        }
-    }
-
-    /// The game at `path`, taken from this cache if its size and time are
-    /// unchanged, otherwise read and recorded.
-    pub(crate) fn read_game(
-        &mut self,
-        platform: &Platform,
-        path: &Path,
-    ) -> Result<Game, BasicError> {
-        let meta = fs::metadata(path)?;
-        let (size, modified) = (meta.len(), meta.modified()?);
-        let key = key(&self.root, path);
-        let rom = match self.files.get(key) {
-            Some(cached) if cached.size == size && cached.modified == modified => cached.rom,
-            _ => {
-                let Files::Single(rom) = Game::read(platform.clone(), path)?.files;
-                rom
-            }
-        };
-        self.insert(key, size, modified, rom);
-        Ok(Game {
-            platform: platform.clone(),
-            files: Files::Single(rom),
-        })
-    }
-
-    /// Records that the file at `path` holds `game`. This is for a file just
-    /// written from a game whose hash is known.
-    pub(crate) fn record_game(&mut self, path: &Path, game: &Game) -> Result<(), BasicError> {
-        let meta = fs::metadata(path)?;
-        let Files::Single(rom) = game.files;
-        self.insert(key(&self.root, path), meta.len(), meta.modified()?, rom);
-        Ok(())
-    }
-
-    /// Records that the file at `path` is gone.
-    pub(crate) fn forget(&mut self, path: &Path) {
-        self.files.remove(key(&self.root, path));
-    }
-
-    /// Forgets every file but those at `paths`, the ones a scan just found.
-    pub(crate) fn keep_only(&mut self, paths: &HashSet<PathBuf>) {
-        self.files
-            .retain(|file, _| paths.contains(&self.root.join(file)));
-    }
-
-    fn insert(&mut self, path: &Path, size: u64, modified: SystemTime, rom: Rom) {
-        let cached = Cached {
-            size,
-            modified,
-            rom,
-        };
-        self.files.insert(path.to_path_buf(), cached);
+        "windows" => (b'A'..=b'Z')
+            .map(|drive_letter| PathBuf::from(format!("{}:\\", drive_letter as char)))
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
-/// `path` from `root`, as the cache keeps it.
-fn key<'a>(root: &Path, path: &'a Path) -> &'a Path {
-    path.strip_prefix(root).unwrap_or(path)
+/// Has the system eject the volume at `root`, as its file manager would. If
+/// it doesn't, the error is what it said.
+pub(crate) fn eject_volume(root: &Path) -> Result<(), String> {
+    match std::env::consts::OS {
+        "macos" => run_command(Command::new("diskutil").arg("eject").arg(root)),
+        "linux" => {
+            let mut findmnt = Command::new("findmnt");
+            findmnt.args(["-n", "-o", "SOURCE", "--target"]).arg(root);
+            let block = run_command(&mut findmnt)?;
+            let block = block.trim();
+            run_command(Command::new("udisksctl").args(["unmount", "-b", block]))?;
+            run_command(Command::new("udisksctl").args(["power-off", "-b", block]))
+        }
+        "windows" => {
+            // The drive, e.g. `E:`, as Explorer's Eject wants it.
+            let drive = root.to_string_lossy();
+            let drive = drive.trim_end_matches(['\\', '/']);
+            let script = format!(
+                "(New-Object -ComObject Shell.Application).Namespace(17).ParseName('{drive}').InvokeVerb('Eject')"
+            );
+            run_command(Command::new("powershell").args(["-NoProfile", "-Command", &script]))
+        }
+        os => Err(format!("ejecting is not supported on {os}")),
+    }
+    .map(drop)
+}
+
+/// Runs `command` and returns what it printed if it succeeded, or else what
+/// it said.
+fn run_command(command: &mut Command) -> Result<String, String> {
+    let out = command.output().map_err(|error| error.to_string())?;
+    if !out.status.success() {
+        let said = [&out.stderr[..], &out.stdout[..]].concat();
+        return Err(String::from_utf8_lossy(&said).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Helpers shared by the tests of modules that keep files on disk.
@@ -310,5 +282,18 @@ mod tests {
         assert!(matches!(failed, Err(BasicError::Io(_))));
         assert_eq!(fs::read(&path).unwrap(), b"old");
         assert_eq!(all_in(dir.path()), ["Foo.gba"]);
+    }
+
+    #[test]
+    fn rejects_characters_fat_cannot_hold() {
+        for name in [
+            "a:b.gba", "a?.gba", "a*.gba", "a\".gba", "a<.gba", "a>.gba", "a|.gba",
+        ] {
+            assert!(!is_valid_fat_name(name), "{name}");
+        }
+        assert!(!is_valid_fat_name("../x.gba"));
+        assert!(is_valid_fat_name(
+            "Legend of Zelda, The - It's (USA) [!].gba"
+        ));
     }
 }

@@ -13,7 +13,7 @@ use fs_err::{self as fs, File};
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
-use crate::{error::BasicError, files::write_atomically, platform::Platform};
+use crate::{error::BasicError, os::write_atomically, platform::Platform};
 
 /// The cores Pocketeer installs for now. Each comes alone in its zip and needs
 /// nothing beyond `Cores/` and `Platforms/`, so there are no ROMs, saves or
@@ -571,7 +571,7 @@ mod tests {
     use std::cell::Cell;
 
     use super::{testing::*, *};
-    use crate::files::testing::{put, put_at};
+    use crate::os::testing::{put, put_at};
 
     mod core_files {
         use super::*;

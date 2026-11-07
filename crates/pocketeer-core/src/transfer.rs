@@ -153,8 +153,8 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::files::testing::{at, put_at};
     use crate::game::Save;
+    use crate::os::testing::{at, put_at};
 
     /// Tetris on a device and in a library. The library has `kept` as its save
     /// and the device has `save_there`, each if given.

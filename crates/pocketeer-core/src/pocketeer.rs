@@ -19,13 +19,13 @@ use crate::{
         OpenDeviceError, OrphanDeviceSave, RenameOnDeviceError, ScanReport,
     },
     error::BasicError,
-    files::list_files_recursive,
     game::Game,
     library::{
         AddGameError, Library, LibrarySave, LocalEntry, OpenLibraryError, OrphanLocalSave,
         RenameInLibraryError, TrashSaveAllOutcome, TrashSaveError,
     },
     log::{FrontEnd, LogEntry, Logger, OperationReport},
+    os::list_files_recursive,
     platform::Platform,
     sources::{libretro::Libretro, openfpga::OpenFpga},
     transfer::{
@@ -1064,7 +1064,7 @@ mod tests {
         testing::{core_json, data_json, zip_of},
     };
     use crate::cover::{Cover, testing::PNG};
-    use crate::files::testing::{put, put_at};
+    use crate::os::testing::{put, put_at};
 
     /// A DAT that lists the GBA game with the contents `hello`.
     const GBA_DAT: &str = r#"clrmamepro ( name "Nintendo - Game Boy Advance" ) game ( name "Tetris (World)" rom ( name "Tetris (World).gba" size 5 crc 3610A686 ) )"#;
