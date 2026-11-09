@@ -1,5 +1,6 @@
 //! The command line. Each command is a call or two into `Pocketeer`.
 
+mod display;
 mod tui;
 
 use std::{
@@ -28,6 +29,8 @@ use pocketeer_core::{
 use serde::Serialize;
 use serde_json::{Value, json};
 use strum::IntoEnumIterator;
+
+use crate::display::ByteCountExt;
 
 /// Keeps a Pocket's games and saves in a library on the computer.
 ///
@@ -718,7 +721,7 @@ impl CliSession {
                         let note = if version.newest { "newest" } else { "" };
                         [
                             version.version.clone(),
-                            format!("{} bytes", version.size),
+                            version.size.readable_bytes(),
                             note.into(),
                         ]
                     })
@@ -796,7 +799,7 @@ impl CliSession {
                     .map(|orphan| {
                         [
                             orphan.save.clone(),
-                            format!("{} bytes", orphan.size),
+                            orphan.size.readable_bytes(),
                             orphan.written.clone(),
                         ]
                     })

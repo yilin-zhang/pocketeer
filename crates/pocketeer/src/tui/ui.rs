@@ -24,6 +24,8 @@ use ratatui::{
 use ratatui_image::{StatefulImage, protocol::StatefulProtocol};
 use strum::IntoEnumIterator;
 
+use crate::display::ByteCountExt;
+
 use super::{
     app::{
         App, DeviceStatus, Dialog, GamesFilter, Group, ImportPrompt, ImportTarget, Page,
@@ -545,7 +547,7 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
                 ));
             }
             let Files::Single(rom) = row.game().files;
-            lines.push(labeled_text_line("Size", format!("{} bytes", rom.size)));
+            lines.push(labeled_text_line("Size", rom.size.readable_bytes()));
             lines.push(labeled_line(
                 "crc32",
                 Palette::Muted.span(format!("{:08x}", rom.crc32)),
@@ -577,10 +579,7 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
         }
         Some(GamesTableRow::OrphanSaveOnDevice(orphan)) => {
             lines.push(labeled_text_line("Save", orphan.path.display().to_string()));
-            lines.push(labeled_text_line(
-                "Size",
-                format!("{} bytes", orphan.save.size),
-            ));
+            lines.push(labeled_text_line("Size", orphan.save.size.readable_bytes()));
             lines.push(labeled_text_line("Written", orphan.save.timestamp()));
             lines.push(Line::default());
             lines.push(Line::from(Palette::Muted.span(
@@ -652,7 +651,7 @@ fn draw_saves(frame: &mut Frame, app: &App, area: Rect, selected_version_index: 
             };
             TableRow::new(vec![
                 Cell::from(version.name.clone()),
-                Cell::from(Text::from(format!("{} bytes", version.save.size)).right_aligned()),
+                Cell::from(Text::from(version.save.size.readable_bytes()).right_aligned()),
                 Cell::from(note).style(Palette::Muted.style()),
             ])
         })
