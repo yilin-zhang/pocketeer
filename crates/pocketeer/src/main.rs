@@ -47,10 +47,10 @@ use crate::display::ByteCountExt;
 ///
 /// With `--json` it prints one object, `{"schema_version": 1, "ok": …, "data":
 /// …}`, with `"error": "…"` in place of `data` when it couldn't start. `games`
-/// also has `"duplicates": [{"device", "same_game_as"}]`. A malformed command
-/// prints text to stderr and nothing to stdout, and exits with 2. A command
-/// over several things has in `data` one entry per thing, each with its own
-/// `ok` and `message`.
+/// also has `"duplicates"`, the second copies of games on the device, which are
+/// left out. A malformed command prints text to stderr and nothing to stdout,
+/// and exits with 2. A command over several things has in `data` one entry per
+/// thing, each with its own `ok` and `message`.
 ///
 /// With no command it opens the terminal UI.
 #[derive(Parser)]
@@ -611,18 +611,10 @@ impl CliSession {
         };
         for duplicate in &session.duplicates {
             eprintln!(
-                "warning: {duplicate} is the same game as {}; it is left out and its save isn't synced",
-                session.first_copy(duplicate),
+                "warning: {duplicate} is a second copy of a game; it is left out and its save isn't synced",
             );
         }
         Ok(session)
-    }
-
-    /// The copy of the game the scan kept in place of `duplicate`.
-    fn first_copy(&self, duplicate: &DeviceEntry) -> &DeviceEntry {
-        let device = self.pocketeer.device().expect("the device is open");
-        let first = device.entry_for(&duplicate.game);
-        first.expect("the scan keeps a copy of each game")
     }
 
     fn print_games(&self) -> CliResult<()> {
@@ -653,16 +645,8 @@ impl CliSession {
             .collect();
         match self.format {
             PrintFormat::Json => {
-                let duplicates: Vec<Value> = self
-                    .duplicates
-                    .iter()
-                    .map(|duplicate| {
-                        json!({
-                            "device": duplicate.to_string(),
-                            "same_game_as": self.first_copy(duplicate).to_string(),
-                        })
-                    })
-                    .collect();
+                let duplicates: Vec<String> =
+                    self.duplicates.iter().map(ToString::to_string).collect();
                 print_envelope(json!({ "ok": true, "data": rows, "duplicates": duplicates }));
             }
             PrintFormat::Text => {
@@ -1304,13 +1288,11 @@ impl CliSession {
             .map(|game_arg| {
                 let (platform, path) = split_platform(game_arg)?;
                 let path = Path::new(path);
-                let is_named_copy = |device_entry: &&DeviceEntry| {
+                let is_named_copy = |device_entry: &DeviceEntry| {
                     device_entry.game.platform == platform && device_entry.path == path
                 };
-                if let Some(duplicate) = self.duplicates.iter().find(is_named_copy) {
-                    let first = self.first_copy(duplicate).to_string();
-                    let message =
-                        format!("{game_arg}: the same game as {first}, the copy that is used");
+                if self.duplicates.iter().any(is_named_copy) {
+                    let message = format!("{game_arg}: a second copy of a game, which is left out");
                     return Err(CliError::CouldNotStart(message));
                 }
                 let found = device.entry_at(&platform, path);

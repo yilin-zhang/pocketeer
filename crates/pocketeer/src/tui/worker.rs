@@ -505,7 +505,7 @@ impl WorkerState<'_> {
             .and_then(|()| pocketeer.scan_device().map_err(|error| error.to_string()));
         let failure = match opened {
             Ok(report) => {
-                send_duplicates(self.send_message, pocketeer, &report.duplicates);
+                send_duplicates(self.send_message, &report.duplicates);
                 None
             }
             Err(error) => {
@@ -643,7 +643,7 @@ impl WorkerState<'_> {
                     let _ = progress.record_finished_target(pocketeer, entry.report);
                 });
                 if let Ok(report) = &read {
-                    send_duplicates(self.send_message, pocketeer, &report.duplicates);
+                    send_duplicates(self.send_message, &report.duplicates);
                 }
                 only_log_failure(read)
             }
@@ -741,21 +741,11 @@ fn only_log_failure<T, E>(result: Result<T, LoggedError<E>>) -> BatchResult {
 
 /// Tells the UI about `duplicates`, the copies a scan left out, if there are
 /// any.
-fn send_duplicates(
-    send_message: &dyn Fn(WorkerMessage),
-    pocketeer: &Pocketeer,
-    duplicates: &[DeviceEntry],
-) {
+fn send_duplicates(send_message: &dyn Fn(WorkerMessage), duplicates: &[DeviceEntry]) {
     if duplicates.is_empty() {
         return;
     }
-    let lines = duplicates.iter().map(|device_entry| {
-        let first = pocketeer
-            .device()
-            .and_then(|device| device.entry_for(&device_entry.game));
-        let first = first.map(ToString::to_string).unwrap_or_default();
-        format!("{device_entry} is the same game as {first}")
-    });
+    let lines = duplicates.iter().map(ToString::to_string);
     send_message(WorkerMessage::DuplicateGamesSkipped(lines.collect()));
 }
 
@@ -970,7 +960,7 @@ mod tests {
                     ("Assets/gba/common/RPG/Two.gba", b"c"),
                 ],
             );
-            let lines = ["gba/RPG/Two.gba is the same game as gba/One.gba".to_string()];
+            let lines = ["gba/RPG/Two.gba".to_string()];
             let opening = until_device_read(&rx);
             assert_eq!(duplicates(&opening), [&lines[..]]);
             assert_eq!(last_games_page_data(&opening).rows.len(), 1);

@@ -414,7 +414,7 @@ mod duplicates_on_device {
         setup
     }
 
-    const TWO_COPIES_WARNING: &str = "warning: gba/RPG/Two.gba is the same game as gba/One.gba; \
+    const TWO_COPIES_WARNING: &str = "warning: gba/RPG/Two.gba is a second copy of a game; \
                                       it is left out and its save isn't synced\n";
 
     #[test]
@@ -423,10 +423,7 @@ mod duplicates_on_device {
         let ran = setup.run(&["--json", "games"]);
         assert_eq!(ran.code, 0);
         assert_eq!(ran.stderr, TWO_COPIES_WARNING);
-        assert_eq!(
-            ran.json()["duplicates"],
-            json!([{ "device": "gba/RPG/Two.gba", "same_game_as": "gba/One.gba" }])
-        );
+        assert_eq!(ran.json()["duplicates"], json!(["gba/RPG/Two.gba"]));
     }
 
     #[test]
@@ -443,7 +440,7 @@ mod duplicates_on_device {
             args.push("gba/RPG/Two.gba");
             assert_json_could_not_start(
                 &setup.run(&args),
-                "gba/RPG/Two.gba: the same game as gba/One.gba, the copy that is used",
+                "gba/RPG/Two.gba: a second copy of a game, which is left out",
             );
         }
         assert!(
