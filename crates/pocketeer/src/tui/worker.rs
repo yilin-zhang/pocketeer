@@ -566,9 +566,9 @@ impl WorkerState<'_> {
             target_count: progress.target_count,
         });
         let batch_result = match command {
-            WorkerCommand::PullGames(games) => pocketeer.pull_games(&games, progress.on_logged()),
+            WorkerCommand::PullGames(games) => pocketeer.pull_games(&games, progress.on_logged()).0,
             WorkerCommand::PullSaves(games) => pocketeer.pull_saves(&games, progress.on_logged()),
-            WorkerCommand::PushGames(games) => pocketeer.push_games(&games, progress.on_logged()),
+            WorkerCommand::PushGames(games) => pocketeer.push_games(&games, progress.on_logged()).0,
             WorkerCommand::PushSaveVersion(game, version) => {
                 pocketeer.push_save_versions(&[(game, version)], progress.on_logged())
             }
@@ -589,7 +589,7 @@ impl WorkerState<'_> {
                             })
                             .collect();
                         progress.target_count = files.len();
-                        pocketeer.import_games(&files, progress.on_logged())
+                        pocketeer.import_games(&files, progress.on_logged()).0
                     })
             }
             WorkerCommand::ImportSave(game, from) => {

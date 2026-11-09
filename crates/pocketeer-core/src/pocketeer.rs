@@ -357,12 +357,20 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         &mut self,
         games: &[DeviceEntry],
         on_logged: impl FnMut(&Self, LogEntry) -> ControlFlow<()>,
-    ) -> BatchResult {
-        self.for_each_item(
+    ) -> (BatchResult, Vec<LocalEntry>) {
+        let mut added_entries = Vec::new();
+        let batch_result = self.for_each_item(
             games,
-            |pocketeer, game| OperationReport::pull_game(game, &pocketeer.pull_game(game)),
+            |pocketeer, game| {
+                let outcome = pocketeer.pull_game(game);
+                if let Ok(AddGameOutcome::Added(local_entry)) = &outcome {
+                    added_entries.push(local_entry.clone());
+                }
+                OperationReport::pull_game(game, &outcome)
+            },
             on_logged,
-        )
+        );
+        (batch_result, added_entries)
     }
 
     fn pull_game(&mut self, device_entry: &DeviceEntry) -> Result<AddGameOutcome, AddGameError> {
@@ -375,12 +383,20 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         &mut self,
         games: &[LocalEntry],
         on_logged: impl FnMut(&Self, LogEntry) -> ControlFlow<()>,
-    ) -> BatchResult {
-        self.for_each_item(
+    ) -> (BatchResult, Vec<DeviceEntry>) {
+        let mut pushed_entries = Vec::new();
+        let batch_result = self.for_each_item(
             games,
-            |pocketeer, game| OperationReport::push_game(game, &pocketeer.push_game(game)),
+            |pocketeer, game| {
+                let outcome = pocketeer.push_game(game);
+                if let Ok(PushGameOutcome::Pushed(device_entry)) = &outcome {
+                    pushed_entries.push(device_entry.clone());
+                }
+                OperationReport::push_game(game, &outcome)
+            },
             on_logged,
-        )
+        );
+        (batch_result, pushed_entries)
     }
 
     fn push_game(&mut self, local_entry: &LocalEntry) -> Result<PushGameOutcome, PushGameError> {
@@ -395,17 +411,22 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
         &mut self,
         files: &[(PathBuf, Platform)],
         on_logged: impl FnMut(&Self, LogEntry) -> ControlFlow<()>,
-    ) -> BatchResult {
-        self.for_each_item(
+    ) -> (BatchResult, Vec<LocalEntry>) {
+        let mut added_entries = Vec::new();
+        let batch_result = self.for_each_item(
             files,
             |pocketeer, (from, platform)| {
-                let result = pocketeer.library.import_game(from, platform.clone());
+                let outcome = pocketeer.library.import_game(from, platform.clone());
+                if let Ok(AddGameOutcome::Added(local_entry)) = &outcome {
+                    added_entries.push(local_entry.clone());
+                }
                 // The log outlives the folder the command was run in.
                 let from = std::path::absolute(from).unwrap_or_else(|_| from.clone());
-                OperationReport::import_game(&from, &result)
+                OperationReport::import_game(&from, &outcome)
             },
             on_logged,
-        )
+        );
+        (batch_result, added_entries)
     }
 
     /// Renames each game in the library to the name paired with it, keeping its
@@ -935,7 +956,7 @@ impl<D: RemoteDatSource, C: RemoteCoverSource, I: RemoteCoreSource> Pocketeer<D,
     fn for_each_item<Item>(
         &mut self,
         items: &[Item],
-        op: impl Fn(&mut Self, &Item) -> OperationReport,
+        mut op: impl FnMut(&mut Self, &Item) -> OperationReport,
         mut on_logged: impl FnMut(&Self, LogEntry) -> ControlFlow<()>,
     ) -> BatchResult {
         for item in items {
@@ -1270,7 +1291,7 @@ mod tests {
         // A failed game doesn't stop the batch. The callback stops it after
         // the game it was given, and only what was done is in the log.
         let mut seen = Vec::new();
-        let control_flow = setup
+        let (control_flow, _) = setup
             .pocketeer
             .push_games(&[gone, a, b.clone()], |_, entry| {
                 seen.push((entry.report.subject.clone(), entry.report.is_ok));
@@ -1298,7 +1319,7 @@ mod tests {
         fs::remove_file(&log).unwrap();
         fs::create_dir(&log).unwrap();
         let mut seen = Vec::new();
-        let batch_result = setup.pocketeer.push_games(&[b, c], |_, entry| {
+        let (batch_result, _) = setup.pocketeer.push_games(&[b, c], |_, entry| {
             seen.push(entry.report.subject.clone());
             ControlFlow::Continue(())
         });

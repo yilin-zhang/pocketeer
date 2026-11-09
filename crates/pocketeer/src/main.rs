@@ -4,7 +4,6 @@ mod display;
 mod tui;
 
 use std::{
-    collections::HashSet,
     fmt,
     io::{self, IsTerminal},
     ops::ControlFlow,
@@ -20,7 +19,6 @@ use pocketeer_core::{
     Pocketeer,
     cores::{BiosStatus, CoreRow, RemoteCore},
     device::{Device, DeviceEntry},
-    game::Game,
     library::{LibrarySave, LocalEntry, OpenLibraryError},
     log::{FrontEnd, LogEntry},
     platform::Platform,
@@ -803,12 +801,13 @@ impl CliSession {
             game_args => self.entries_on_device(game_args)?,
         };
         self.run_batch(|pocketeer, on_logged| {
-            let before = games_in_library(pocketeer);
-            let pulled = pocketeer.pull_games(&games, &mut *on_logged)?;
-            if use_standard_names && pulled.is_continue() {
-                rename_added_to_dat_names(pocketeer, &before, on_logged)
+            let (batch_result, pulled_entries) = pocketeer.pull_games(&games, &mut *on_logged);
+            let control_flow = batch_result?;
+            if use_standard_names && control_flow.is_continue() {
+                let renames = pocketeer.renames_to_dat_names(&pulled_entries);
+                pocketeer.rename_games_in_library(&renames, on_logged)
             } else {
-                Ok(pulled)
+                Ok(control_flow)
             }
         })
     }
@@ -842,7 +841,7 @@ impl CliSession {
 
     fn push_games(&mut self, game_args: &[String]) -> CliResult<()> {
         let games = self.entries_in_library(game_args)?;
-        self.run_batch(|pocketeer, on_logged| pocketeer.push_games(&games, on_logged))
+        self.run_batch(|pocketeer, on_logged| pocketeer.push_games(&games, on_logged).0)
     }
 
     fn push_save(&mut self, game_arg: &str, version_name: &str) -> CliResult<()> {
@@ -875,12 +874,13 @@ impl CliSession {
             )
             .collect::<CliResult<Vec<_>>>()?;
         self.run_batch(|pocketeer, on_logged| {
-            let before = games_in_library(pocketeer);
-            let imported = pocketeer.import_games(&files, &mut *on_logged)?;
-            if use_standard_names && imported.is_continue() {
-                rename_added_to_dat_names(pocketeer, &before, on_logged)
+            let (batch_result, imported_entries) = pocketeer.import_games(&files, &mut *on_logged);
+            let control_flow = batch_result?;
+            if use_standard_names && control_flow.is_continue() {
+                let renames = pocketeer.renames_to_dat_names(&imported_entries);
+                pocketeer.rename_games_in_library(&renames, on_logged)
             } else {
-                Ok(imported)
+                Ok(control_flow)
             }
         })
     }
@@ -1316,28 +1316,6 @@ impl CliSession {
             .entry_named(&platform, name)
             .ok_or_else(not_there)
     }
-}
-
-/// The games in the library now, to tell which a command adds.
-fn games_in_library(pocketeer: &Pocketeer) -> HashSet<Game> {
-    let entries = pocketeer.library().entries();
-    entries.iter().map(|entry| entry.game.clone()).collect()
-}
-
-/// Renames each game the library has but `before` doesn't to its DAT name.
-fn rename_added_to_dat_names(
-    pocketeer: &mut Pocketeer,
-    before: &HashSet<Game>,
-    on_logged: &mut dyn FnMut(&Pocketeer, LogEntry) -> ControlFlow<()>,
-) -> BatchResult {
-    let entries = pocketeer.library().entries();
-    let added: Vec<LocalEntry> = entries
-        .iter()
-        .filter(|entry| !before.contains(&entry.game))
-        .cloned()
-        .collect();
-    let renames = pocketeer.renames_to_dat_names(&added);
-    pocketeer.rename_games_in_library(&renames, on_logged)
 }
 
 fn not_on_device(game_arg: &str) -> CliError {
