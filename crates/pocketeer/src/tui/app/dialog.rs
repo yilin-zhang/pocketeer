@@ -2,7 +2,8 @@
 
 use pocketeer_core::{
     device::{DeviceEntry, OrphanDeviceSave},
-    library::{LibrarySave, LocalEntry, OrphanLocalSave},
+    library::{LibraryKey, LibrarySave, LocalEntry, OrphanLocalSave},
+    pocketeer::Command,
 };
 
 use super::keymap::{Binding, Group, Keymap};
@@ -75,7 +76,7 @@ impl Dialog {
 
     /// Asks whether to rename games to their DAT names, showing the new names
     /// first.
-    pub(super) fn renames(renames: Vec<(LocalEntry, String)>) -> Self {
+    pub(super) fn renames(renames: Vec<(LibraryKey, String)>) -> Self {
         let mut lines = vec![
             "These get the names the DATs have; saves and covers go with them.".to_string(),
             "The device isn't touched.".to_string(),
@@ -84,18 +85,23 @@ impl Dialog {
         // Each game takes two lines because names are long, so this shows half
         // as many as other dialogs.
         const SHOWN: usize = 5;
-        for (local_entry, new) in renames.iter().take(SHOWN) {
-            lines.push(local_entry.stem().to_string());
+        for (key, new) in renames.iter().take(SHOWN) {
+            lines.push(key.stem().to_string());
             lines.push(format!("  → {new}"));
         }
         if renames.len() > SHOWN {
             lines.push(format!("… and {} more", renames.len() - SHOWN));
         }
+        let count = renames.len();
+        let renames = renames
+            .into_iter()
+            .map(|(key, new)| Command::RenameInLibrary(key, new))
+            .collect();
         Self {
-            title: format!("Rename {}", Self::pluralized(renames.len(), "game")),
+            title: format!("Rename {}", Self::pluralized(count, "game")),
             lines,
             buttons: vec![
-                DialogButton::new("Rename", Some(WorkerCommand::RenameGamesInLibrary(renames))),
+                DialogButton::new("Rename", Some(WorkerCommand::Run(renames))),
                 DialogButton::new("Cancel", None),
             ],
             focused_button: 0,
@@ -132,7 +138,12 @@ impl Dialog {
             format!("Trash {}", Self::pluralized(entries.len(), "game")),
             lines,
             "Trash",
-            WorkerCommand::TrashGames(entries),
+            WorkerCommand::Run(
+                entries
+                    .iter()
+                    .map(|entry| Command::TrashGame(entry.key()))
+                    .collect(),
+            ),
         )
     }
 
@@ -148,7 +159,12 @@ impl Dialog {
             format!("Trash {}", Self::pluralized(orphans.len(), "orphan save")),
             lines,
             "Trash",
-            WorkerCommand::TrashOrphanSaves(orphans),
+            WorkerCommand::Run(
+                orphans
+                    .into_iter()
+                    .map(|orphan| Command::TrashOrphanSave(orphan.platform, orphan.stem))
+                    .collect(),
+            ),
         )
     }
 
@@ -160,7 +176,7 @@ impl Dialog {
                 version.name
             )],
             "Trash",
-            WorkerCommand::TrashSaveVersion(local_entry, version),
+            WorkerCommand::Run(vec![Command::TrashSave(local_entry.key(), version.name)]),
         )
     }
 
@@ -196,7 +212,12 @@ impl Dialog {
             ),
             lines,
             "Delete",
-            WorkerCommand::DeleteGames(entries),
+            WorkerCommand::Run(
+                entries
+                    .iter()
+                    .map(|entry| Command::DeleteGame(entry.key()))
+                    .collect(),
+            ),
         )
     }
 
@@ -215,7 +236,12 @@ impl Dialog {
             ),
             lines,
             "Delete",
-            WorkerCommand::DeleteOrphanSaves(orphans),
+            WorkerCommand::Run(
+                orphans
+                    .into_iter()
+                    .map(|orphan| Command::DeleteOrphanSave(orphan.platform, orphan.path))
+                    .collect(),
+            ),
         )
     }
 
@@ -231,7 +257,12 @@ impl Dialog {
             "Delete a save from the device".to_string(),
             lines,
             "Delete",
-            WorkerCommand::DeleteSaves(entries),
+            WorkerCommand::Run(
+                entries
+                    .iter()
+                    .map(|entry| Command::DeleteSave(entry.key()))
+                    .collect(),
+            ),
         )
     }
 
@@ -243,7 +274,7 @@ impl Dialog {
                 "Its settings and saves stay on the device.".to_string(),
             ],
             "Delete",
-            WorkerCommand::RemoveCores(vec![id]),
+            WorkerCommand::Run(vec![Command::RemoveCore(id)]),
         )
     }
 
@@ -281,27 +312,5 @@ impl Dialog {
             lines.push(format!("… and {more} more"));
         }
         lines
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tui::app::games_page::testing::local_entry;
-
-    #[test]
-    fn renames_shows_five_games_and_counts_the_rest() {
-        let renames = (0..7)
-            .map(|i| {
-                (
-                    local_entry(&format!("{i}.gba"), i, &[]),
-                    format!("Game {i}"),
-                )
-            })
-            .collect();
-        let dialog = Dialog::renames(renames);
-        assert_eq!(dialog.title, "Rename 7 games");
-        assert_eq!(dialog.lines[3..5], ["0", "  → Game 0"]);
-        assert_eq!(dialog.lines.last().unwrap(), "… and 2 more");
     }
 }

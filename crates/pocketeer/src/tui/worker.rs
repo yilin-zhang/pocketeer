@@ -2,7 +2,6 @@
 //! a time.
 
 use std::{
-    ops::ControlFlow,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -18,10 +17,9 @@ use pocketeer_core::{
     Pocketeer,
     cores::{BiosRow, CoreList},
     device::{Device, DeviceEntry, DiskSpace, Firmware, OrphanDeviceSave},
-    library::{LibrarySave, LocalEntry, OrphanLocalSave},
-    log::{FrontEnd, LogEntry, LoggedError, OperationReport},
+    library::{LibraryKey, LocalEntry, OrphanLocalSave},
     platform::Platform,
-    pocketeer::{BatchResult, GameRow},
+    pocketeer::{Command, GameRow, Report},
 };
 
 /// How often it checks for a device being plugged in or removed while idle.
@@ -29,105 +27,44 @@ const DEVICE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkerCommand {
-    PullGames(Vec<DeviceEntry>),
-    PullSaves(Vec<DeviceEntry>),
-    PushGames(Vec<LocalEntry>),
-    PushSaveVersion(DeviceEntry, LibrarySave),
-    FetchCovers(Vec<LocalEntry>),
-    TrashGames(Vec<LocalEntry>),
-    /// The file, and the platform if one was chosen. Otherwise its extension
-    /// decides.
+    /// Commands for the core, run one after another as one job that can be
+    /// stopped between them. They are all of one kind.
+    Run(Vec<Command>),
+    /// The file or folder, and the platform if one was chosen. Otherwise each
+    /// file's extension decides. The worker reads the folder, so that the
+    /// screen doesn't wait for the disk.
     ImportGame(PathBuf, Option<Platform>),
-    ImportSave(LocalEntry, PathBuf),
-    ImportCover(LocalEntry, PathBuf),
-    TrashSaveVersion(LocalEntry, LibrarySave),
-    TrashOrphanSaves(Vec<OrphanLocalSave>),
-    DeleteGames(Vec<DeviceEntry>),
-    DeleteSaves(Vec<DeviceEntry>),
-    DeleteOrphanSaves(Vec<OrphanDeviceSave>),
     SyncDats,
     Reload,
     Eject,
     /// The Cores page was opened, so the worker starts sending the cores.
     ShowCores,
-    InstallCores(Vec<String>),
-    RemoveCores(Vec<String>),
-    /// The file to copy to where the row says.
-    PutBios(BiosRow, PathBuf),
     /// Asks what the DATs would rename these games in the library to. The answer
     /// comes as `WorkerMessage::RenamesProposed`.
-    ProposeRenames(Vec<LocalEntry>),
-    /// Games in the library, and what to call them.
-    RenameGamesInLibrary(Vec<(LocalEntry, String)>),
-    /// The game on the device, and what to call it.
-    RenameOnDevice(DeviceEntry, String),
+    ProposeRenames(Vec<LibraryKey>),
 }
 
-impl WorkerCommand {
-    fn label(&self) -> &'static str {
-        match self {
-            WorkerCommand::PullGames(_) => "pulling games",
-            WorkerCommand::PullSaves(_) => "backing up saves",
-            WorkerCommand::PushGames(_) => "pushing games",
-            WorkerCommand::PushSaveVersion(..) => "pushing a save",
-            WorkerCommand::FetchCovers(_) => "downloading covers",
-            WorkerCommand::ImportGame(..) => "importing games",
-            WorkerCommand::ImportSave(..) => "importing a save",
-            WorkerCommand::ImportCover(..) => "importing a cover",
-            WorkerCommand::TrashGames(_) => "putting games in the trash",
-            WorkerCommand::TrashSaveVersion(..) => "putting a save in the trash",
-            WorkerCommand::TrashOrphanSaves(_) => "putting saves in the trash",
-            WorkerCommand::DeleteGames(_) => "deleting games",
-            WorkerCommand::DeleteSaves(_) | WorkerCommand::DeleteOrphanSaves(_) => "deleting saves",
-            WorkerCommand::SyncDats => "updating the DATs",
-            WorkerCommand::Reload => "reading everything again",
-            WorkerCommand::Eject => "ejecting the device",
-            WorkerCommand::ShowCores => "reading the cores",
-            WorkerCommand::ProposeRenames(_) => "finding standard names",
-            WorkerCommand::InstallCores(_) => "installing cores",
-            WorkerCommand::RemoveCores(_) => "removing cores",
-            WorkerCommand::PutBios(..) => "putting a file on the device",
-            WorkerCommand::RenameGamesInLibrary(_) => "renaming games",
-            WorkerCommand::RenameOnDevice(..) => "renaming a game",
-        }
-    }
-
-    fn target_count(&self) -> usize {
-        match self {
-            // These hold a list, and each item is one target. They take several
-            // arms only because the lists hold different types.
-            WorkerCommand::PullGames(games)
-            | WorkerCommand::PullSaves(games)
-            | WorkerCommand::DeleteGames(games)
-            | WorkerCommand::DeleteSaves(games) => games.len(),
-            WorkerCommand::PushGames(games)
-            | WorkerCommand::FetchCovers(games)
-            | WorkerCommand::TrashGames(games) => games.len(),
-            WorkerCommand::TrashOrphanSaves(orphan_saves) => orphan_saves.len(),
-            WorkerCommand::DeleteOrphanSaves(orphan_saves) => orphan_saves.len(),
-            WorkerCommand::InstallCores(ids) | WorkerCommand::RemoveCores(ids) => ids.len(),
-            WorkerCommand::RenameGamesInLibrary(games) => games.len(),
-
-            // A folder can hold many games, but that isn't known until it is
-            // read. `run_command` replaces this count after reading it.
-            WorkerCommand::ImportGame(..) => 1,
-
-            // These act on one thing, so they report one step.
-            WorkerCommand::PushSaveVersion(..)
-            | WorkerCommand::PutBios(..)
-            | WorkerCommand::RenameOnDevice(..)
-            | WorkerCommand::ImportSave(..)
-            | WorkerCommand::ImportCover(..)
-            | WorkerCommand::TrashSaveVersion(..)
-            | WorkerCommand::Eject => 1,
-
-            // These go through many files or platforms, but report one result
-            // when they end.
-            WorkerCommand::SyncDats | WorkerCommand::Reload => 1,
-
-            // `run_command` returns before it needs a count for these.
-            WorkerCommand::ShowCores | WorkerCommand::ProposeRenames(_) => 0,
-        }
+/// What the status line says while commands of `command`'s kind run.
+fn label(command: &Command) -> &'static str {
+    match command {
+        Command::PullGame(_) => "pulling games",
+        Command::PullSave(_) => "backing up saves",
+        Command::PushGame(_) => "pushing games",
+        Command::PushSave(..) => "pushing a save",
+        Command::FetchCover(_) => "downloading covers",
+        Command::ImportGame(..) => "importing games",
+        Command::ImportSave(..) => "importing a save",
+        Command::ImportCover(..) => "importing a cover",
+        Command::TrashGame(_) => "putting games in the trash",
+        Command::TrashSave(..) => "putting a save in the trash",
+        Command::TrashSaves(_) | Command::TrashOrphanSave(..) => "putting saves in the trash",
+        Command::DeleteGame(_) => "deleting games",
+        Command::DeleteSave(_) | Command::DeleteOrphanSave(..) => "deleting saves",
+        Command::InstallCore(_) => "installing cores",
+        Command::RemoveCore(_) => "removing cores",
+        Command::PutBios(..) => "putting a file on the device",
+        Command::RenameInLibrary(..) => "renaming games",
+        Command::RenameOnDevice(..) => "renaming a game",
     }
 }
 
@@ -271,7 +208,7 @@ pub enum WorkerMessage {
     },
     /// The answer to `WorkerCommand::ProposeRenames`: the games whose name differs
     /// from their DAT name, each with that name.
-    RenamesProposed(Vec<(LocalEntry, String)>),
+    RenamesProposed(Vec<(LibraryKey, String)>),
     /// The copies a scan left out, one line each. Only sent when there are some
     /// and the device was opened or reloaded on request.
     DuplicateGamesSkipped(Vec<String>),
@@ -288,8 +225,7 @@ pub struct QueuedCommand {
 }
 
 /// The UI's end of the worker. Dropping it cancels as [`WorkerHandle::cancel`]
-/// does and waits for the thread, so that what it writes gets finished and
-/// logged.
+/// does and waits for the thread, so that what it writes gets finished.
 pub struct WorkerHandle {
     /// None once it is dropped.
     tx: Option<Sender<QueuedCommand>>,
@@ -363,7 +299,7 @@ fn run_worker_loop(
     rx: &Receiver<QueuedCommand>,
     send_message: &dyn Fn(WorkerMessage),
 ) {
-    let mut pocketeer = match Pocketeer::open(library, FrontEnd::Tui) {
+    let mut pocketeer = match Pocketeer::open(library) {
         Ok(pocketeer) => pocketeer,
         Err(error) => {
             send_message(WorkerMessage::LibraryOpenFailed(error.to_string()));
@@ -542,180 +478,105 @@ impl WorkerState<'_> {
         command: WorkerCommand,
         is_canceled: &AtomicBool,
     ) {
-        if command == WorkerCommand::ShowCores {
-            self.is_cores_page_opened = true;
-            self.send_cores_page_data(pocketeer);
-            return;
-        }
-        if let WorkerCommand::ProposeRenames(games) = &command {
-            (self.send_message)(WorkerMessage::RenamesProposed(
-                pocketeer.renames_to_dat_names(games),
-            ));
-            return;
-        }
-        let mut progress = CommandProgress {
-            send_message: self.send_message,
-            orphan_saves: &self.orphan_saves,
-            is_canceled,
-            target_count: command.target_count(),
-            reports: Vec::new(),
-        };
-        let label = command.label();
-        (self.send_message)(WorkerMessage::CommandStarted {
-            label: label.to_string(),
-            target_count: progress.target_count,
-        });
-        let batch_result = match command {
-            WorkerCommand::PullGames(games) => pocketeer.pull_games(&games, progress.on_logged()).0,
-            WorkerCommand::PullSaves(games) => pocketeer.pull_saves(&games, progress.on_logged()),
-            WorkerCommand::PushGames(games) => pocketeer.push_games(&games, progress.on_logged()).0,
-            WorkerCommand::PushSaveVersion(game, version) => {
-                pocketeer.push_save_versions(&[(game, version)], progress.on_logged())
-            }
-            WorkerCommand::FetchCovers(games) => {
-                pocketeer.fetch_covers(&games, progress.on_logged())
-            }
+        let commands = match command {
+            WorkerCommand::Run(commands) => commands,
             WorkerCommand::ImportGame(path, platform) => {
-                let files = pocketeer_core::pocketeer::expand_import_paths(&[path]);
-                files
-                    .map_err(LoggedError::OperationFailed)
-                    .and_then(|files| {
-                        // The app asks for the platform when the extension doesn't
-                        // tell it, so every file has one.
-                        let files: Vec<_> = files
-                            .into_iter()
-                            .filter_map(|(file, by_extension)| {
-                                Some((file, platform.clone().or(by_extension)?))
-                            })
-                            .collect();
-                        progress.target_count = files.len();
-                        pocketeer.import_games(&files, progress.on_logged()).0
-                    })
+                match pocketeer_core::pocketeer::expand_import_paths(&[path]) {
+                    // The app asks for the platform when the extension doesn't
+                    // tell it, so every file has one.
+                    Ok(files) => files
+                        .into_iter()
+                        .filter_map(|(file, by_extension)| {
+                            Some(Command::ImportGame(
+                                file,
+                                platform.clone().or(by_extension)?,
+                            ))
+                        })
+                        .collect(),
+                    Err(error) => {
+                        let summary = format!("importing games: {error}");
+                        return self.finish_with_refresh(pocketeer, summary, true);
+                    }
+                }
             }
-            WorkerCommand::ImportSave(game, from) => {
-                pocketeer.import_saves(&[(game, from)], progress.on_logged())
+            WorkerCommand::ShowCores => {
+                self.is_cores_page_opened = true;
+                return self.send_cores_page_data(pocketeer);
             }
-            WorkerCommand::ImportCover(game, from) => {
-                pocketeer.import_covers(&[(game, from)], progress.on_logged())
+            WorkerCommand::ProposeRenames(games) => {
+                let renames = pocketeer.renames_to_dat_names(&games);
+                return (self.send_message)(WorkerMessage::RenamesProposed(renames));
             }
-            WorkerCommand::TrashGames(games) => {
-                pocketeer.trash_games_in_library(&games, progress.on_logged())
-            }
-            WorkerCommand::TrashSaveVersion(game, version) => {
-                pocketeer.trash_save_versions_in_library(&[(game, version)], progress.on_logged())
-            }
-            WorkerCommand::TrashOrphanSaves(orphan_saves) => {
-                pocketeer.trash_orphan_saves_in_library(&orphan_saves, progress.on_logged())
-            }
-            WorkerCommand::DeleteGames(games) => {
-                pocketeer.delete_games_on_device(&games, progress.on_logged())
-            }
-            WorkerCommand::DeleteSaves(games) => {
-                pocketeer.delete_saves_on_device(&games, progress.on_logged())
-            }
-            WorkerCommand::DeleteOrphanSaves(orphan_saves) => {
-                pocketeer.delete_orphan_saves_on_device(&orphan_saves, progress.on_logged())
-            }
-            // Handled above, since they aren't commands to report.
-            WorkerCommand::ShowCores | WorkerCommand::ProposeRenames(_) => {
-                Ok(ControlFlow::Continue(()))
-            }
-            WorkerCommand::InstallCores(ids) => pocketeer.install_cores(&ids, progress.on_logged()),
-            WorkerCommand::RemoveCores(ids) => pocketeer.remove_cores(&ids, progress.on_logged()),
-            WorkerCommand::PutBios(row, from) => {
-                pocketeer.put_bios_files(&[(row, from)], progress.on_logged())
-            }
-            WorkerCommand::RenameGamesInLibrary(games) => {
-                pocketeer.rename_games_in_library(&games, progress.on_logged())
-            }
-            WorkerCommand::RenameOnDevice(game, new) => {
-                pocketeer.rename_games_on_device(&[(game, new)], progress.on_logged())
-            }
-            // These do one thing, so they have no batch to stop.
             WorkerCommand::SyncDats => {
-                let synced = pocketeer.sync_dats(|pocketeer, entry| {
-                    let _ = progress.record_finished_target(pocketeer, entry.report);
-                });
-                only_log_failure(synced)
+                self.start("updating the DATs", 1);
+                let (summary, failed) = match pocketeer.sync_dats() {
+                    Ok(report) => (
+                        format!("the DATs: {} platforms updated", report.updated.len()),
+                        false,
+                    ),
+                    Err(error) => (format!("the DATs: error: {error}"), true),
+                };
+                return self.finish_with_refresh(pocketeer, summary, failed);
             }
             WorkerCommand::Reload => {
-                let read = pocketeer.reload(|pocketeer, entry| {
-                    let _ = progress.record_finished_target(pocketeer, entry.report);
-                });
-                if let Ok(report) = &read {
-                    send_duplicates(self.send_message, &report.duplicates);
-                }
-                only_log_failure(read)
+                self.start("reading everything again", 1);
+                let (summary, failed) = match pocketeer.reload() {
+                    Ok(report) => {
+                        send_duplicates(self.send_message, &report.duplicates);
+                        ("everything: read again".to_string(), false)
+                    }
+                    Err(error) => (format!("everything: error: {error}"), true),
+                };
+                return self.finish_with_refresh(pocketeer, summary, failed);
             }
             WorkerCommand::Eject => {
-                let ejected = pocketeer.eject_device(|pocketeer, entry| {
-                    let _ = progress.record_finished_target(pocketeer, entry.report);
-                });
-                only_log_failure(ejected)
+                self.start("ejecting the device", 1);
+                let (summary, failed) = match pocketeer.eject_device() {
+                    Ok(root) => (format!("the device: ejected {}", root.display()), false),
+                    Err(error) => (format!("the device: error: {error}"), true),
+                };
+                return self.finish_with_refresh(pocketeer, summary, failed);
             }
         };
-        let (mut summary, mut failed) =
-            command_summary(label, progress.target_count, &progress.reports);
-        if let Err(error) = batch_result {
+        let label = commands.first().map_or("importing games", label);
+        self.start(label, commands.len());
+        let mut reports = Vec::new();
+        for command in &commands {
+            let report = pocketeer.run(command);
+            let target = report.subject.clone();
+            reports.push(report);
+            self.send_games_page_data(pocketeer);
+            (self.send_message)(WorkerMessage::CommandProgressed {
+                finished_count: reports.len(),
+                target_count: commands.len(),
+                target,
+            });
+            if is_canceled.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+        let (mut summary, mut failed) = command_summary(label, commands.len(), &reports);
+        if let Err(error) = pocketeer.settle() {
             summary.push_str(&format!("; {error}"));
             failed = true;
         }
         self.finish_with_refresh(pocketeer, summary, failed);
     }
-}
 
-struct CommandProgress<'a> {
-    send_message: &'a dyn Fn(WorkerMessage),
-    orphan_saves: &'a OrphanSaves,
-    is_canceled: &'a AtomicBool,
-    target_count: usize,
-    reports: Vec<OperationReport>,
-}
-
-impl CommandProgress<'_> {
-    /// The callback for a batch, which records each game as it finishes.
-    fn on_logged(&mut self) -> impl FnMut(&Pocketeer, LogEntry) -> ControlFlow<()> + '_ {
-        move |pocketeer: &Pocketeer, log_entry: LogEntry| {
-            self.record_finished_target(pocketeer, log_entry.report)
-        }
-    }
-
-    /// Records how one game went and sends the current state. Breaks if the
-    /// command was canceled.
-    fn record_finished_target(
-        &mut self,
-        pocketeer: &Pocketeer,
-        report: OperationReport,
-    ) -> ControlFlow<()> {
-        let target = report.subject.clone();
-        self.reports.push(report);
-        (self.send_message)(WorkerMessage::GamesPageChanged(GamesPageData::new(
-            pocketeer,
-            self.orphan_saves,
-        )));
-        (self.send_message)(WorkerMessage::CommandProgressed {
-            finished_count: self.reports.len(),
-            target_count: self.target_count,
-            target,
+    fn start(&self, label: &str, target_count: usize) {
+        (self.send_message)(WorkerMessage::CommandStarted {
+            label: label.to_string(),
+            target_count,
         });
-        if self.is_canceled.load(Ordering::Relaxed) {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
-        }
     }
 }
 
 /// Summarizes a command labeled `label` meant for `target_count` targets, and
 /// says whether any of it failed.
-fn command_summary(
-    label: &str,
-    target_count: usize,
-    reports: &[OperationReport],
-) -> (String, bool) {
+fn command_summary(label: &str, target_count: usize, reports: &[Report]) -> (String, bool) {
     let finished_count = reports.len();
-    let failed = reports.iter().filter(|report| !report.is_ok).count();
-    let first_failure = reports.iter().find(|report| !report.is_ok);
+    let failed = reports.iter().filter(|report| !report.ok).count();
+    let first_failure = reports.iter().find(|report| !report.ok);
     let summary = match (target_count, first_failure, reports.last()) {
         (1, _, Some(last)) => last.to_line(),
         (_, Some(first), _) => format!(
@@ -728,15 +589,6 @@ fn command_summary(
         _ => format!("{label}: {finished_count} done"),
     };
     (summary, failed > 0)
-}
-
-/// The part of a single operation's result that the summary still has to
-/// tell: its own failure is in its report already, but a failed log write isn't.
-fn only_log_failure<T, E>(result: Result<T, LoggedError<E>>) -> BatchResult {
-    match result {
-        Err(LoggedError::LogFailed(error)) => Err(LoggedError::LogFailed(error)),
-        Ok(_) | Err(LoggedError::OperationFailed(_)) => Ok(ControlFlow::Continue(())),
-    }
 }
 
 /// Tells the UI about `duplicates`, the copies a scan left out, if there are
@@ -871,6 +723,17 @@ mod tests {
             .collect()
     }
 
+    /// A command to push each game in the library that `games_page_data` shows.
+    fn push_all(games_page_data: &GamesPageData) -> WorkerCommand {
+        let games = locals(games_page_data);
+        WorkerCommand::Run(
+            games
+                .iter()
+                .map(|game| Command::PushGame(game.key()))
+                .collect(),
+        )
+    }
+
     /// The ids of the cores last sent in `messages`.
     fn cores_sent(messages: &[WorkerMessage]) -> Option<Vec<String>> {
         messages.iter().rev().find_map(|message| match message {
@@ -920,7 +783,7 @@ mod tests {
         after_device_opened: impl FnOnce(&mut Pocketeer),
     ) -> Vec<WorkerMessage> {
         let (_dir, library, device) = empty_library_and_device();
-        let mut pocketeer = Pocketeer::open(&library, FrontEnd::Tui).unwrap();
+        let mut pocketeer = Pocketeer::open(&library).unwrap();
         let messages = std::cell::RefCell::new(Vec::new());
         let send_message = |message| messages.borrow_mut().push(message);
         let mut worker_state = WorkerState {
@@ -1015,7 +878,7 @@ mod tests {
         /// checking what the UI is told at each step.
         #[test]
         fn worker_opens_device_runs_command_and_refreshes() {
-            let (dir, mut worker_handle, rx) = started();
+            let (_dir, mut worker_handle, rx) = started();
             let opening = until_device_read(&rx);
             assert!(matches!(opening[1], WorkerMessage::DeviceReadStarted(_)));
             let games_page_data = last_games_page_data(&opening);
@@ -1033,14 +896,9 @@ mod tests {
                 )
             };
             assert!(!opening.iter().any(is_command_message));
-            let device_page = device_page_sent(&opening).unwrap();
-            assert_eq!(device_page.root, dir.path().join("device"));
-            assert_eq!(device_page.firmware, None);
-            assert_eq!(device_page.core_count, Some(0));
-            assert_eq!(device_page.game_count, 1);
-            assert!(device_page.disk_space.unwrap().total_bytes > 0);
+            assert_eq!(device_page_sent(&opening).unwrap().game_count, 1);
 
-            worker_handle.send(WorkerCommand::PushGames(locals(games_page_data)));
+            worker_handle.send(push_all(games_page_data));
             let messages = until_finished(&rx);
             let progress: Vec<_> = messages
                 .iter()
@@ -1062,7 +920,8 @@ mod tests {
             assert_eq!(on_device.count(), 3);
             assert_eq!(device_page_sent(&messages).unwrap().game_count, 3);
 
-            worker_handle.send(WorkerCommand::DeleteOrphanSaves(vec![orphan]));
+            let delete = Command::DeleteOrphanSave(orphan.platform, orphan.path);
+            worker_handle.send(WorkerCommand::Run(vec![delete]));
             let messages = until_finished(&rx);
             assert_eq!(
                 finished(&messages),
@@ -1095,23 +954,6 @@ mod tests {
             assert_eq!(finished(&messages), ("importing games: 2 done", false));
         }
 
-        #[test]
-        fn proposes_dat_names_without_reporting_command() {
-            let (_dir, mut worker_handle, rx) =
-                started_with(&[("roms/gba/Old.gba", b"hello")], &[]);
-            let opening = until_device_read(&rx);
-            worker_handle.send(WorkerCommand::ProposeRenames(locals(last_games_page_data(
-                &opening,
-            ))));
-            let messages = messages_until(&rx, |message| {
-                matches!(message, WorkerMessage::RenamesProposed(_))
-            });
-            assert!(
-                matches!(messages[..], [WorkerMessage::RenamesProposed(_)]),
-                "{messages:?}"
-            );
-        }
-
         /// Nothing goes online for the cores until their page opens. From
         /// then on they are sent again after each command.
         #[test]
@@ -1128,50 +970,38 @@ mod tests {
             worker_handle.send(WorkerCommand::ShowCores);
             let told = cores_sent(&until_cores(&rx)).unwrap();
             assert_eq!(told, ["Spiritualized.GB", "a.B"]);
-            worker_handle.send(WorkerCommand::RemoveCores(vec!["a.B".to_string()]));
+            worker_handle.send(WorkerCommand::Run(vec![Command::RemoveCore("a.B".into())]));
             let messages = until_finished(&rx);
             assert_eq!(finished(&messages), ("a.B: removed from the device", false));
             assert_eq!(cores_sent(&messages).unwrap(), ["Spiritualized.GB"]);
         }
 
         #[test]
-        fn stops_command_and_reports_when_log_cannot_be_written() {
-            let (dir, mut worker_handle, rx) = started();
-            let opening = until_device_read(&rx);
-            let games = locals(last_games_page_data(&opening));
-            fs::create_dir(dir.path().join("library/pocketeer.log")).unwrap();
-            worker_handle.send(WorkerCommand::PushGames(games));
-            let messages = until_finished(&rx);
-            let done = messages
-                .iter()
-                .filter(|message| matches!(message, WorkerMessage::CommandProgressed { .. }))
-                .count();
-            assert_eq!(done, 1);
-            let (summary, failed) = finished(&messages);
-            assert!(failed);
-            assert!(summary.contains("couldn't write the log"), "{summary}");
-        }
-
-        #[test]
         fn summarizes_how_command_went() {
-            let ok = || OperationReport::reload(&Ok(()));
-            let bad =
-                || OperationReport::reload::<()>(&Err(pocketeer_core::error::BasicError::NoDevice));
+            let report = |subject: &str, ok, message: &str| Report {
+                subject: subject.into(),
+                ok,
+                message: message.into(),
+            };
+            let ok = report("gba/A.gba", true, "pushed to gba/A.gba");
+            let bad = report("gba/B.gba", false, "error: no device is open");
+            // One target says how it went itself.
             assert_eq!(
-                command_summary("reading", 1, &[ok()]),
-                ("everything: read again".to_string(), false)
+                command_summary("pushing games", 1, std::slice::from_ref(&bad)),
+                ("gba/B.gba: error: no device is open".to_string(), true)
             );
+            // Several name the first failure.
             assert_eq!(
-                command_summary("reading", 1, &[bad()]),
-                ("everything: error: no device is open".to_string(), true)
-            );
-            assert_eq!(
-                command_summary("reading", 2, &[ok(), bad()]),
+                command_summary("pushing games", 3, &[ok.clone(), bad, ok.clone()]),
                 (
-                    "reading: 2 of 2 done, 1 failed; first: everything: error: no device is open"
+                    "pushing games: 3 of 3 done, 1 failed; first: gba/B.gba: error: no device is open"
                         .to_string(),
                     true
                 )
+            );
+            assert_eq!(
+                command_summary("pushing games", 2, std::slice::from_ref(&ok)),
+                ("pushing games: stopped after 1 of 2".to_string(), false)
             );
         }
     }
@@ -1186,7 +1016,7 @@ mod tests {
             let canceled = Arc::new(AtomicBool::new(true));
             tx.send(QueuedCommand {
                 is_canceled: canceled,
-                command: WorkerCommand::PullSaves(Vec::new()),
+                command: WorkerCommand::Run(Vec::new()),
             })
             .unwrap();
             tx.send(QueuedCommand {
@@ -1212,15 +1042,17 @@ mod tests {
             let (_dir, library, device) = empty_library_and_device();
             put(&library, "roms/gba/A.gba", b"a");
             put(&library, "roms/gba/B.gba", b"b");
-            let games = pocketeer_core::library::Library::open(&library)
-                .unwrap()
-                .entries()
-                .to_vec();
+            let games = ["A.gba", "B.gba"].map(|name| {
+                Command::PushGame(LibraryKey {
+                    platform: Platform::Gba,
+                    name: name.into(),
+                })
+            });
             let (tx, commands) = mpsc::channel();
             let is_canceled = Arc::new(AtomicBool::new(false));
             tx.send(QueuedCommand {
                 is_canceled: is_canceled.clone(),
-                command: WorkerCommand::PushGames(games),
+                command: WorkerCommand::Run(games.to_vec()),
             })
             .unwrap();
             // With nothing left to come, `run_worker_loop` returns.
@@ -1260,14 +1092,14 @@ mod tests {
         }
 
         /// The worker checks for a cancel after each game, so the game under
-        /// way when the handle is dropped is finished and logged, and the
-        /// thread has ended once the drop returns. If this thread is slow to
-        /// drop it, the second game may be done as well.
+        /// way when the handle is dropped is finished, and the thread has
+        /// ended once the drop returns. If this thread is slow to drop it, the
+        /// second game may be done as well.
         #[test]
         fn finishes_game_under_way_when_dropped() {
             let (dir, mut worker_handle, rx) = started();
-            let games = locals(last_games_page_data(&until_device_read(&rx)));
-            worker_handle.send(WorkerCommand::PushGames(games));
+            let games = push_all(last_games_page_data(&until_device_read(&rx)));
+            worker_handle.send(games);
             messages_until(&rx, |message| {
                 matches!(message, WorkerMessage::CommandStarted { .. })
             });
@@ -1289,8 +1121,6 @@ mod tests {
                 })
                 .count();
             assert!((1..=2).contains(&on_device), "{on_device}");
-            let log = fs::read_to_string(dir.path().join("library/pocketeer.log")).unwrap();
-            assert_eq!(log.lines().count(), on_device);
         }
     }
 }

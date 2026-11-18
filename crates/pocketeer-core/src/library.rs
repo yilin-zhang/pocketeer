@@ -72,6 +72,28 @@ impl LibrarySaves {
     }
 }
 
+/// A game in the library, by what it is called there.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LibraryKey {
+    pub platform: Platform,
+    /// Its file name.
+    pub name: String,
+}
+
+impl LibraryKey {
+    /// Its name without the extension.
+    pub fn stem(&self) -> &str {
+        self.name.stem()
+    }
+}
+
+/// As `<platform>/<name>`, the way the command line and messages name it.
+impl fmt::Display for LibraryKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.platform.id(), self.name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalEntry {
     /// The game's name, which is also its file name, because on the device a
@@ -95,10 +117,16 @@ impl LocalEntry {
     pub fn stem(&self) -> &str {
         self.name.stem()
     }
+
+    pub fn key(&self) -> LibraryKey {
+        LibraryKey {
+            platform: self.game.platform.clone(),
+            name: self.name.clone(),
+        }
+    }
 }
 
-/// As `<platform>/<name>`, the way the command line, the log and messages
-/// name it.
+/// As `<platform>/<name>`, the way the command line and messages name it.
 impl fmt::Display for LocalEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.game.platform.id(), self.name)
@@ -115,8 +143,7 @@ pub struct OrphanLocalSave {
     pub save: LibrarySaves,
 }
 
-/// As `<platform>/<name>`, the way the command line, the log and messages
-/// name it.
+/// As `<platform>/<name>`, the way the command line and messages name it.
 impl fmt::Display for OrphanLocalSave {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.platform.id(), self.stem)
@@ -259,10 +286,6 @@ impl LibraryLayout {
     fn save_version(&self, platform: &Platform, stem: &str, version_name: &str) -> PathBuf {
         self.saves(platform, stem)
             .join(format!("{version_name}.sav"))
-    }
-
-    pub(crate) fn log(&self) -> PathBuf {
-        self.root.join("pocketeer.log")
     }
 
     fn cache(&self) -> PathBuf {
@@ -408,13 +431,15 @@ impl Library {
         Ok(())
     }
 
-    /// Moves every version of `orphan`'s save to the system's trash, unless it
-    /// is no longer an orphan because a game has been put under its name.
+    /// Moves every version of the orphan save of `platform` kept under `stem`
+    /// to the system's trash, unless it is no longer an orphan because a game
+    /// has been put under its name.
     pub(crate) fn trash_orphan_save(
         &self,
-        orphan: &OrphanLocalSave,
+        platform: &Platform,
+        stem: &str,
     ) -> Result<(), TrashOrphanSaveError> {
-        let files = self.files_of_orphan_save(orphan)?;
+        let files = self.files_of_orphan_save(platform, stem)?;
         if files.is_empty() {
             return Err(TrashOrphanSaveError::NoOrphanSave);
         }
@@ -427,16 +452,20 @@ impl Library {
         Ok(files.into_iter().map(|(path, _)| path).collect())
     }
 
-    /// The files of every version of `orphan`'s save, or none if it is no
-    /// longer an orphan because a game has been put under its name.
-    fn files_of_orphan_save(&self, orphan: &OrphanLocalSave) -> Result<Vec<PathBuf>, BasicError> {
-        let is_it = |candidate: &OrphanLocalSave| {
-            candidate.platform == orphan.platform && candidate.stem == orphan.stem
-        };
+    /// The files of every version of the orphan save kept under `stem`, or
+    /// none if it is no longer an orphan because a game has been put under its
+    /// name.
+    fn files_of_orphan_save(
+        &self,
+        platform: &Platform,
+        stem: &str,
+    ) -> Result<Vec<PathBuf>, BasicError> {
+        let is_it =
+            |candidate: &OrphanLocalSave| &candidate.platform == platform && candidate.stem == stem;
         if !self.find_orphan_saves()?.iter().any(is_it) {
             return Ok(Vec::new());
         }
-        let files = self.files_of_saves(&orphan.platform, &orphan.stem)?;
+        let files = self.files_of_saves(platform, stem)?;
         Ok(files.into_iter().map(|(path, _)| path).collect())
     }
 
@@ -1245,14 +1274,16 @@ mod tests {
             let orphan = library.find_orphan_saves().unwrap().remove(0);
             assert_eq!(orphan.stem, "Tetris");
             assert_eq!(
-                library.files_of_orphan_save(&orphan).unwrap(),
+                library
+                    .files_of_orphan_save(&orphan.platform, &orphan.stem)
+                    .unwrap(),
                 [saves.join("new.sav"), saves.join("old.sav")]
             );
             // A game back under the name takes them, so they stay.
             put(&root, "roms/gba/Tetris.gba", b"hello");
             library.reload().unwrap();
             assert!(matches!(
-                library.trash_orphan_save(&orphan),
+                library.trash_orphan_save(&orphan.platform, &orphan.stem),
                 Err(TrashOrphanSaveError::NoOrphanSave)
             ));
             assert!(saves.join("old.sav").exists());
@@ -1262,7 +1293,7 @@ mod tests {
             fs::remove_file(saves.join("old.sav")).unwrap();
             fs::remove_file(saves.join("new.sav")).unwrap();
             assert!(matches!(
-                library.trash_orphan_save(&orphan),
+                library.trash_orphan_save(&orphan.platform, &orphan.stem),
                 Err(TrashOrphanSaveError::NoOrphanSave)
             ));
         }

@@ -4,6 +4,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{App, Dialog, ImportTarget, Page};
+use pocketeer_core::pocketeer::Command;
+
 use crate::tui::worker::WorkerCommand;
 
 /// Where a key is shown.
@@ -244,7 +246,7 @@ impl Keymap {
             "pull",
             "Copies the game from the device into the library.",
             Group::Library,
-            |app| app.send_for_device_rows(WorkerCommand::PullGames),
+            |app| app.send_for_device_rows(Command::PullGame),
         ),
         Binding::new(
             &[Key::plain(KeyCode::Char('s'))],
@@ -252,7 +254,7 @@ impl Keymap {
             "save",
             "Backs up the device's save as a new version in the library.",
             Group::Library,
-            |app| app.send_for_device_rows(WorkerCommand::PullSaves),
+            |app| app.send_for_device_rows(Command::PullSave),
         ),
         Binding::new(
             &[Key::plain(KeyCode::Char('n'))],
@@ -284,7 +286,7 @@ impl Keymap {
             "push",
             "Copies the game from the library onto the device.",
             Group::Device,
-            |app| app.send_for_library_rows(WorkerCommand::PushGames),
+            |app| app.send_for_library_rows(Command::PushGame),
         ),
         Binding::new(
             &[Key::plain(KeyCode::Char('N'))],
@@ -340,7 +342,7 @@ impl Keymap {
             "download it",
             "Downloads a cover for the game.",
             Group::Cover,
-            |app| app.send_for_library_rows(WorkerCommand::FetchCovers),
+            |app| app.send_for_library_rows(Command::FetchCover),
         ),
         Binding::new(
             &[Key::plain(KeyCode::Char('c'))],
@@ -435,7 +437,7 @@ impl Keymap {
                 "save",
                 "Backs up the device's save as a new version.",
                 Group::Library,
-                |app| app.send_for_device_rows(WorkerCommand::PullSaves),
+                |app| app.send_for_device_rows(Command::PullSave),
             ),
             Binding::new(
                 &[Key::plain(KeyCode::Char('x'))],

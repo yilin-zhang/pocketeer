@@ -17,7 +17,6 @@ use pocketeer_core::{
     cores::testing::{core_json, data_json, index_file, zip_of},
     dat::testing::GBA_DAT,
     device::testing::make_empty_device,
-    log::testing::logged_lines,
     os::testing::{put, put_at},
 };
 use serde_json::{Value, json};
@@ -29,17 +28,9 @@ struct Ran {
 }
 
 impl Ran {
-    /// What was printed as JSON, without the times, which change.
+    /// What was printed as JSON.
     fn json(&self) -> Value {
-        let mut value: Value = serde_json::from_str(&self.stdout).unwrap();
-        if let Some(data) = value.get_mut("data").and_then(Value::as_array_mut) {
-            for entry in data {
-                if let Some(entry) = entry.as_object_mut() {
-                    entry.remove("time");
-                }
-            }
-        }
-        value
+        serde_json::from_str(&self.stdout).unwrap()
     }
 }
 
@@ -101,15 +92,6 @@ impl Setup {
         let mut command = self.command();
         command.arg("--device").arg(self.device());
         run_and_capture(command.args(args))
-    }
-
-    fn log_lines(&self) -> Vec<Value> {
-        logged_lines(&self.library().join("pocketeer.log"))
-    }
-
-    /// Makes the log impossible to write by putting a folder where it goes.
-    fn break_the_log(&self) {
-        fs::create_dir(self.library().join("pocketeer.log")).unwrap();
     }
 }
 
@@ -184,8 +166,10 @@ fn game_and_save_round_trip() {
                 .args(["--json", "import", "game", file.to_str().unwrap()]),
         );
     let entry = assert_json_succeeded_with_one_entry(&ran);
-    assert_eq!(entry["game"], "mine.gba");
-    assert_eq!(entry["library"], "gba/mine.gba");
+    assert_eq!(
+        entry,
+        json!({ "subject": "mine.gba", "ok": true, "message": "imported as gba/mine.gba" })
+    );
 
     let ran = setup.run(&["push", "game", "gba/mine.gba"]);
     assert_eq!(ran.code, 0, "{}", ran.stderr);
@@ -537,26 +521,6 @@ mod importing {
         assert!(!setup.dir.path().join("escaped").exists());
         assert!(!absolute.exists());
     }
-
-    /// This stays a CLI test because only a child process can change its working
-    /// folder without affecting the other tests running at the same time.
-    #[test]
-    fn logs_absolute_path_for_relative_path() {
-        let setup = Setup::new();
-        setup.in_library("roms/gba/Mine.gba", b"mine");
-        let save = setup.elsewhere("Mine.sav", b"save");
-        let folder = save.parent().unwrap();
-        let game = put(folder, "mine.gba", b"game");
-        let in_folder =
-            |args: &[&str]| run_and_capture(setup.command().current_dir(folder).args(args));
-        in_folder(&["import", "save", "gba/Mine.gba", "Mine.sav"]);
-        in_folder(&["import", "game", "mine.gba"]);
-        // Uses the real paths, because the temporary folder may be behind a
-        // symlink.
-        let logged = setup.log_lines();
-        assert_eq!(logged[0]["from"], json!(fs::canonicalize(&save).unwrap()));
-        assert_eq!(logged[1]["from"], json!(fs::canonicalize(&game).unwrap()));
-    }
 }
 
 /// Lists orphan saves, refuses what isn't one, and deletes one from the
@@ -614,34 +578,6 @@ fn orphan_saves_listed_refused_and_deleted() {
         setup.run(&["--json", "orphan-saves", "device"]).json()["data"],
         json!([{ "save": "gba/B.sav", "size": 3, "written": "2020-09-13T12-26-40" }])
     );
-}
-
-#[test]
-fn stops_batch_and_exits_1_when_log_unwritable() {
-    let with_two_games_and_broken_log = || {
-        let setup = Setup::new();
-        setup.on_device("Assets/gba/common/One.gba", b"one");
-        setup.on_device("Assets/gba/common/Two.gba", b"two");
-        setup.break_the_log();
-        setup
-    };
-    let setup = with_two_games_and_broken_log();
-    let ran = setup.run(&["--json", "pull", "game"]);
-    assert_eq!(ran.code, 1);
-    let value = ran.json();
-    assert_eq!(value["ok"], false);
-    assert_eq!(value["data"].as_array().unwrap().len(), 1);
-    assert!(ran.stderr.starts_with("error: couldn't write the log: "));
-    let setup = with_two_games_and_broken_log();
-    let ran = setup.run(&["pull", "game"]);
-    assert_eq!(ran.code, 1);
-    assert_eq!(ran.stdout, "gba/One.gba: pulled as gba/One.gba\n");
-    assert!(
-        ran.stderr.starts_with("error: couldn't write the log: "),
-        "{}",
-        ran.stderr
-    );
-    assert!(!setup.library().join("roms/gba/Two.gba").exists());
 }
 
 mod rename {

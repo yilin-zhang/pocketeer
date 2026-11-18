@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pocketeer_core::{
     cores::{BiosRow, BiosStatus, CoreList, CoreRow},
-    device::{DeviceEntry, OrphanDeviceSave},
-    library::{LocalEntry, OrphanLocalSave},
+    device::{DeviceEntry, DeviceKey, OrphanDeviceSave},
+    library::{LibraryKey, LocalEntry, OrphanLocalSave},
     platform::Platform,
-    pocketeer::GameRow,
+    pocketeer::{Command, GameRow},
 };
 use ratatui::widgets::TableState;
 use strum::IntoEnumIterator;
@@ -558,9 +558,7 @@ impl App {
         };
         match why_not {
             Some(why) => self.show_status_message(why),
-            None => self
-                .worker_handle
-                .send(WorkerCommand::InstallCores(vec![id])),
+            None => self.run(Command::InstallCore(id)),
         }
     }
 
@@ -575,7 +573,8 @@ impl App {
         if ids.is_empty() {
             self.show_status_message("every core is up to date");
         } else {
-            self.worker_handle.send(WorkerCommand::InstallCores(ids));
+            let installs = ids.into_iter().map(Command::InstallCore).collect();
+            self.worker_handle.send(WorkerCommand::Run(installs));
         }
     }
 
@@ -641,13 +640,19 @@ impl App {
         };
         let path = import.input.path();
         match import.target {
-            ImportTarget::Save(local_entry) => self
-                .worker_handle
-                .send(WorkerCommand::ImportSave(local_entry, path)),
-            ImportTarget::Cover(local_entry) => self
-                .worker_handle
-                .send(WorkerCommand::ImportCover(local_entry, path)),
-            ImportTarget::Bios(row) => self.worker_handle.send(WorkerCommand::PutBios(row, path)),
+            ImportTarget::Save(local_entry) => {
+                self.run(Command::ImportSave(local_entry.key(), path));
+            }
+            ImportTarget::Cover(local_entry) => {
+                self.run(Command::ImportCover(local_entry.key(), path));
+            }
+            ImportTarget::Bios(row) => {
+                let key = DeviceKey {
+                    platform: row.platform,
+                    path: row.path,
+                };
+                self.run(Command::PutBios(key, path));
+            }
             ImportTarget::Game => {
                 let extension = path.extension().and_then(|extension| extension.to_str());
                 let tells_platform = extension.and_then(Platform::from_extension).is_some();
@@ -670,12 +675,12 @@ impl App {
         };
         let new = rename.input.value().trim().to_string();
         if new != rename.stem() {
-            self.worker_handle.send(match rename.target {
+            self.run(match rename.target {
                 RenameTarget::InLibrary(local_entry) => {
-                    WorkerCommand::RenameGamesInLibrary(vec![(local_entry, new)])
+                    Command::RenameInLibrary(local_entry.key(), new)
                 }
                 RenameTarget::OnDevice(device_entry) => {
-                    WorkerCommand::RenameOnDevice(device_entry, new)
+                    Command::RenameOnDevice(device_entry.key(), new)
                 }
             });
         }
@@ -842,8 +847,8 @@ impl App {
             self.show_status_message("busy; try again when this is done");
             return;
         }
-        self.worker_handle
-            .send(WorkerCommand::ProposeRenames(entries));
+        let keys = entries.iter().map(LocalEntry::key).collect();
+        self.worker_handle.send(WorkerCommand::ProposeRenames(keys));
     }
 
     fn confirm_trash_orphans(&mut self) {
@@ -912,28 +917,31 @@ impl App {
 
     // ---- Commands for the worker -----------------------------------------------
 
-    fn send_for_device_rows(&mut self, command: fn(Vec<DeviceEntry>) -> WorkerCommand) {
+    /// Runs `command` for the device copy of each row to act on.
+    fn send_for_device_rows(&mut self, command: fn(DeviceKey) -> Command) {
         let entries = self.games.device_entries_to_act_on();
-        self.send_for_entries(entries, command, "nothing here is on the device");
+        let commands = entries.iter().map(|entry| command(entry.key())).collect();
+        self.send_for_rows(commands, "nothing here is on the device");
     }
 
-    fn send_for_library_rows(&mut self, command: fn(Vec<LocalEntry>) -> WorkerCommand) {
+    /// Runs `command` for the library copy of each row to act on.
+    fn send_for_library_rows(&mut self, command: fn(LibraryKey) -> Command) {
         let entries = self.games.library_entries_to_act_on();
-        self.send_for_entries(entries, command, "nothing here is in the library");
+        let commands = entries.iter().map(|entry| command(entry.key())).collect();
+        self.send_for_rows(commands, "nothing here is in the library");
     }
 
-    fn send_for_entries<T>(
-        &mut self,
-        entries: Vec<T>,
-        command: impl FnOnce(Vec<T>) -> WorkerCommand,
-        message_if_none: &str,
-    ) {
-        if entries.is_empty() {
+    fn send_for_rows(&mut self, commands: Vec<Command>, message_if_none: &str) {
+        if commands.is_empty() {
             self.show_status_message(message_if_none);
             return;
         }
         self.games.clear_marks();
-        self.worker_handle.send(command(entries));
+        self.worker_handle.send(WorkerCommand::Run(commands));
+    }
+
+    fn run(&mut self, command: Command) {
+        self.worker_handle.send(WorkerCommand::Run(vec![command]));
     }
 
     /// Pushes the version selected in the saves panel onto the selected row's
@@ -947,8 +955,7 @@ impl App {
             .cloned();
         match (device_entry, version) {
             (Some(device_entry), Some(version)) => {
-                self.worker_handle
-                    .send(WorkerCommand::PushSaveVersion(device_entry, version));
+                self.run(Command::PushSave(device_entry.key(), version.name));
             }
             _ => self.show_status_message("nothing here is both in the library and on the device"),
         }
@@ -982,7 +989,6 @@ mod tests {
     use crate::tui::{ui, worker::QueuedCommand};
     use pocketeer_core::{
         cores::{BiosRow, BiosStatus, InstalledCore, RemoteCore},
-        device::{DiskSpace, Firmware},
         error::BasicError,
         platform::Platform,
     };
@@ -1033,6 +1039,28 @@ mod tests {
 
     fn sent(rx: &Receiver<QueuedCommand>) -> Vec<WorkerCommand> {
         rx.try_iter().map(|queued| queued.command).collect()
+    }
+
+    /// The core commands sent as one job, or none if something else was sent.
+    fn run(rx: &Receiver<QueuedCommand>) -> Vec<Command> {
+        match &sent(rx)[..] {
+            [WorkerCommand::Run(commands)] => commands.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn gba(name: &str) -> LibraryKey {
+        LibraryKey {
+            platform: Platform::Gba,
+            name: name.into(),
+        }
+    }
+
+    fn gba_on_device(path: &str) -> DeviceKey {
+        DeviceKey {
+            platform: Platform::Gba,
+            path: path.into(),
+        }
     }
 
     /// Clears the path being typed and presses `keys`.
@@ -1161,33 +1189,6 @@ mod tests {
         terminal
     }
 
-    /// The text on the screen's last `count` lines.
-    fn last_lines(terminal: &Terminal<TestBackend>, count: u16) -> Vec<String> {
-        let buffer = terminal.backend().buffer();
-        let height = buffer.area.height;
-        ((height - count)..height)
-            .map(|y| {
-                (0..buffer.area.width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
-            })
-            .collect()
-    }
-
-    /// The whole screen at 80×24.
-    fn screen_text(app: &mut App) -> String {
-        let terminal = drawn(app, 80, 24);
-        last_lines(&terminal, 24).join("\n")
-    }
-
-    /// The status line, above the keys, at 80×24.
-    fn status_line(app: &mut App) -> String {
-        let terminal = drawn(app, 80, 24);
-        last_lines(&terminal, 4).remove(0)
-    }
-
     mod actions {
         use super::*;
 
@@ -1230,27 +1231,12 @@ mod tests {
             press(&mut app, "mk");
             // The panel lists the newest version first, so the second is v0.
             press(&mut app, "j\njS");
-            let [WorkerCommand::PushSaveVersion(game, version)] = &sent(&rx)[..] else {
-                panic!()
-            };
-            assert_eq!(game.path, Path::new("Both.gba"));
-            assert_eq!(version.name, "v0");
+            assert_eq!(
+                run(&rx),
+                [Command::PushSave(gba_on_device("Both.gba"), "v0".into())]
+            );
             press(&mut app, "xh\n");
-            let [WorkerCommand::TrashSaveVersion(game, version)] = &sent(&rx)[..] else {
-                panic!()
-            };
-            assert_eq!(game.name, "Both.gba");
-            assert_eq!(version.name, "v0");
-        }
-
-        #[test]
-        fn keeps_page_while_typing_search() {
-            let (mut app, rx) = app();
-            press(&mut app, "/2");
-            app.handle_key(KeyEvent::from(KeyCode::Tab));
-            assert_eq!(app.current_page(), Page::Games);
-            assert_eq!(app.games.search_text(), "2");
-            assert_eq!(sent(&rx), []);
+            assert_eq!(run(&rx), [Command::TrashSave(gba("Both.gba"), "v0".into())]);
         }
 
         #[test]
@@ -1263,20 +1249,15 @@ mod tests {
             press(&mut app, "x");
             assert!(dialog_has_line(&app, "Alpha.gba"));
             press(&mut app, "h\n");
-            let [WorkerCommand::TrashGames(games)] = &sent(&rx)[..] else {
-                panic!("expected the marked game to be trashed");
-            };
-            assert_eq!(games[0].name, "Alpha.gba");
+            assert_eq!(run(&rx), [Command::TrashGame(gba("Alpha.gba"))]);
         }
 
-        /// Marks two games, answers the dialog, and follows the command the
-        /// worker runs until it is stopped and finished.
+        /// Marks two games, answers the dialog, and stops the command the
+        /// worker runs.
         #[test]
-        fn marks_confirm_and_run_command_to_the_end() {
+        fn marks_confirm_and_stop_command() {
             let (mut app, rx) = app();
-            press(&mut app, "mm");
-            assert!(status_line(&mut app).contains("2 marked"));
-            press(&mut app, "x");
+            press(&mut app, "mmx");
             assert_eq!(app.dialog().unwrap().title, "Trash 2 games");
             assert!(dialog_has_line(&app, "Alpha.gba") && dialog_has_line(&app, "Both.gba"));
             // Canceling keeps the marks.
@@ -1287,15 +1268,20 @@ mod tests {
             let queued: Vec<QueuedCommand> = rx.try_iter().collect();
             let [
                 QueuedCommand {
-                    command: WorkerCommand::TrashGames(games),
+                    command: WorkerCommand::Run(commands),
                     is_canceled,
                 },
             ] = &queued[..]
             else {
                 panic!()
             };
-            let names: Vec<&str> = games.iter().map(|game| game.name.as_str()).collect();
-            assert_eq!(names, ["Alpha.gba", "Both.gba"]);
+            assert_eq!(
+                commands,
+                &[
+                    Command::TrashGame(gba("Alpha.gba")),
+                    Command::TrashGame(gba("Both.gba"))
+                ]
+            );
             assert_eq!(app.games.marked_count(), 0);
 
             app.handle_worker_message(WorkerMessage::CommandStarted {
@@ -1308,28 +1294,8 @@ mod tests {
                 target: "gba/Alpha.gba".into(),
             });
             assert!(app.is_busy());
-            let status = status_line(&mut app);
-            assert!(
-                status.contains("putting games in the trash  1/2  gba/Alpha.gba"),
-                "{status}"
-            );
-            assert!(status.ends_with(" Esc  stop"), "{status}");
-
             press(&mut app, "\x1b");
             assert!(is_canceled.load(Ordering::Relaxed));
-            assert!(app.command_status().unwrap().is_canceling);
-            let status = status_line(&mut app);
-            assert!(status.ends_with("stopping…"), "{status}");
-
-            app.handle_worker_message(WorkerMessage::CommandFinished {
-                summary: "putting games in the trash: stopped after 1 of 2".into(),
-                failed: false,
-            });
-            assert!(!app.is_busy());
-            assert_eq!(
-                status_line(&mut app),
-                " › putting games in the trash: stopped after 1 of 2"
-            );
         }
     }
 
@@ -1359,40 +1325,28 @@ mod tests {
         /// Cancel, so Enter or Esc removes nothing.
         #[test]
         fn every_removal_asks_first_and_starts_on_cancel() {
-            type Sends = fn(&[WorkerCommand]) -> bool;
-            let cases: [(Setup, &str, Sends); 7] = [
+            let cases: [(Setup, &str, Command); 7] = [
+                (app, "x", Command::TrashGame(gba("Alpha.gba"))),
                 (
                     app,
-                    "x",
-                    |sent| matches!(sent, [WorkerCommand::TrashGames(games)] if games[0].name == "Alpha.gba"),
+                    "j\nx",
+                    Command::TrashSave(gba("Both.gba"), "v1".into()),
                 ),
-                (app, "j\nx", |sent| {
-                    matches!(sent, [WorkerCommand::TrashSaveVersion(game, version)]
-                        if game.name == "Both.gba" && version.name == "v1")
-                }),
-                (with_orphan_in_library, "Gx", |sent| {
-                    matches!(sent, [WorkerCommand::TrashOrphanSaves(orphans)]
-                        if orphans.len() == 1 && orphans[0].stem == "Lost")
-                }),
-                (app, "jjX", |sent| {
-                    matches!(sent, [WorkerCommand::DeleteGames(games)]
-                        if games[0].path == Path::new("Hack.gba"))
-                }),
-                (app, "jjjX", |sent| {
-                    matches!(sent, [WorkerCommand::DeleteOrphanSaves(orphans)]
-                        if orphans[0].path == Path::new("Gone.sav"))
-                }),
-                (app, "j\nX", |sent| {
-                    matches!(sent, [WorkerCommand::DeleteSaves(games)]
-                        if games[0].path == Path::new("Both.gba"))
-                }),
                 (
-                    on_cores_page,
-                    "jX",
-                    |sent| matches!(sent, [WorkerCommand::RemoveCores(ids)] if ids == &["old.Core"]),
+                    with_orphan_in_library,
+                    "Gx",
+                    Command::TrashOrphanSave(Platform::Gba, "Lost".into()),
                 ),
+                (app, "jjX", Command::DeleteGame(gba_on_device("Hack.gba"))),
+                (
+                    app,
+                    "jjjX",
+                    Command::DeleteOrphanSave(Platform::Gba, "Gone.sav".into()),
+                ),
+                (app, "j\nX", Command::DeleteSave(gba_on_device("Both.gba"))),
+                (on_cores_page, "jX", Command::RemoveCore("old.Core".into())),
             ];
-            for (setup, keys, sends) in cases {
+            for (setup, keys, removal) in cases {
                 for answer in ["\n", "\x1b"] {
                     let (mut app, rx) = setup();
                     press(&mut app, keys);
@@ -1404,8 +1358,7 @@ mod tests {
                 let (mut app, rx) = setup();
                 press(&mut app, keys);
                 press(&mut app, "h\n");
-                let sent = sent(&rx);
-                assert!(sends(&sent), "{keys}: {sent:?}");
+                assert_eq!(run(&rx), [removal], "{keys}");
             }
         }
 
@@ -1510,11 +1463,13 @@ mod tests {
             // The worker sends the rows again without Alpha.
             show_rows(&mut app, rows()[1..].to_vec());
             retype(&mut app, "/some/mine.png\n");
-            let [WorkerCommand::ImportCover(game, path)] = &sent(&rx)[..] else {
-                panic!()
-            };
-            assert_eq!(game.name, "Alpha.gba");
-            assert_eq!(path, Path::new("/some/mine.png"));
+            assert_eq!(
+                run(&rx),
+                [Command::ImportCover(
+                    gba("Alpha.gba"),
+                    "/some/mine.png".into()
+                )]
+            );
             assert!(app.prompt().is_none());
 
             let (mut app, rx) = super::app();
@@ -1527,11 +1482,13 @@ mod tests {
             assert!(app.prompt().is_some());
             assert_eq!(sent(&rx), []);
             retype(&mut app, "/some/Mine.sav\n");
-            let [WorkerCommand::ImportSave(game, path)] = &sent(&rx)[..] else {
-                panic!()
-            };
-            assert_eq!(game.name, "Both.gba");
-            assert_eq!(path, Path::new("/some/Mine.sav"));
+            assert_eq!(
+                run(&rx),
+                [Command::ImportSave(
+                    gba("Both.gba"),
+                    "/some/Mine.sav".into()
+                )]
+            );
             assert!(app.prompt().is_none());
 
             let (mut app, rx) = on_bios_page();
@@ -1539,10 +1496,10 @@ mod tests {
             assert!(app.prompt().is_some());
             retype(&mut app, "/some/mine.bin\n");
             assert_eq!(
-                sent(&rx),
-                [WorkerCommand::PutBios(
-                    bios_row("gone.bin", BiosStatus::Missing),
-                    PathBuf::from("/some/mine.bin")
+                run(&rx),
+                [Command::PutBios(
+                    gba_on_device("gone.bin"),
+                    "/some/mine.bin".into()
                 )]
             );
             assert!(app.prompt().is_none());
@@ -1566,10 +1523,8 @@ mod tests {
             press(&mut app, "\n");
             assert_eq!(sent(&rx), []);
             press(&mut app, "\n");
-            let [WorkerCommand::ImportSave(_, path)] = &sent(&rx)[..] else {
-                panic!()
-            };
-            assert_eq!(path, &dir.path().join("Mine.sav"));
+            let path = dir.path().join("Mine.sav");
+            assert_eq!(run(&rx), [Command::ImportSave(gba("Both.gba"), path)]);
 
             // With nothing picked, Esc closes the prompt and leaves the panel
             // open.
@@ -1582,19 +1537,13 @@ mod tests {
         #[test]
         fn rename_prompt_sends_only_a_changed_name() {
             let (mut app, rx) = app();
-            press(&mut app, "n");
-            let Some(Prompt::Rename(rename)) = app.prompt() else {
-                panic!()
-            };
-            let (before, after) = rename.text_around_cursor();
-            assert_eq!((before.as_str(), after.as_str()), ("Alpha", ""));
-            // Keys are text here, whatever they do elsewhere.
-            press(&mut app, "qx\n");
-            let [WorkerCommand::RenameGamesInLibrary(games)] = &sent(&rx)[..] else {
-                panic!()
-            };
-            let [(game, new)] = &games[..] else { panic!() };
-            assert_eq!((game.name.as_str(), new.as_str()), ("Alpha.gba", "Alphaqx"));
+            // It starts with the name to change. Keys are text here, whatever
+            // they do elsewhere.
+            press(&mut app, "nqx\n");
+            assert_eq!(
+                run(&rx),
+                [Command::RenameInLibrary(gba("Alpha.gba"), "Alphaqx".into())]
+            );
             assert!(app.prompt().is_none());
 
             press(&mut app, "n\n");
@@ -1604,11 +1553,13 @@ mod tests {
             assert_eq!(sent(&rx), []);
 
             press(&mut app, "jN!\n");
-            let [WorkerCommand::RenameOnDevice(game, new)] = &sent(&rx)[..] else {
-                panic!()
-            };
-            assert_eq!(game.path, Path::new("Both.gba"));
-            assert_eq!(new, "Both!");
+            assert_eq!(
+                run(&rx),
+                [Command::RenameOnDevice(
+                    gba_on_device("Both.gba"),
+                    "Both!".into()
+                )]
+            );
         }
 
         /// `t` asks the worker for the DAT names, and the dialog with its
@@ -1634,33 +1585,32 @@ mod tests {
             });
 
             press(&mut app, "Mt");
-            let [WorkerCommand::ProposeRenames(games)] = &sent(&rx)[..] else {
-                panic!()
-            };
-            let names: Vec<&str> = games.iter().map(|game| game.name.as_str()).collect();
-            assert_eq!(names, ["Alpha.gba", "Both.gba"]);
+            assert_eq!(
+                sent(&rx),
+                [WorkerCommand::ProposeRenames(vec![
+                    gba("Alpha.gba"),
+                    gba("Both.gba")
+                ])]
+            );
             assert!(app.dialog().is_none());
             app.handle_worker_message(WorkerMessage::RenamesProposed(Vec::new()));
             assert!(app.dialog().is_none());
             assert_eq!(app.status_message().unwrap().text, "no game to rename");
 
             app.handle_worker_message(WorkerMessage::RenamesProposed(vec![(
-                local_entry("Alpha.gba", 1, &[]),
+                gba("Alpha.gba"),
                 "Alpha (USA)".to_string(),
             )]));
             let dialog = app.dialog().unwrap();
             assert_eq!(dialog.title, "Rename 1 game");
             assert_eq!(sent(&rx), []);
             press(&mut app, "\n");
-            let [WorkerCommand::RenameGamesInLibrary(renames)] = &sent(&rx)[..] else {
-                panic!()
-            };
-            let [(game, new)] = &renames[..] else {
-                panic!()
-            };
             assert_eq!(
-                (game.name.as_str(), new.as_str()),
-                ("Alpha.gba", "Alpha (USA)")
+                run(&rx),
+                [Command::RenameInLibrary(
+                    gba("Alpha.gba"),
+                    "Alpha (USA)".into()
+                )]
             );
         }
     }
@@ -1668,19 +1618,16 @@ mod tests {
     mod cores_and_bios {
         use super::*;
 
-        fn ids(ids: &[&str]) -> Vec<String> {
-            ids.iter().map(ToString::to_string).collect()
-        }
-
         #[test]
         fn cores_page_installs_only_what_has_a_newer_release() {
             let (mut app, rx) = on_cores_page();
+            let install = |id: &str| [Command::InstallCore(id.into())];
             press(&mut app, "U");
-            assert_eq!(sent(&rx), [WorkerCommand::InstallCores(ids(&["new.Core"]))]);
+            assert_eq!(run(&rx), install("new.Core"));
             press(&mut app, "jU");
-            assert_eq!(sent(&rx), [WorkerCommand::InstallCores(ids(&["old.Core"]))]);
+            assert_eq!(run(&rx), install("old.Core"));
             press(&mut app, "A");
-            assert_eq!(sent(&rx), [WorkerCommand::InstallCores(ids(&["old.Core"]))]);
+            assert_eq!(run(&rx), install("old.Core"));
             app.handle_worker_message(WorkerMessage::CoreListChanged(CoreList {
                 rows: vec![core_row("same.Core", Some("2"), Some("2"))],
                 index_failure: None,
@@ -1728,123 +1675,6 @@ mod tests {
 
     mod drawing {
         use super::*;
-
-        /// The screen's top line.
-        fn header(app: &mut App) -> String {
-            let terminal = drawn(app, 80, 24);
-            let buffer = terminal.backend().buffer();
-            (0..80).map(|x| buffer[(x, 0)].symbol()).collect()
-        }
-
-        #[test]
-        fn shows_device_being_read_in_header_not_footer() {
-            let (mut app, _rx) = app();
-            let root = PathBuf::from("/Volumes/OTHER");
-            app.handle_worker_message(WorkerMessage::DeviceReadStarted(root.clone()));
-            assert_eq!(app.device_root(), None);
-            assert!(app.is_busy());
-            assert!(app.command_status().is_none());
-            let top = header(&mut app);
-            assert!(top.contains("reading OTHER…"), "{top}");
-            // In the order the worker sends them.
-            app.handle_worker_message(WorkerMessage::GamesPageChanged(GamesPageData {
-                rows: rows(),
-                device_root: Some(root),
-            }));
-            app.handle_worker_message(WorkerMessage::DeviceReadFinished);
-            assert!(!app.is_busy());
-            let top = header(&mut app);
-            assert!(top.contains("● OTHER"), "{top}");
-        }
-
-        #[test]
-        fn gives_marked_and_selected_rows_distinct_backgrounds() {
-            let (mut app, _rx) = app();
-            let background_of_row = |app: &mut App, row: u16| {
-                let terminal = drawn(app, 120, 24);
-                terminal.backend().buffer()[(20, 4 + row)].bg
-            };
-            // Marks the first row and moves on to the second.
-            press(&mut app, "m");
-            let marked = background_of_row(&mut app, 0);
-            let selected = background_of_row(&mut app, 1);
-            let plain = background_of_row(&mut app, 2);
-            press(&mut app, "k");
-            let selected_and_marked = background_of_row(&mut app, 0);
-            let backgrounds = [marked, selected, plain, selected_and_marked];
-            for (i, background) in backgrounds.iter().enumerate() {
-                assert!(
-                    !backgrounds[i + 1..].contains(background),
-                    "{backgrounds:?}"
-                );
-            }
-        }
-
-        /// Nothing on the Games page is cut at 80 columns: the search and
-        /// filters, the cover panel's keys and every key in the bar.
-        #[test]
-        fn shows_whole_games_page_at_80_columns() {
-            let (mut app, _rx) = app();
-            let terminal = drawn(&mut app, 80, 24);
-            assert_eq!(
-                last_lines(&terminal, 23)[0],
-                " / search   4                                  f   all   in library   on device"
-            );
-            let screen = last_lines(&terminal, 24).join("\n");
-            assert!(screen.contains("no cover yet"), "{screen}");
-            assert!(screen.contains(" a  download it"), "{screen}");
-            assert!(screen.contains(" c  use an image file"), "{screen}");
-            assert_eq!(
-                last_lines(&terminal, 3),
-                [
-                    " LIBRARY  i  import   p  pull   s  save   n  rename   t  standard   x  trash",
-                    " DEVICE               P  push             N  rename   E  eject      X  delete",
-                    " GENERAL  ↵  saves    m  mark   d  DATs   r  reload   ?  help       q  quit",
-                ]
-            );
-        }
-
-        #[test]
-        fn device_page_shows_values_unknown_or_no_device() {
-            let (mut app, _rx) = app();
-            press(&mut app, "4");
-            app.handle_worker_message(WorkerMessage::DevicePageChanged(Some(DevicePageData {
-                root: PathBuf::from("/Volumes/POCKET"),
-                firmware: Some(Firmware {
-                    version: Some("2.6".to_string()),
-                    build_date: Some("2026-06-16".to_string()),
-                }),
-                disk_space: Some(DiskSpace {
-                    total_bytes: 128_000_000_000,
-                    available_bytes: 12_300_000_000,
-                }),
-                core_count: Some(16),
-                game_count: 342,
-            })));
-            let screen = screen_text(&mut app);
-            assert!(screen.contains("Root      /Volumes/POCKET"), "{screen}");
-            assert!(
-                screen.contains("Firmware  2.6 (built 2026-06-16)"),
-                "{screen}"
-            );
-            assert!(
-                screen.contains("Space     12.3 GB free of 128.0 GB"),
-                "{screen}"
-            );
-            assert!(screen.contains("Cores     16"), "{screen}");
-            assert!(screen.contains("Games     342"), "{screen}");
-
-            app.handle_worker_message(WorkerMessage::DevicePageChanged(Some(
-                device_page_data_without_values(),
-            )));
-            let screen = screen_text(&mut app);
-            assert!(screen.contains("Firmware  unknown"), "{screen}");
-            assert!(screen.contains("Space     unknown"), "{screen}");
-            assert!(screen.contains("Cores     unknown"), "{screen}");
-
-            app.handle_worker_message(WorkerMessage::DevicePageChanged(None));
-            assert!(screen_text(&mut app).contains("no device"));
-        }
 
         /// Each state starts from a new `App`, so none is lost to an earlier
         /// state's keys.

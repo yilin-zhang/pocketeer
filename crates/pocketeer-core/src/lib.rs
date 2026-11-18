@@ -8,7 +8,6 @@ pub mod device;
 pub mod error;
 pub mod game;
 pub mod library;
-pub mod log;
 // Public only for the other crate's tests, which use `os::testing`. Everything
 // else in it is `pub(crate)`.
 pub mod os;

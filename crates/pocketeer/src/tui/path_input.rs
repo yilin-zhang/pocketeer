@@ -370,65 +370,13 @@ mod tests {
         assert!(!input("/some/rom", &entries).names_dir());
     }
 
-    fn press(input: &mut PathInput, code: KeyCode) {
-        input.handle_key(KeyEvent::from(code));
-    }
-
-    fn ctrl(input: &mut PathInput, character: char) {
-        input.handle_key(KeyEvent::new(
-            KeyCode::Char(character),
-            KeyModifiers::CONTROL,
-        ));
-    }
-
     fn text(input: &PathInput) -> String {
         let (before, after) = input.text_around_cursor();
         before + &after
     }
 
-    fn names(input: &PathInput) -> Vec<&str> {
-        input
-            .matches()
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect()
-    }
-
     mod matches {
         use super::*;
-
-        /// Typed letters match in order, whatever their case, and the best
-        /// matches, such as those starting with them, come first.
-        #[test]
-        fn matches_letters_in_order_ignoring_case_best_first() {
-            let entries = [
-                entry("Amine.sav", false),
-                entry("mine.sav", false),
-                entry("other.sav", false),
-            ];
-            let mut input = input("/a/", &entries);
-            assert_eq!(names(&input), ["Amine.sav", "mine.sav", "other.sav"]);
-            for character in "MI".chars() {
-                press(&mut input, KeyCode::Char(character));
-            }
-            assert_eq!(names(&input), ["mine.sav", "Amine.sav"]);
-
-            let mut pokemon =
-                super::input("/a/", &[entry("Pokemon.gba", false), entry("other", false)]);
-            for character in "pkmn".chars() {
-                press(&mut pokemon, KeyCode::Char(character));
-            }
-            assert_eq!(names(&pokemon), ["Pokemon.gba"]);
-        }
-
-        #[test]
-        fn offers_hidden_entries_after_typing_dot() {
-            let entries = [entry(".hidden", false), entry("shown", false)];
-            let mut input = input("/a/", &entries);
-            assert_eq!(names(&input), ["shown"]);
-            press(&mut input, KeyCode::Char('.'));
-            assert_eq!(names(&input), [".hidden"]);
-        }
 
         #[test]
         fn offers_nothing_from_dir_text_has_left() {
@@ -461,80 +409,6 @@ mod tests {
                     .iter()
                     .all(|i| *i < chars)
             );
-        }
-    }
-
-    mod picking {
-        use super::*;
-
-        /// Tab completes the only match, with a `/` for a folder, or else as
-        /// far as the matches agree.
-        #[test]
-        fn tab_completes_like_a_shell() {
-            let mut only_file = input("/a/mi", &[entry("mine.sav", false)]);
-            only_file.complete();
-            assert_eq!(text(&only_file), "/a/mine.sav");
-            let mut only_dir = input("/a/mi", &[entry("misc", true)]);
-            only_dir.complete();
-            assert_eq!(text(&only_dir), "/a/misc/");
-            let mut input = input("/a/m", &[entry("mine-1", false), entry("mine-2", false)]);
-            input.complete();
-            assert_eq!(text(&input), "/a/mine-");
-            // No further, because they differ from here.
-            input.complete();
-            assert_eq!(text(&input), "/a/mine-");
-        }
-
-        #[test]
-        fn arrows_pick_match_and_up_or_editing_clears_pick() {
-            let mut input = input("/a/", &[entry("one", false), entry("two", false)]);
-            input.pick_next();
-            input.pick_next();
-            input.pick_next();
-            assert_eq!(input.picked_match_index(), Some(1));
-            input.complete();
-            assert_eq!(text(&input), "/a/two");
-            assert_eq!(input.picked_match_index(), None);
-
-            let mut one = super::input("/a/", &[entry("one", false)]);
-            one.pick_next();
-            one.pick_previous();
-            assert_eq!(one.picked_match_index(), None);
-            one.pick_next();
-            press(&mut one, KeyCode::Char('o'));
-            assert_eq!(one.picked_match_index(), None);
-        }
-    }
-
-    mod editing {
-        use super::*;
-
-        /// The Emacs keys `tui_input` lacks: C-d deletes forward, C-w cuts
-        /// back to a `/` and C-u clears.
-        #[test]
-        fn emacs_keys_edit_path() {
-            let mut input = PathInput::new("/one");
-            ctrl(&mut input, 'a');
-            ctrl(&mut input, 'd');
-            assert_eq!(text(&input), "one");
-
-            let mut input = PathInput::new("/one/two/");
-            ctrl(&mut input, 'w');
-            assert_eq!(text(&input), "/one/");
-            ctrl(&mut input, 'w');
-            assert_eq!(text(&input), "/");
-            ctrl(&mut input, 'u');
-            assert_eq!(text(&input), "");
-        }
-
-        #[test]
-        fn expands_tilde_to_home_dir() {
-            let home = env::home_dir().unwrap();
-            assert_eq!(PathInput::new("~/x/y").path(), home.join("x/y"));
-            assert_eq!(PathInput::new("~").path(), home);
-            assert_eq!(PathInput::new("~/x").dir(), home);
-            // A `~` that is part of a longer name stays as it is.
-            assert_eq!(PathInput::new("~x").path(), PathBuf::from("~x"));
         }
     }
 

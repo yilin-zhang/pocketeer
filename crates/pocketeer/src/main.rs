@@ -4,9 +4,9 @@ mod display;
 mod tui;
 
 use std::{
+    collections::HashSet,
     fmt,
     io::{self, IsTerminal},
-    ops::ControlFlow,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -18,11 +18,10 @@ use clap::{
 use pocketeer_core::{
     Pocketeer,
     cores::{BiosStatus, CoreRow, RemoteCore},
-    device::{Device, DeviceEntry},
-    library::{LibrarySave, LocalEntry, OpenLibraryError},
-    log::{FrontEnd, LogEntry},
+    device::{Device, DeviceEntry, DeviceKey},
+    library::{LibraryKey, LocalEntry, OpenLibraryError},
     platform::Platform,
-    pocketeer::BatchResult,
+    pocketeer::{self, Report},
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -48,7 +47,7 @@ use crate::display::ByteCountExt;
 /// also has `"duplicates"`, the second copies of games on the device, which are
 /// left out. A malformed command prints text to stderr and nothing to stdout,
 /// and exits with 2. A command over several things has in `data` one entry per
-/// thing, each with its own `ok` and `message`.
+/// thing, with its `subject`, `ok` and `message`.
 ///
 /// With no command it opens the terminal UI.
 #[derive(Parser)]
@@ -574,7 +573,7 @@ struct CliSession {
     pocketeer: Pocketeer,
     format: PrintFormat,
     /// What the command has done so far, to report at the end.
-    entries: Vec<LogEntry>,
+    reports: Vec<Report>,
     /// The copies the scan of the device left out.
     duplicates: Vec<DeviceEntry>,
 }
@@ -583,7 +582,7 @@ impl CliSession {
     /// The library, and the device given or the one mounted as `device_use`
     /// says.
     fn open(cli: &Cli, device_use: DeviceUse, format: PrintFormat) -> CliResult<Self> {
-        let mut pocketeer = Pocketeer::open(&library_path(cli)?, FrontEnd::Cli)?;
+        let mut pocketeer = Pocketeer::open(&library_path(cli)?)?;
         let mut duplicates = Vec::new();
         if !matches!(device_use, DeviceUse::NotNeeded) {
             let opened = match &cli.device {
@@ -604,7 +603,7 @@ impl CliSession {
         let session = Self {
             pocketeer,
             format,
-            entries: Vec::new(),
+            reports: Vec::new(),
             duplicates,
         };
         for duplicate in &session.duplicates {
@@ -797,33 +796,38 @@ impl CliSession {
 
     fn pull_games(&mut self, game_args: &[String], use_standard_names: bool) -> CliResult<()> {
         let games = match game_args {
-            [] => self.pocketeer.games_only_on_device(),
-            game_args => self.entries_on_device(game_args)?,
+            [] => self
+                .pocketeer
+                .games_only_on_device()
+                .iter()
+                .map(DeviceEntry::key)
+                .collect(),
+            game_args => self.keys_on_device(game_args)?,
         };
-        self.run_batch(|pocketeer, on_logged| {
-            let (batch_result, pulled_entries) = pocketeer.pull_games(&games, &mut *on_logged);
-            let control_flow = batch_result?;
-            if use_standard_names && control_flow.is_continue() {
-                let renames = pocketeer.renames_to_dat_names(&pulled_entries);
-                pocketeer.rename_games_in_library(&renames, on_logged)
-            } else {
-                Ok(control_flow)
-            }
-        })
+        let pulls: Vec<_> = games
+            .into_iter()
+            .map(pocketeer::Command::PullGame)
+            .collect();
+        self.add_to_library(&pulls, use_standard_names)
     }
 
     fn pull_saves(&mut self, game_args: &[String]) -> CliResult<()> {
         let games = match game_args {
             [] => self.games_with_saves_to_pull(),
-            game_args => self.entries_on_device(game_args)?,
+            game_args => self.keys_on_device(game_args)?,
         };
-        self.run_batch(|pocketeer, on_logged| pocketeer.pull_saves(&games, on_logged))
+        self.run_commands(
+            &games
+                .into_iter()
+                .map(pocketeer::Command::PullSave)
+                .collect::<Vec<_>>(),
+        )
     }
 
     /// The games on the device that the library has. Nobody asked for the
     /// others by name, so they aren't failures, but saves only they have are
     /// reported.
-    fn games_with_saves_to_pull(&self) -> Vec<DeviceEntry> {
+    fn games_with_saves_to_pull(&self) -> Vec<DeviceKey> {
         let others = self.pocketeer.games_only_on_device();
         let unsaved: Vec<String> = others
             .iter()
@@ -840,18 +844,22 @@ impl CliSession {
     }
 
     fn push_games(&mut self, game_args: &[String]) -> CliResult<()> {
-        let games = self.entries_in_library(game_args)?;
-        self.run_batch(|pocketeer, on_logged| pocketeer.push_games(&games, on_logged).0)
+        let games = self.keys_in_library(game_args)?;
+        self.run_commands(
+            &games
+                .into_iter()
+                .map(pocketeer::Command::PushGame)
+                .collect::<Vec<_>>(),
+        )
     }
 
     fn push_save(&mut self, game_arg: &str, version_name: &str) -> CliResult<()> {
         let local_entry = self.local_entry(game_arg)?;
-        let version = version_named(game_arg, local_entry, version_name)?;
+        check_version(game_arg, local_entry, version_name)?;
         let device = self.pocketeer.device().expect("the device is open");
-        let copy = device.entry_for(&local_entry.game).cloned();
+        let copy = device.entry_for(&local_entry.game).map(DeviceEntry::key);
         let copy = copy.ok_or_else(|| not_on_device(game_arg))?;
-        let versions = [(copy, version)];
-        self.run_batch(|pocketeer, on_logged| pocketeer.push_save_versions(&versions, on_logged))
+        self.run_commands(&[pocketeer::Command::PushSave(copy, version_name.to_string())])
     }
 
     fn import_games(
@@ -861,11 +869,11 @@ impl CliSession {
         use_standard_names: bool,
     ) -> CliResult<()> {
         // Every file needs a platform before any is imported.
-        let files = pocketeer_core::pocketeer::expand_import_paths(paths)?
+        let imports = pocketeer_core::pocketeer::expand_import_paths(paths)?
             .into_iter()
             .map(
                 |(file, by_extension)| match platform.cloned().or(by_extension) {
-                    Some(platform) => Ok((file, platform)),
+                    Some(platform) => Ok(pocketeer::Command::ImportGame(file, platform)),
                     None => Err(CliError::CouldNotStart(format!(
                         "{}: can't tell which platform it is for; give --platform",
                         file.display()
@@ -873,124 +881,166 @@ impl CliSession {
                 },
             )
             .collect::<CliResult<Vec<_>>>()?;
-        self.run_batch(|pocketeer, on_logged| {
-            let (batch_result, imported_entries) = pocketeer.import_games(&files, &mut *on_logged);
-            let control_flow = batch_result?;
-            if use_standard_names && control_flow.is_continue() {
-                let renames = pocketeer.renames_to_dat_names(&imported_entries);
-                pocketeer.rename_games_in_library(&renames, on_logged)
-            } else {
-                Ok(control_flow)
-            }
-        })
+        self.add_to_library(&imports, use_standard_names)
+    }
+
+    /// Runs `commands`, which add games to the library. With
+    /// `use_standard_names`, the games they add are then renamed to their DAT
+    /// names.
+    fn add_to_library(
+        &mut self,
+        commands: &[pocketeer::Command],
+        use_standard_names: bool,
+    ) -> CliResult<()> {
+        let before: HashSet<LibraryKey> = self.library_keys().collect();
+        for command in commands {
+            self.run_one(command);
+        }
+        let added: Vec<_> = self
+            .library_keys()
+            .filter(|key| !before.contains(key))
+            .collect();
+        let renames = match use_standard_names {
+            true => self.pocketeer.renames_to_dat_names(&added),
+            false => Vec::new(),
+        };
+        let renames: Vec<_> = renames
+            .into_iter()
+            .map(|(key, name)| pocketeer::Command::RenameInLibrary(key, name))
+            .collect();
+        self.run_commands(&renames)
+    }
+
+    fn library_keys(&self) -> impl Iterator<Item = LibraryKey> + use<'_> {
+        self.pocketeer
+            .library()
+            .entries()
+            .iter()
+            .map(LocalEntry::key)
     }
 
     fn import_save(&mut self, game: &str, file: &Path) -> CliResult<()> {
-        let saves = [(self.local_entry(game)?.clone(), file.to_path_buf())];
-        self.run_batch(|pocketeer, on_logged| pocketeer.import_saves(&saves, on_logged))
+        let key = self.local_entry(game)?.key();
+        self.run_commands(&[pocketeer::Command::ImportSave(key, file.to_path_buf())])
     }
 
     fn import_cover(&mut self, game: &str, image: &Path) -> CliResult<()> {
-        let covers = [(self.local_entry(game)?.clone(), image.to_path_buf())];
-        self.run_batch(|pocketeer, on_logged| pocketeer.import_covers(&covers, on_logged))
+        let key = self.local_entry(game)?.key();
+        self.run_commands(&[pocketeer::Command::ImportCover(key, image.to_path_buf())])
     }
 
     fn trash_games(&mut self, game_args: &[String]) -> CliResult<()> {
-        let games = self.entries_in_library(game_args)?;
-        self.run_batch(|pocketeer, on_logged| pocketeer.trash_games_in_library(&games, on_logged))
+        let games = self.keys_in_library(game_args)?;
+        self.run_commands(
+            &games
+                .into_iter()
+                .map(pocketeer::Command::TrashGame)
+                .collect::<Vec<_>>(),
+        )
     }
 
     fn trash_saves(&mut self, game_args: &[String], at: Option<&str>) -> CliResult<()> {
-        let games = self.entries_in_library(game_args)?;
-        let Some(version_name) = at else {
-            return self.run_batch(|pocketeer, on_logged| {
-                pocketeer.trash_saves_in_library(&games, on_logged)
+        let mut trashes = Vec::new();
+        for game_arg in game_args {
+            let local_entry = self.local_entry(game_arg)?;
+            trashes.push(match at {
+                Some(version_name) => {
+                    check_version(game_arg, local_entry, version_name)?;
+                    pocketeer::Command::TrashSave(local_entry.key(), version_name.to_string())
+                }
+                None => pocketeer::Command::TrashSaves(local_entry.key()),
             });
-        };
-        let versions = game_args
-            .iter()
-            .zip(games)
-            .map(|(game_arg, game)| {
-                let version = version_named(game_arg, &game, version_name)?;
-                Ok((game, version))
-            })
-            .collect::<CliResult<Vec<(LocalEntry, LibrarySave)>>>()?;
-        self.run_batch(|pocketeer, on_logged| {
-            pocketeer.trash_save_versions_in_library(&versions, on_logged)
-        })
+        }
+        self.run_commands(&trashes)
     }
 
     fn trash_orphan_saves(&mut self, orphan_args: &[String]) -> CliResult<()> {
         let orphans = self.pocketeer.library().find_orphan_saves()?;
-        let orphans = pick_orphans(orphan_args, &orphans)?;
-        self.run_batch(|pocketeer, on_logged| {
-            pocketeer.trash_orphan_saves_in_library(&orphans, on_logged)
-        })
+        let trashes: Vec<_> = pick_orphans(orphan_args, &orphans)?
+            .into_iter()
+            .map(|orphan| pocketeer::Command::TrashOrphanSave(orphan.platform, orphan.stem))
+            .collect();
+        self.run_commands(&trashes)
     }
 
     fn delete_games(&mut self, game_args: &[String]) -> CliResult<()> {
-        let games = self.entries_on_device(game_args)?;
-        self.run_batch(|pocketeer, on_logged| pocketeer.delete_games_on_device(&games, on_logged))
+        let games = self.keys_on_device(game_args)?;
+        self.run_commands(
+            &games
+                .into_iter()
+                .map(pocketeer::Command::DeleteGame)
+                .collect::<Vec<_>>(),
+        )
     }
 
     fn delete_saves(&mut self, game_args: &[String]) -> CliResult<()> {
-        let games = self.entries_on_device(game_args)?;
-        self.run_batch(|pocketeer, on_logged| pocketeer.delete_saves_on_device(&games, on_logged))
+        let games = self.keys_on_device(game_args)?;
+        self.run_commands(
+            &games
+                .into_iter()
+                .map(pocketeer::Command::DeleteSave)
+                .collect::<Vec<_>>(),
+        )
     }
 
     fn delete_orphan_saves(&mut self, orphan_args: &[String]) -> CliResult<()> {
         let orphans = self.pocketeer.find_orphan_saves_on_device()?;
-        let orphans = pick_orphans(orphan_args, &orphans)?;
-        self.run_batch(|pocketeer, on_logged| {
-            pocketeer.delete_orphan_saves_on_device(&orphans, on_logged)
-        })
+        let deletes: Vec<_> = pick_orphans(orphan_args, &orphans)?
+            .into_iter()
+            .map(|orphan| pocketeer::Command::DeleteOrphanSave(orphan.platform, orphan.path))
+            .collect();
+        self.run_commands(&deletes)
     }
 
     fn fetch_covers(&mut self, game_args: &[String]) -> CliResult<()> {
         let games = match game_args {
             [] => self.pocketeer.games_without_covers(),
-            game_args => self.entries_in_library(game_args)?,
+            game_args => self.keys_in_library(game_args)?,
         };
-        self.run_batch(|pocketeer, on_logged| pocketeer.fetch_covers(&games, on_logged))
+        self.run_commands(
+            &games
+                .into_iter()
+                .map(pocketeer::Command::FetchCover)
+                .collect::<Vec<_>>(),
+        )
     }
 
-    /// Runs a command over games. As text each result prints as it happens,
-    /// because a device is slow and this shows progress. As JSON they all print
+    /// Runs `commands` one after another, then finishes the command line's
+    /// work: as text each result prints as it happens, because a device is
+    /// slow and this shows progress; as JSON every result made so far prints
     /// at the end.
-    fn run_batch(
-        &mut self,
-        run: impl FnOnce(
-            &mut Pocketeer,
-            &mut dyn FnMut(&Pocketeer, LogEntry) -> ControlFlow<()>,
-        ) -> BatchResult,
-    ) -> CliResult<()> {
-        let (format, entries) = (self.format, &mut self.entries);
-        let batch_result = run(&mut self.pocketeer, &mut |_, entry| {
-            if matches!(format, PrintFormat::Text) {
-                println!("{}", entry.report.to_line());
-            }
-            entries.push(entry);
-            ControlFlow::Continue(())
-        });
-        self.finish_batch(batch_result)
-    }
-
-    /// Finishes a command over games. `batch_result` says whether it stopped
-    /// early.
-    fn finish_batch(&self, batch_result: BatchResult) -> CliResult<()> {
-        if let Err(error) = &batch_result {
+    fn run_commands(&mut self, commands: &[pocketeer::Command]) -> CliResult<()> {
+        for command in commands {
+            self.run_one(command);
+        }
+        let settled = self.pocketeer.settle();
+        if let Err(error) = &settled {
             eprintln!("error: {error}");
         }
-        let ok = batch_result.is_ok() && self.entries.iter().all(|error| error.report.is_ok);
+        let ok = settled.is_ok() && self.reports.iter().all(|report| report.ok);
         if matches!(self.format, PrintFormat::Json) {
-            let lines: Vec<Value> = self.entries.iter().map(LogEntry::to_json).collect();
-            print_json(ok, json!(lines));
+            let reports: Vec<Value> = self
+                .reports
+                .iter()
+                .map(|report| {
+                    json!({"subject": report.subject, "ok": report.ok, "message": report.message})
+                })
+                .collect();
+            print_json(ok, json!(reports));
         }
         if ok {
             Ok(())
         } else {
             Err(CliError::SomeFailed)
         }
+    }
+
+    fn run_one(&mut self, command: &pocketeer::Command) {
+        let report = self.pocketeer.run(command);
+        if matches!(self.format, PrintFormat::Text) {
+            println!("{}", report.to_line());
+        }
+        self.reports.push(report);
     }
 
     fn print_cores(&mut self) -> CliResult<()> {
@@ -1063,7 +1113,7 @@ impl CliSession {
                 format!("{id}: not a core that can be installed, as `pocketeer cores list` shows");
             return Err(CliError::CouldNotStart(message));
         }
-        self.run_batch(|pocketeer, on_logged| pocketeer.install_cores(core_ids, on_logged))
+        self.run_commands(&core_commands(core_ids, pocketeer::Command::InstallCore))
     }
 
     fn update_cores(&mut self, core_ids: &[String]) -> CliResult<()> {
@@ -1077,12 +1127,12 @@ impl CliSession {
         if core_ids.is_empty() && matches!(self.format, PrintFormat::Text) {
             println!("every core is up to date");
         }
-        self.run_batch(|pocketeer, on_logged| pocketeer.install_cores(&core_ids, on_logged))
+        self.run_commands(&core_commands(&core_ids, pocketeer::Command::InstallCore))
     }
 
     fn remove_cores(&mut self, core_ids: &[String]) -> CliResult<()> {
         self.ensure_cores_on_device(core_ids)?;
-        self.run_batch(|pocketeer, on_logged| pocketeer.remove_cores(core_ids, on_logged))
+        self.run_commands(&core_commands(core_ids, pocketeer::Command::RemoveCore))
     }
 
     /// Refuses cores the device doesn't have.
@@ -1099,28 +1149,29 @@ impl CliSession {
     }
 
     fn rename_game_in_library(&mut self, game: &str, name: &str) -> CliResult<()> {
-        let games = [(self.local_entry(game)?.clone(), name.to_string())];
-        self.run_batch(|pocketeer, on_logged| pocketeer.rename_games_in_library(&games, on_logged))
+        let key = self.local_entry(game)?.key();
+        self.run_commands(&[pocketeer::Command::RenameInLibrary(key, name.to_string())])
     }
 
     fn rename_games_to_dat_names(&mut self, game_args: &[String]) -> CliResult<()> {
         let games = match game_args {
-            [] => self.pocketeer.library().entries().to_vec(),
-            game_args => self.entries_in_library(game_args)?,
+            [] => self.library_keys().collect(),
+            game_args => self.keys_in_library(game_args)?,
         };
         let renames = self.pocketeer.renames_to_dat_names(&games);
         if renames.is_empty() && matches!(self.format, PrintFormat::Text) {
             println!("no game to rename");
         }
-        self.run_batch(|pocketeer, on_logged| {
-            pocketeer.rename_games_in_library(&renames, on_logged)
-        })
+        let renames: Vec<_> = renames
+            .into_iter()
+            .map(|(key, name)| pocketeer::Command::RenameInLibrary(key, name))
+            .collect();
+        self.run_commands(&renames)
     }
 
     fn rename_game_on_device(&mut self, game: &str, name: &str) -> CliResult<()> {
-        let device_entry = self.entries_on_device(&[game.to_string()])?.remove(0);
-        let games = [(device_entry, name.to_string())];
-        self.run_batch(|pocketeer, on_logged| pocketeer.rename_games_on_device(&games, on_logged))
+        let key = self.keys_on_device(&[game.to_string()])?.remove(0);
+        self.run_commands(&[pocketeer::Command::RenameOnDevice(key, name.to_string())])
     }
 
     fn print_status(&self) -> CliResult<()> {
@@ -1235,13 +1286,15 @@ impl CliSession {
                 format!("{file}: no core on the device loads it, as `pocketeer bios list` shows");
             return Err(CliError::CouldNotStart(message));
         };
-        let files = [(row, from.to_path_buf())];
-        self.run_batch(|pocketeer, on_logged| pocketeer.put_bios_files(&files, on_logged))
+        let key = DeviceKey {
+            platform: row.platform,
+            path: row.path,
+        };
+        self.run_commands(&[pocketeer::Command::PutBios(key, from.to_path_buf())])
     }
 
     fn eject(&mut self) -> CliResult<()> {
-        // What happened is printed below, in more detail than the log entry.
-        let root = self.pocketeer.eject_device(|_, _| {})?;
+        let root = self.pocketeer.eject_device()?;
         match self.format {
             PrintFormat::Json => {
                 print_json(true, json!({ "ejected": root.display().to_string() }));
@@ -1252,8 +1305,7 @@ impl CliSession {
     }
 
     fn sync_dats(&mut self) -> CliResult<()> {
-        // What happened is printed below, in more detail than the log entry.
-        let report = self.pocketeer.sync_dats(|_, _| {})?;
+        let report = self.pocketeer.sync_dats()?;
         let platform_ids = |platforms: &[Platform]| {
             platforms
                 .iter()
@@ -1281,7 +1333,7 @@ impl CliSession {
 
     /// The device's games named in `game_args`. A copy the scan left out is
     /// refused, so that nothing meant for one file happens to another.
-    fn entries_on_device(&self, game_args: &[String]) -> CliResult<Vec<DeviceEntry>> {
+    fn keys_on_device(&self, game_args: &[String]) -> CliResult<Vec<DeviceKey>> {
         let device = self.pocketeer.device().expect("the device is open");
         game_args
             .iter()
@@ -1296,15 +1348,17 @@ impl CliSession {
                     return Err(CliError::CouldNotStart(message));
                 }
                 let found = device.entry_at(&platform, path);
-                found.cloned().ok_or_else(|| not_on_device(game_arg))
+                found
+                    .map(DeviceEntry::key)
+                    .ok_or_else(|| not_on_device(game_arg))
             })
             .collect()
     }
 
-    fn entries_in_library(&self, game_args: &[String]) -> CliResult<Vec<LocalEntry>> {
+    fn keys_in_library(&self, game_args: &[String]) -> CliResult<Vec<LibraryKey>> {
         game_args
             .iter()
-            .map(|game_arg| self.local_entry(game_arg).cloned())
+            .map(|game_arg| Ok(self.local_entry(game_arg)?.key()))
             .collect()
     }
 
@@ -1322,18 +1376,23 @@ fn not_on_device(game_arg: &str) -> CliError {
     CliError::CouldNotStart(format!("{game_arg}: not on the device"))
 }
 
-/// The version of `local_entry`'s save called `version_name`, as `saves` shows it.
-fn version_named(
-    game_arg: &str,
-    local_entry: &LocalEntry,
-    version_name: &str,
-) -> CliResult<LibrarySave> {
+/// Refuses a version of `local_entry`'s save other than those `saves` shows.
+fn check_version(game_arg: &str, local_entry: &LocalEntry, version_name: &str) -> CliResult<()> {
     let saves = local_entry.save.as_ref();
-    let version = saves.and_then(|saves| saves.version_named(version_name));
-    version.cloned().ok_or_else(|| {
-        let message = format!("{game_arg}: no such version, as `pocketeer saves` shows them");
-        CliError::CouldNotStart(message)
-    })
+    match saves.and_then(|saves| saves.version_named(version_name)) {
+        Some(_) => Ok(()),
+        None => Err(CliError::CouldNotStart(format!(
+            "{game_arg}: no such version, as `pocketeer saves` shows them"
+        ))),
+    }
+}
+
+/// A command for each core in `ids`.
+fn core_commands(
+    ids: &[String],
+    command: fn(String) -> pocketeer::Command,
+) -> Vec<pocketeer::Command> {
+    ids.iter().cloned().map(command).collect()
 }
 
 /// The orphan saves named in `orphan_args`, as `pocketeer orphan-saves` shows them.

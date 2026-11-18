@@ -212,8 +212,7 @@ impl BiosRow {
     }
 }
 
-/// As `<platform>/<path>`, the way the command line, the log and messages
-/// name it.
+/// As `<platform>/<path>`, the way the command line and messages name it.
 impl fmt::Display for BiosRow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.platform.id(), self.path.display())

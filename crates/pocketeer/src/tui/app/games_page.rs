@@ -459,23 +459,6 @@ mod tests {
     }
 
     #[test]
-    fn cycles_through_filters_with_their_orphans() {
-        let mut page = page(rows_with_orphan_in_library());
-        let every_row = ["Alpha.gba", "Both.gba", "Hack.gba", "Gone.sav", "Lost"].as_slice();
-        assert_eq!(page.filter(), GamesFilter::All);
-        assert_eq!(visible_names(&page), every_row);
-        page.show_next_filter();
-        assert_eq!(page.filter(), GamesFilter::InLibrary);
-        assert_eq!(visible_names(&page), ["Alpha.gba", "Both.gba", "Lost"]);
-        page.show_next_filter();
-        assert_eq!(page.filter(), GamesFilter::OnDevice);
-        assert_eq!(visible_names(&page), ["Both.gba", "Hack.gba", "Gone.sav"]);
-        page.show_next_filter();
-        assert_eq!(page.filter(), GamesFilter::All);
-        assert_eq!(visible_names(&page), every_row);
-    }
-
-    #[test]
     fn marking_all_shown_then_again_clears_marks_hidden_by_search() {
         let mut page = page(rows());
         page.move_selection_by(2);

@@ -20,6 +20,20 @@ use crate::{
     platform::Platform,
 };
 
+/// A file on the device, by where it is under `Assets/<platform>/common/`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DeviceKey {
+    pub platform: Platform,
+    pub path: PathBuf,
+}
+
+/// As `<platform>/<path>`, the way the command line and messages name it.
+impl fmt::Display for DeviceKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.platform.id(), self.path.display())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceEntry {
     /// Its path under `Assets/<platform>/common/`, e.g. `RPG/Pokemon.gba`. Its
@@ -31,13 +45,19 @@ pub struct DeviceEntry {
 }
 
 impl DeviceEntry {
+    pub fn key(&self) -> DeviceKey {
+        DeviceKey {
+            platform: self.game.platform.clone(),
+            path: self.path.clone(),
+        }
+    }
+
     fn is_at(&self, platform: &Platform, path: &Path) -> bool {
         &self.game.platform == platform && self.path == path
     }
 }
 
-/// As `<platform>/<path>`, the way the command line, the log and messages
-/// name it.
+/// As `<platform>/<path>`, the way the command line and messages name it.
 impl fmt::Display for DeviceEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.game.platform.id(), self.path.display())
@@ -172,8 +192,7 @@ pub struct OrphanDeviceSave {
     pub save: Save,
 }
 
-/// As `<platform>/<path>`, the way the command line, the log and messages
-/// name it.
+/// As `<platform>/<path>`, the way the command line and messages name it.
 impl fmt::Display for OrphanDeviceSave {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.platform.id(), self.path.display())
@@ -363,22 +382,21 @@ impl Device {
         Ok(removed)
     }
 
-    /// Deletes `orphan` for good if it is still an orphan, since a game may
-    /// have been put at its path.
+    /// Deletes the orphan save of `platform` at `path` under
+    /// `Saves/<platform>/common/` for good, if it is still an orphan, since a
+    /// game may have been put at its path.
     pub(crate) fn remove_orphan_save(
         &self,
-        orphan: &OrphanDeviceSave,
+        platform: &Platform,
+        path: &Path,
     ) -> Result<(), DeleteOrphanSaveError> {
         let is_it = |candidate: &OrphanDeviceSave| {
-            candidate.platform == orphan.platform && candidate.path == orphan.path
+            &candidate.platform == platform && candidate.path == path
         };
         if !self.find_orphan_saves()?.iter().any(is_it) {
             return Err(DeleteOrphanSaveError::NoOrphanSave);
         }
-        let path = self
-            .layout
-            .saves_common(&orphan.platform)
-            .join(&orphan.path);
+        let path = self.layout.saves_common(platform).join(path);
         fs::remove_file(&path).map_err(BasicError::from)?;
         Ok(())
     }
@@ -974,12 +992,14 @@ mod tests {
         // A game put back at its path since takes the save, so it stays.
         let game = put(root, "Assets/gba/common/One.gba", b"hello");
         assert!(matches!(
-            device.remove_orphan_save(&orphans[0]),
+            device.remove_orphan_save(&orphans[0].platform, &orphans[0].path),
             Err(DeleteOrphanSaveError::NoOrphanSave)
         ));
         assert!(one_save.exists());
         fs::remove_file(game).unwrap();
-        device.remove_orphan_save(&orphans[0]).unwrap();
+        device
+            .remove_orphan_save(&orphans[0].platform, &orphans[0].path)
+            .unwrap();
         assert!(!one_save.exists());
         // A game's save is deleted once.
         assert!(matches!(
